@@ -2,18 +2,18 @@
 
 An autonomous software engineering framework connecting Large Language Models (LLMs) to financial paper trading sandbox APIs via deterministic tool calling, quantitative safety boundaries, and full audit logging.
 
-##The Problem
+## The Problem
 The Human Retail Problem	The AI Problem
 Many retail day-traders lose money due to emotional trading and lack of systematic risk management.	LLMs are generative and probabilistic: they hallucinate numbers, miscalculate portfolio math, and suffer catastrophic errors if allowed to trade unchecked.
 Real-time market data is overwhelming; retail investors lack the tools to track indicators, news, and positions simultaneously.	No existing consumer tool bridges natural-language reasoning with zero-trust safety checks.
 
-##The Vision
+## The Vision
 Democratized, Autonomous, & Transparent Wealth Intelligence
 Long-Term Vision: A fully self-driving, personal hedge fund engine for everyday individuals.
 Multimodal: An autonomous agent that reads earnings call transcripts, and live price action simultaneously.  
 Explainable AI : Every single transaction is fully transparent giving everyday people the institutional-grade risk discipline.
 
-##Architecture: Three Layers
+## Architecture: Three Layers
 
 Layer 1 — Context
 Real 5-minute price bars
