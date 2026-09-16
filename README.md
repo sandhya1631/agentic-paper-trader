@@ -25,7 +25,7 @@ Emits structured JSON tool calls (place_order, hold)
 
 Layer 3 — Deterministic Execution & Safety Boundary
 Code-level validation: rejects any order that violates capital caps (max 10% of portfolio) or trading hours
-Dispatches approved orders to the Alpaca Trading API
+Dispatches approved orders to the Trading API
 
 ## Core Features
 - Deterministic Technical Analysis: Computes SMA and RSI using pure Python mathematical routines.
