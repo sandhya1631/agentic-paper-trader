@@ -52,14 +52,37 @@ npm run start          # serves the build on http://localhost:3000
 npm run lint
 ```
 
+## 5. Test
+
+The API client is covered by unit tests (Vitest):
+
+```bash
+npm test            # run once
+npm run test:watch  # watch mode
+```
+
+## Environment configuration
+
+The API client reads the backend base URL from `NEXT_PUBLIC_API_BASE_URL`
+(defaults to `http://localhost:8000`). To override it, copy the example file:
+
+```bash
+cp .env.example .env.local   # then edit NEXT_PUBLIC_API_BASE_URL
+```
+
+`.env.local` is git-ignored; `.env.example` is committed as the template.
+
 ## Available scripts
 
-| Command         | Description                                  |
-| --------------- | -------------------------------------------- |
-| `npm run dev`   | Start the development server (hot reload).   |
-| `npm run build` | Create an optimized production build.        |
-| `npm run start` | Serve the production build (run build first).|
-| `npm run lint`  | Run ESLint (Next.js config).                 |
+| Command              | Description                                   |
+| -------------------- | --------------------------------------------- |
+| `npm run dev`        | Start the development server (hot reload).    |
+| `npm run build`      | Create an optimized production build.         |
+| `npm run start`      | Serve the production build (run build first). |
+| `npm run lint`       | Run ESLint (Next.js config).                  |
+| `npm run typecheck`  | Type-check with `tsc --noEmit`.               |
+| `npm test`           | Run the unit test suite (Vitest).             |
+| `npm run test:watch` | Run tests in watch mode.                       |
 
 ## Project structure
 
@@ -79,15 +102,53 @@ frontend/
 │  │  ├─ page-placeholder.tsx
 │  │  └─ icons.tsx           # Inline SVG icon set
 │  └─ lib/
-│     └─ nav.ts              # Shared navigation config
+│     ├─ nav.ts              # Shared navigation config
+│     ├─ api/
+│     │  ├─ client.ts        # Centralized fetch client + auth interceptors (#16)
+│     │  ├─ config.ts        # API base URL from env
+│     │  ├─ errors.ts        # ApiError
+│     │  ├─ index.ts         # Public API surface (@/lib/api)
+│     │  └─ client.test.ts   # Vitest: Bearer injection + 401 handling
+│     └─ auth/
+│        ├─ token-store.ts   # JWT token get/set/clear (localStorage-backed)
+│        ├─ token-store.test.ts
+│        ├─ auth-api.ts      # login / register / logout seam for #18
+│        └─ auth-api.test.ts
+├─ .env.example
 ├─ next.config.ts
 ├─ package.json
-└─ tsconfig.json
+├─ tsconfig.json
+└─ vitest.config.ts
 ```
+
+## API client (Story 0.1.2, #16)
+
+`src/lib/api` provides a centralized fetch client with auth interceptors:
+
+- **Request interceptor** — automatically attaches `Authorization: Bearer <token>`
+  when a token is present (unless `skipAuth` is set).
+- **Response interceptor** — global 401 handling: clears the stored token and
+  notifies a registered handler (or emits a `window` `auth:unauthorized` event).
+  A 401 from a `skipAuth` request (e.g. a failed login) is treated as a
+  credentials error, so it does **not** clear the session or fire the handler.
+
+```ts
+import { api, login, logout, setUnauthorizedHandler } from "@/lib/api";
+
+// Auth seam wired to the login UI in #18:
+await login({ username, password }); // POSTs /auth/login, stores the JWT
+const portfolio = await api.get("/portfolio"); // Bearer token attached
+await api.post("/orders", { symbol: "AAPL", qty: 1 });
+logout(); // clears the token
+
+// Wire a global redirect on 401 once the login route exists:
+setUnauthorizedHandler(() => { /* router.push("/login") */ });
+```
+
+> Endpoint paths and payload shapes in `auth-api.ts` are provisional and will be
+> confirmed alongside the backend auth work in #18.
 
 ## Notes
 
-- No `.env` is required for this scaffold. Environment configuration (API base
-  URL, auth) is introduced with the API client in Story 0.1.2 ([#16](https://github.com/sandhya1631/agentic-paper-trader/issues/16)).
-- `node_modules/` and `.next/` are git-ignored via the repository root
-  `.gitignore`.
+- `node_modules/`, `.next/`, and `.env*` (except `.env.example`) are git-ignored
+  via the repository root `.gitignore`.
