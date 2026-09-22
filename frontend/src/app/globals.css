@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+/*
+ * Base design system for the Agentic Paper Trader operator console.
+ * Semantic tokens are declared as CSS variables (theme-aware) and mapped
+ * into Tailwind utilities via `@theme inline`, so `bg-surface`,
+ * `text-muted`, `border-border`, `text-positive`, etc. follow the theme.
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
+  --color-positive: var(--positive);
+  --color-negative: var(--negative);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+:root {
+  --background: #f7f8fa;
+  --surface: #ffffff;
+  --surface-muted: #f1f3f5;
+  --foreground: #101828;
+  --muted: #667085;
+  --border: #e4e7ec;
+  --brand: #2563eb;
+  --brand-foreground: #ffffff;
+  --positive: #16a34a;
+  --negative: #dc2626;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0b0f17;
+    --surface: #111827;
+    --surface-muted: #0f1623;
+    --foreground: #e6e8ec;
+    --muted: #98a2b3;
+    --border: #1f2937;
+    --brand: #3b82f6;
+    --brand-foreground: #ffffff;
+    --positive: #22c55e;
+    --negative: #ef4444;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+}
