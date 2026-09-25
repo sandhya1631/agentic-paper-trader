@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     )
     database_echo: bool = False
 
+    # AuthSecurity (JWT) — dev-only default; override via .env for anything real.
+    jwt_secret: str = "dev-only-insecure-secret-change-me"
+    jwt_algorithm: str = "HS256"
+    jwt_issuer: str = "agentic-paper-trader"
+    jwt_expiration_minutes: int = 30
+
 
 @lru_cache
 def get_settings() -> Settings:

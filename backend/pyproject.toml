@@ -10,6 +10,9 @@ dependencies = [
     "asyncpg>=0.30",
     "pydantic-settings>=2.6",
     "python-dotenv>=1.0",
+    "pyjwt>=2.9",
+    "bcrypt>=4.2",
+    "email-validator>=2.2",
 ]
 
 [project.optional-dependencies]
@@ -28,3 +31,5 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_test_loop_scope = "session"
+asyncio_default_fixture_loop_scope = "session"

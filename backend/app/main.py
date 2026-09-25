@@ -1,13 +1,28 @@
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.router import router as auth_router
 from app.core.config import get_settings
-from app.db.session import get_db
+from app.db import models  # noqa: F401  (registers ORM models on Base.metadata)
+from app.db.base import Base
+from app.db.session import engine, get_db
 
 settings = get_settings()
 
-app = FastAPI(title=settings.app_name)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # No migrations story yet (Alembic isn't set up) — create tables on startup for local dev.
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.include_router(auth_router)
 
 
 @app.get("/health")
