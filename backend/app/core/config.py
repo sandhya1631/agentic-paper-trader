@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     jwt_issuer: str = "agentic-paper-trader"
     jwt_expiration_minutes: int = 30
 
+    # Origins allowed to call this API from a browser (the Next.js frontend).
+    # Override via .env as a JSON array, e.g.: CORS_ALLOWED_ORIGINS=["http://localhost:3000"]
+    cors_allowed_origins: list[str] = ["http://localhost:3000"]
+
 
 @lru_cache
 def get_settings() -> Settings:
