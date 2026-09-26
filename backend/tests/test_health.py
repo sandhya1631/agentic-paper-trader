@@ -1,24 +1,18 @@
 import pytest
-from httpx import ASGITransport, AsyncClient
-
-from app.main import app
+from httpx import AsyncClient
 
 
 @pytest.mark.asyncio
-async def test_health() -> None:
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/health")
+async def test_health(client: AsyncClient) -> None:
+    response = await client.get("/health")
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
 
 
 @pytest.mark.asyncio
-async def test_health_db() -> None:
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/health/db")
+async def test_health_db(client: AsyncClient) -> None:
+    response = await client.get("/health/db")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "result": 1}
