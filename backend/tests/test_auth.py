@@ -50,3 +50,22 @@ async def test_invalid_token_is_rejected(client: AsyncClient) -> None:
         "/auth/me", headers={"Authorization": "Bearer not-a-real-token"}
     )
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_overlong_password(client: AsyncClient) -> None:
+    # >72 bytes would make bcrypt raise; it must be a clean validation error, not a 500.
+    email = f"test-{uuid.uuid4()}@example.com"
+    response = await client.post(
+        "/auth/register", json={"email": email, "password": "a" * 73}
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_too_short_password(client: AsyncClient) -> None:
+    email = f"test-{uuid.uuid4()}@example.com"
+    response = await client.post(
+        "/auth/register", json={"email": email, "password": "short"}
+    )
+    assert response.status_code == 422
