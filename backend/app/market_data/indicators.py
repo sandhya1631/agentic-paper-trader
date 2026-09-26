@@ -6,12 +6,16 @@ import pandas as pd
 def calculate_indicators(prices):
     """Calculate RSI-14, SMA-20, and SMA-50."""
 
-    # We need at least 50 prices to calculate SMA-50
     if len(prices) < 50:
         raise ValueError("At least 50 price values are required.")
 
-    # Check that every price is a valid number
+    validated_prices = []
+
     for price in prices:
+        # Booleans should not be accepted as prices
+        if isinstance(price, bool):
+            raise ValueError("Price values must be numbers, not booleans.")
+
         if price is None:
             raise ValueError("Price values cannot be None.")
 
@@ -23,25 +27,38 @@ def calculate_indicators(prices):
         if not math.isfinite(value):
             raise ValueError("All price values must be finite numbers.")
 
-    prices = pd.Series(prices, dtype=float)
+        validated_prices.append(value)
 
-    # Calculate SMA-20 and SMA-50
+    prices = pd.Series(validated_prices, dtype=float)
+
+    # SMA calculations
     sma_20 = prices.rolling(window=20).mean().iloc[-1]
     sma_50 = prices.rolling(window=50).mean().iloc[-1]
 
-    # Calculate RSI-14
-    difference = prices.diff()
-    gains = difference.clip(lower=0)
-    losses = -difference.clip(upper=0)
+    # RSI-14 using Wilder's smoothing
+    differences = prices.diff()
 
-    avg_gain = gains.rolling(window=14).mean().iloc[-1]
-    avg_loss = losses.rolling(window=14).mean().iloc[-1]
+    gains = differences.clip(lower=0)
+    losses = -differences.clip(upper=0)
 
-    # Handle flat prices
+    period = 14
+
+    # Initial averages
+    avg_gain = gains.iloc[1:period + 1].mean()
+    avg_loss = losses.iloc[1:period + 1].mean()
+
+    # Wilder's smoothing
+    for i in range(period + 1, len(prices)):
+        avg_gain = ((avg_gain * (period - 1)) + gains.iloc[i]) / period
+        avg_loss = ((avg_loss * (period - 1)) + losses.iloc[i]) / period
+
+    # Handle special cases
     if avg_gain == 0 and avg_loss == 0:
         rsi = 50.0
     elif avg_loss == 0:
         rsi = 100.0
+    elif avg_gain == 0:
+        rsi = 0.0
     else:
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
