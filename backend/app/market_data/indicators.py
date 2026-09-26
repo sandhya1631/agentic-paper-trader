@@ -1,7 +1,6 @@
 import math
 
 import pandas as pd
-import pandas_ta as ta
 
 
 def calculate_indicators(prices):
@@ -26,20 +25,29 @@ def calculate_indicators(prices):
 
     prices = pd.Series(prices, dtype=float)
 
-    rsi = ta.rsi(prices, length=14)
-    sma_20 = ta.sma(prices, length=20)
-    sma_50 = ta.sma(prices, length=50)
+    # Calculate SMA-20 and SMA-50
+    sma_20 = prices.rolling(window=20).mean().iloc[-1]
+    sma_50 = prices.rolling(window=50).mean().iloc[-1]
 
-    rsi_value = rsi.iloc[-1]
+    # Calculate RSI-14
+    difference = prices.diff()
+    gains = difference.clip(lower=0)
+    losses = -difference.clip(upper=0)
 
-    # RSI may be NaN when all prices are the same
-    if pd.isna(rsi_value):
-        rsi_value = 50.0
+    avg_gain = gains.rolling(window=14).mean().iloc[-1]
+    avg_loss = losses.rolling(window=14).mean().iloc[-1]
 
-    results = {
-        "rsi_14": round(float(rsi_value), 2),
-        "sma_20": round(float(sma_20.iloc[-1]), 2),
-        "sma_50": round(float(sma_50.iloc[-1]), 2),
+    # Handle flat prices
+    if avg_gain == 0 and avg_loss == 0:
+        rsi = 50.0
+    elif avg_loss == 0:
+        rsi = 100.0
+    else:
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+
+    return {
+        "rsi_14": round(float(rsi), 2),
+        "sma_20": round(float(sma_20), 2),
+        "sma_50": round(float(sma_50), 2),
     }
-
-    return results
