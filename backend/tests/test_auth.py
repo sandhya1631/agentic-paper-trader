@@ -69,3 +69,13 @@ async def test_register_rejects_too_short_password(client: AsyncClient) -> None:
         "/auth/register", json={"email": email, "password": "short"}
     )
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_login_rejects_overlong_password(client: AsyncClient) -> None:
+    # bcrypt.checkpw() raises on >72 bytes; login must reject cleanly (422), not 500.
+    email = f"test-{uuid.uuid4()}@example.com"
+    response = await client.post(
+        "/auth/login", json={"email": email, "password": "a" * 73}
+    )
+    assert response.status_code == 422

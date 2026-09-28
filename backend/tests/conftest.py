@@ -2,6 +2,7 @@ import os
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
@@ -14,15 +15,40 @@ from app.main import app
 
 _settings = get_settings()
 
+
+def _derive_test_database_url(database_url: str) -> str:
+    """Append ``_test`` to the database name only, preserving host/query params.
+
+    Naively doing ``f"{database_url}_test"`` corrupts URLs that carry a query
+    string (e.g. ``?ssl=require`` becomes ``?ssl=require_test``). Parsing the URL
+    and rewriting just the database segment keeps the rest intact.
+    """
+    url = make_url(database_url)
+    return url.set(database=f"{url.database}_test").render_as_string(
+        hide_password=False
+    )
+
+
 # Never run tests against the app's configured (dev/prod) database. Use a dedicated
 # test database, overridable in CI via TEST_DATABASE_URL.
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
-    f"{_settings.database_url}_test",
+    _derive_test_database_url(_settings.database_url),
 )
 
 test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
 TestSessionLocal = async_sessionmaker(bind=test_engine, expire_on_commit=False)
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _dispose_test_engine():
+    """Dispose the shared engine's connection pool once the suite finishes.
+
+    Without this, the module-scoped engine's pool is never closed, leaking
+    connections against a connection-limited Postgres in CI.
+    """
+    yield
+    await test_engine.dispose()
 
 
 @pytest_asyncio.fixture
