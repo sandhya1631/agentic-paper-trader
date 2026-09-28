@@ -8,8 +8,9 @@ from sqlalchemy import (
     JSON, Boolean, CheckConstraint, DateTime, Enum, ForeignKey, Integer,
     Numeric, String, Text, Uuid,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.db.base import Base
 from app.db.enums import (
     ApprovalMode, ApprovalStatus, AuditActorType, BrokerOrderStatus, CycleStatus,
     CycleTrigger, DecisionAction, OrderSide, OrderType, PolicyDecisionType,
@@ -20,9 +21,6 @@ from app.db.enums import (
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-
-class Base(DeclarativeBase):
-    pass
 
 
 class UUIDPrimaryKey:

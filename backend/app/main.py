@@ -48,4 +48,4 @@ async def health() -> dict:
 async def health_db(db: AsyncSession = Depends(get_db)) -> dict:
     """Readiness check — verifies a non-blocking round trip to PostgreSQL."""
     result = await db.execute(text("SELECT 1"))
-    return {"status": "ok", "result": result.scalar_one()}
+    return {"status": "ok", "result"    : result.scalar_one()}
