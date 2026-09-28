@@ -24,7 +24,7 @@ describe("auth-api", () => {
   it("login posts credentials without auth and persists the returned token", async () => {
     const spy = mockFetch(jsonResponse(200, { access_token: "jwt-xyz", token_type: "bearer" }));
 
-    const res = await login({ username: "operator", password: "pw" });
+    const res = await login({ email: "operator@example.com", password: "pw" });
 
     const [url, init] = spy.mock.calls[0] as [string, RequestInit];
     expect(url).toContain("/auth/login");
@@ -38,7 +38,7 @@ describe("auth-api", () => {
   it("register posts to the register endpoint without auth", async () => {
     const spy = mockFetch(jsonResponse(201, {}));
 
-    await register({ username: "new-op", password: "pw" });
+    await register({ email: "new-op@example.com", password: "pw" });
 
     const [url, init] = spy.mock.calls[0] as [string, RequestInit];
     expect(url).toContain("/auth/register");
