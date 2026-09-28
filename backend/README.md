@@ -33,6 +33,21 @@ uvicorn app.main:app --reload --port 8000
 
 ## Tests
 
+The test suite runs against a **dedicated, isolated test database** so it never
+touches your dev/prod data. By default it uses the app's `DATABASE_URL` with `_test`
+appended to the database name (e.g. `agentic_paper_trader_test`); override this with
+the `TEST_DATABASE_URL` environment variable (CI sets it explicitly).
+
+Create the test database once:
+
+```sql
+CREATE DATABASE agentic_paper_trader_test;
+```
+
+Then run:
+
 ```bash
 pytest
 ```
+
+The suite drops and recreates its tables around each test, so it leaves no residue.

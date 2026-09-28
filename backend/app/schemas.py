@@ -6,9 +6,19 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.db.enums import (
-    ApprovalMode, ApprovalStatus, AuditActorType, BrokerOrderStatus, CycleStatus,
-    CycleTrigger, DecisionAction, OrderSide, OrderType, PolicyDecisionType,
-    PolicyOutcome, Symbol, TimeInForce,
+    ApprovalMode,
+    ApprovalStatus,
+    AuditActorType,
+    BrokerOrderStatus,
+    CycleStatus,
+    CycleTrigger,
+    DecisionAction,
+    OrderSide,
+    OrderType,
+    PolicyDecisionType,
+    PolicyOutcome,
+    Symbol,
+    TimeInForce,
 )
 
 Money = Decimal

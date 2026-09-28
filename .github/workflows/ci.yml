@@ -41,6 +41,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+          # The repo has no requirements.txt; point pip caching at the actual
+          # dependency manifest so setup-python can hash it instead of failing.
+          cache-dependency-path: backend/pyproject.toml
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
