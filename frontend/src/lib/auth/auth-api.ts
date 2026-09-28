@@ -1,24 +1,24 @@
 /**
  * Auth API seam.
  *
- * Thin wrappers over the API client for the JWT auth flow, giving the login UI
- * (Story 0.2.2, #18) a single place to call. Login/registration are public
- * requests (`skipAuth`), and a successful login persists the returned JWT via
- * the token store so subsequent calls are authenticated automatically.
+ * Thin wrappers over the API client for the JWT auth flow, used by the login/
+ * register UI (#39). Login/registration are public requests (`skipAuth`), and
+ * a successful login persists the returned JWT via the token store so
+ * subsequent calls are authenticated automatically.
  *
- * NOTE: endpoint paths and payload shapes below are provisional and expected to
- * be finalized together with the backend auth work in #18.
+ * Payload shape matches the backend's auth contract (Story 0.2.2, #18):
+ * `UserLogin`/`UserCreate` take `email` + `password`, not `username`.
  */
 import { api } from "@/lib/api/client";
 import { clearToken, setToken } from "@/lib/auth/token-store";
 
 export interface LoginRequest {
-  username: string;
+  email: string;
   password: string;
 }
 
 export interface RegisterRequest {
-  username: string;
+  email: string;
   password: string;
 }
 

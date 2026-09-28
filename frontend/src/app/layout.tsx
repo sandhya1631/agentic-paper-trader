@@ -1,8 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { Sidebar } from "@/components/sidebar";
-import { Header } from "@/components/header";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -20,6 +18,11 @@ export const metadata: Metadata = {
     "Operator console for the autonomous LLM paper-trading agent (Alpaca sandbox).",
 };
 
+/**
+ * Root layout — fonts/global styles only. The dashboard chrome (sidebar,
+ * header, auth guard) lives in `(app)/layout.tsx`; the `(auth)` route group
+ * (login/register, #39) intentionally renders without it.
+ */
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -28,13 +31,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
-        <div className="flex min-h-screen">
-          <Sidebar />
-          <div className="flex min-w-0 flex-1 flex-col">
-            <Header />
-            <main className="flex-1 px-4 py-6 md:px-6">{children}</main>
-          </div>
-        </div>
+        {children}
       </body>
     </html>
   );

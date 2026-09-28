@@ -2,6 +2,8 @@
 
 An autonomous software engineering framework connecting Large Language Models (LLMs) to financial paper trading sandbox APIs via deterministic tool calling, quantitative safety boundaries, and full audit logging.
 
+> **Running it locally?** See [RUNNING.md](RUNNING.md) for a tested, full-stack quickstart (frontend + backend + PostgreSQL).
+
 ## The Problem
 The Human Retail Problem	The AI Problem
 Many retail day-traders lose money due to emotional trading and lack of systematic risk management.	LLMs are generative and probabilistic: they hallucinate numbers, miscalculate portfolio math, and suffer catastrophic errors if allowed to trade unchecked.

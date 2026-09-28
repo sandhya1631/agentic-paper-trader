@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +23,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+# Without this, the browser blocks the Next.js frontend (localhost:3000) from
+# calling this API (localhost:8000) entirely — curl/pytest never hit this
+# since CORS is enforced by browsers, not the server-to-server request itself.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(auth_router)
 
 
@@ -35,4 +48,4 @@ async def health() -> dict:
 async def health_db(db: AsyncSession = Depends(get_db)) -> dict:
     """Readiness check — verifies a non-blocking round trip to PostgreSQL."""
     result = await db.execute(text("SELECT 1"))
-    return {"status": "ok", "result": result.scalar_one()}
+    return {"status": "ok", "result"    : result.scalar_one()}
