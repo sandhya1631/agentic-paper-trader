@@ -5,26 +5,16 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import (
-    JSON,
-    Boolean,
-    CheckConstraint,
-    DateTime,
-    Enum,
-    ForeignKey,
-    Integer,
-    Numeric,
-    String,
-    Text,
-    Uuid,
+    JSON, Boolean, CheckConstraint, DateTime, Enum, ForeignKey, Integer,
+    Numeric, String, Text, Uuid,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.db.enums import (
-    ApprovalMode,
-    CycleStatus,
-    CycleTrigger,
-    UserRole,
+    ApprovalMode, ApprovalStatus, AuditActorType, BrokerOrderStatus, CycleStatus,
+    CycleTrigger, DecisionAction, OrderSide, OrderType, PolicyDecisionType,
+    PolicyOutcome, Symbol, TimeInForce, UserRole,
 )
 
 
@@ -39,9 +29,7 @@ class UUIDPrimaryKey:
 
 class Timestamped:
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
-    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class User(Base, UUIDPrimaryKey, Timestamped):
@@ -68,9 +56,7 @@ class User(Base, UUIDPrimaryKey, Timestamped):
 
 class TradingAccount(Base, UUIDPrimaryKey, Timestamped):
     __tablename__ = "trading_accounts"
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="RESTRICT"), index=True
-    )
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
     provider: Mapped[str] = mapped_column(String(30), default="ALPACA")
     encrypted_api_key: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_api_secret: Mapped[str] = mapped_column(Text, nullable=False)
@@ -92,12 +78,8 @@ class PolicySet(Base, UUIDPrimaryKey, Timestamped):
 
 class AgentConfig(Base, UUIDPrimaryKey, Timestamped):
     __tablename__ = "agent_configs"
-    account_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("trading_accounts.id", ondelete="RESTRICT"), index=True
-    )
-    policy_set_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("policy_sets.id", ondelete="RESTRICT")
-    )
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("trading_accounts.id", ondelete="RESTRICT"), index=True)
+    policy_set_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("policy_sets.id", ondelete="RESTRICT"))
     name: Mapped[str] = mapped_column(String(80))
     watchlist: Mapped[list[str]] = mapped_column(JSON)
     strategy_version: Mapped[str] = mapped_column(String(30), default="S-001")
@@ -106,9 +88,7 @@ class AgentConfig(Base, UUIDPrimaryKey, Timestamped):
     max_symbol_allocation: Mapped[Decimal] = mapped_column(Numeric(6, 5), default=Decimal("0.10"))
     cash_reserve: Mapped[Decimal] = mapped_column(Numeric(6, 5), default=Decimal("0.05"))
     daily_loss_limit: Mapped[Decimal] = mapped_column(Numeric(6, 5), default=Decimal("0.02"))
-    approval_mode: Mapped[ApprovalMode] = mapped_column(
-        Enum(ApprovalMode), default=ApprovalMode.REQUIRED
-    )
+    approval_mode: Mapped[ApprovalMode] = mapped_column(Enum(ApprovalMode), default=ApprovalMode.REQUIRED)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     model_provider: Mapped[str] = mapped_column(String(40))
     model_name: Mapped[str] = mapped_column(String(100))
@@ -118,22 +98,15 @@ class AgentConfig(Base, UUIDPrimaryKey, Timestamped):
     cycles: Mapped[list[AgentCycle]] = relationship(back_populates="agent")
     __table_args__ = (
         CheckConstraint("cadence_minutes = 15", name="ck_agent_mvp_cadence"),
-        CheckConstraint(
-            "target_allocation > 0 AND target_allocation <= max_symbol_allocation",
-            name="ck_agent_target_allocation",
-        ),
+        CheckConstraint("target_allocation > 0 AND target_allocation <= max_symbol_allocation", name="ck_agent_target_allocation"),
         CheckConstraint("max_symbol_allocation <= 0.10", name="ck_agent_max_allocation"),
     )
 
 
 class AgentCycle(Base, UUIDPrimaryKey):
     __tablename__ = "agent_cycles"
-    agent_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("agent_configs.id", ondelete="RESTRICT"), index=True
-    )
-    trigger: Mapped[CycleTrigger] = mapped_column(
-        Enum(CycleTrigger), default=CycleTrigger.SCHEDULED
-    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_configs.id", ondelete="RESTRICT"), index=True)
+    trigger: Mapped[CycleTrigger] = mapped_column(Enum(CycleTrigger), default=CycleTrigger.SCHEDULED)
     status: Mapped[CycleStatus] = mapped_column(Enum(CycleStatus), default=CycleStatus.PENDING)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
