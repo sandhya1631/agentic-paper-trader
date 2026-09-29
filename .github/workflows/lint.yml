@@ -1,0 +1,31 @@
+name: Lint
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  ruff:
+    name: Ruff (Python lint)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Ruff
+        run: pip install "ruff>=0.12"
+
+      # Scoped to the auth + tests code owned by this workstream. Other packages
+      # (e.g. app/db, app/schemas) are excluded until their owners adopt the linter,
+      # so this gate never forces changes to code it doesn't own.
+      - name: Ruff check
+        run: ruff check app/auth tests
