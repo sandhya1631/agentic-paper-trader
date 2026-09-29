@@ -30,6 +30,20 @@ uvicorn app.main:app --reload --port 8000
 - `POST /auth/register` — create a user (bcrypt-hashed password).
 - `POST /auth/login` — returns a signed JWT (`access_token`) on valid credentials.
 - `GET /auth/me` — protected route; requires `Authorization: Bearer <token>`, rejects unauthenticated requests with 401.
+- `GET /llm/health` — reports the configured LLM provider/model (no API call, no cost).
+
+### LLM Client Factory
+
+`app/llm/` gives a single provider-neutral interface (`LLMClient.generate(...)`) over OpenAI and a
+local Ollama model. Switch providers with one `.env` variable — no orchestration code changes:
+
+```bash
+LLM_PROVIDER=ollama   # or "openai"
+```
+
+- `ollama`: requires a local [Ollama](https://ollama.com) server running (`OLLAMA_BASE_URL`, default
+  `http://localhost:11434`) with the model pulled (`OLLAMA_MODEL`, default `llama3.1`).
+- `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
 
 ## Tests
 
