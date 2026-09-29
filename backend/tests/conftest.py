@@ -2,6 +2,7 @@ import os
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -40,13 +41,39 @@ test_engine = create_async_engine(TEST_DATABASE_URL, echo=False)
 TestSessionLocal = async_sessionmaker(bind=test_engine, expire_on_commit=False)
 
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def _dispose_test_engine():
-    """Dispose the shared engine's connection pool once the suite finishes.
+async def _ensure_test_database_exists() -> None:
+    """Create the isolated test database if it isn't there already.
 
-    Without this, the module-scoped engine's pool is never closed, leaking
-    connections against a connection-limited Postgres in CI.
+    The suite provisions its own ``_test`` database rather than depending on the
+    CI workflow to create it, so it runs the same way under any pipeline that only
+    sets ``DATABASE_URL``. ``CREATE DATABASE`` can't run inside a transaction, so we
+    connect to the server's default ``postgres`` maintenance database in AUTOCOMMIT
+    mode. No-op when the database (or an explicit ``TEST_DATABASE_URL``) already exists.
     """
+    url = make_url(TEST_DATABASE_URL)
+    admin_engine = create_async_engine(
+        url.set(database="postgres"), isolation_level="AUTOCOMMIT"
+    )
+    try:
+        async with admin_engine.connect() as conn:
+            exists = await conn.scalar(
+                text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": url.database},
+            )
+            if not exists:
+                await conn.execute(text(f'CREATE DATABASE "{url.database}"'))
+    finally:
+        await admin_engine.dispose()
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _test_database_lifecycle():
+    """Ensure the isolated test database exists, then dispose the pool at the end.
+
+    Disposing matters because the module-scoped engine's pool would otherwise never
+    be closed, leaking connections against a connection-limited Postgres in CI.
+    """
+    await _ensure_test_database_exists()
     yield
     await test_engine.dispose()
 
