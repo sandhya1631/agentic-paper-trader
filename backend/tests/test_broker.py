@@ -1,5 +1,4 @@
 from decimal import Decimal
-import pytest
 
 from app.broker.alpaca import calculate_rsi, calculate_sma
 

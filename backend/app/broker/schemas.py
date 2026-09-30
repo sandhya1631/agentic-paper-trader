@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db.enums import OrderSide, OrderType, TimeInForce

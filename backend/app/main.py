@@ -19,11 +19,16 @@ settings = get_settings()
 tags_metadata = [
     {
         "name": "Authentication",
-        "description": "User registration, authentication, JWT token issuance, and user profile management.",
+        "description": (
+            "User registration, authentication, JWT token issuance, and user profile management."
+        ),
     },
     {
         "name": "Broker Integration",
-        "description": "Alpaca paper trading endpoints for account summary, positions, orders, and technical indicators.",
+        "description": (
+            "Alpaca paper trading endpoints for account summary, positions, orders, "
+            "and technical indicators."
+        ),
     },
     {
         "name": "Health",
@@ -50,8 +55,8 @@ Welcome to the **Agentic Paper Trader API** interactive Swagger documentation.
 #### How to test protected endpoints:
 1. **Register** a user via `POST /auth/register` or **Login** via `POST /auth/login`.
 2. Click the green **Authorize** button at the top right of this page:
-   - **OAuth2 Password Form**: Enter your registered email in the **username** field and your password into **password**, then click **Authorize**.
-   - **HTTP Bearer**: Alternatively, paste your raw JWT `access_token` string into the Bearer token field.
+   - **OAuth2 Password Form**: Enter email in **username** and password into **password**.
+   - **HTTP Bearer**: Alternatively, paste your raw JWT `access_token` string into the Bearer field.
 3. Test protected routes like `GET /auth/me` and `GET /api/v1/broker/*` directly from your browser!
 """,
     version="1.0.0",

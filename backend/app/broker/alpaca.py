@@ -1,10 +1,14 @@
 from decimal import Decimal
 from typing import Any
+
 import httpx
 
 from app.broker.schemas import (
-    AlpacaAccountRead, AlpacaOrderRead, AlpacaPositionRead,
-    MarketSnapshotRead, OrderCreate,
+    AlpacaAccountRead,
+    AlpacaOrderRead,
+    AlpacaPositionRead,
+    MarketSnapshotRead,
+    OrderCreate,
 )
 
 
@@ -159,7 +163,7 @@ class AlpacaClient:
         return MarketSnapshotRead(
             symbol=symbol.upper(),
             latest_close=latest_close,
-            rsi_14=sma_20,  # Value or None
+            rsi_14=rsi_14,
             sma_20=sma_20,
             bars_count=len(bars),
             timestamp=str(latest_timestamp),

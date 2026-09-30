@@ -37,7 +37,10 @@ async def register(payload: UserCreate, db: AsyncSession = Depends(get_db)) -> U
     "/login",
     response_model=Token,
     summary="User login (JSON format)",
-    description="Authenticate user with JSON payload containing email and password, returning a JWT access token.",
+    description=(
+        "Authenticate user with JSON payload containing email and password, "
+        "returning a JWT access token."
+    ),
 )
 async def login(payload: UserLogin, db: AsyncSession = Depends(get_db)) -> Token:
     result = await db.execute(select(User).where(User.email == payload.email))
@@ -54,7 +57,10 @@ async def login(payload: UserLogin, db: AsyncSession = Depends(get_db)) -> Token
     "/token",
     response_model=Token,
     summary="OAuth2 Form Login (Swagger UI compatible)",
-    description="Form-encoded authentication endpoint enabling native 'Authorize' dialog testing in Swagger UI. Enter email into Username field.",
+    description=(
+        "Form-encoded authentication endpoint enabling native 'Authorize' dialog testing "
+        "in Swagger UI. Enter email into Username field."
+    ),
 )
 async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
@@ -76,7 +82,10 @@ async def login_for_access_token(
     "/me",
     response_model=UserRead,
     summary="Get current user profile",
-    description="Protected route returning current authenticated user details. Requires Bearer JWT token in Authorization header.",
+    description=(
+        "Protected route returning current authenticated user details. "
+        "Requires Bearer JWT token in Authorization header."
+    ),
 )
 async def me(current_user: User = Depends(get_current_user)) -> User:
     """Protected route — proves unauthenticated requests are blocked."""
