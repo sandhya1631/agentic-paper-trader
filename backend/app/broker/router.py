@@ -14,8 +14,16 @@ router = APIRouter(prefix="/broker", tags=["Broker Integration"])
 
 
 def get_alpaca_client(
-    x_alpaca_api_key: str | None = Header(default=None, alias="X-Alpaca-API-Key"),
-    x_alpaca_api_secret: str | None = Header(default=None, alias="X-Alpaca-API-Secret"),
+    x_alpaca_api_key: str | None = Header(
+        default=None,
+        alias="X-Alpaca-API-Key",
+        description="Optional Alpaca API Key override. If omitted, system backend .env config is used.",
+    ),
+    x_alpaca_api_secret: str | None = Header(
+        default=None,
+        alias="X-Alpaca-API-Secret",
+        description="Optional Alpaca API Secret override. If omitted, system backend .env config is used.",
+    ),
 ) -> AlpacaClient:
     """Dependency that initializes an AlpacaClient using request headers or system settings."""
     settings = get_settings()
@@ -36,12 +44,16 @@ def get_alpaca_client(
     )
 
 
-@router.get("/account", response_model=AlpacaAccountRead)
+@router.get(
+    "/account",
+    response_model=AlpacaAccountRead,
+    summary="Get Alpaca paper trading account summary",
+    description="Fetch live paper trading account summary details including portfolio equity, cash balance, buying power, and account status.",
+)
 async def get_account_summary(
     current_user: Annotated[User, Depends(get_current_user)],
     client: Annotated[AlpacaClient, Depends(get_alpaca_client)],
 ):
-    """Fetch live paper trading account summary (equity, cash, buying power, status)."""
     try:
         return await client.get_account()
     except Exception as exc:
@@ -51,12 +63,16 @@ async def get_account_summary(
         )
 
 
-@router.get("/positions", response_model=list[AlpacaPositionRead])
+@router.get(
+    "/positions",
+    response_model=list[AlpacaPositionRead],
+    summary="Get open paper trading positions",
+    description="Fetch list of all currently open paper trading stock positions.",
+)
 async def get_open_positions(
     current_user: Annotated[User, Depends(get_current_user)],
     client: Annotated[AlpacaClient, Depends(get_alpaca_client)],
 ):
-    """Fetch list of open paper positions."""
     try:
         return await client.get_positions()
     except Exception as exc:
@@ -66,13 +82,17 @@ async def get_open_positions(
         )
 
 
-@router.get("/snapshot/{symbol}", response_model=MarketSnapshotRead)
+@router.get(
+    "/snapshot/{symbol}",
+    response_model=MarketSnapshotRead,
+    summary="Get market price snapshot & indicators",
+    description="Fetch latest stock price snapshot and computed technical indicators (14-period RSI, 20-period SMA, 50-period SMA) for a given symbol (e.g., AAPL).",
+)
 async def get_market_snapshot(
     symbol: str,
     current_user: Annotated[User, Depends(get_current_user)],
     client: Annotated[AlpacaClient, Depends(get_alpaca_client)],
 ):
-    """Fetch latest stock price snapshot and computed technical indicators (14-period RSI, 20-period SMA)."""
     try:
         return await client.get_market_snapshot(symbol)
     except Exception as exc:
@@ -82,13 +102,18 @@ async def get_market_snapshot(
         )
 
 
-@router.post("/orders", response_model=AlpacaOrderRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/orders",
+    response_model=AlpacaOrderRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Submit paper trading order",
+    description="Submit a new paper trading BUY or SELL market/limit order to Alpaca.",
+)
 async def place_paper_order(
     order: OrderCreate,
     current_user: Annotated[User, Depends(get_current_user)],
     client: Annotated[AlpacaClient, Depends(get_alpaca_client)],
 ):
-    """Submit a new paper trading BUY/SELL order to Alpaca."""
     try:
         return await client.submit_order(order)
     except Exception as exc:
@@ -98,13 +123,17 @@ async def place_paper_order(
         )
 
 
-@router.get("/orders", response_model=list[AlpacaOrderRead])
+@router.get(
+    "/orders",
+    response_model=list[AlpacaOrderRead],
+    summary="Get paper trading order history",
+    description="Fetch list of submitted paper orders filtered by status ('open', 'closed', 'all').",
+)
 async def get_orders_list(
     current_user: Annotated[User, Depends(get_current_user)],
     client: Annotated[AlpacaClient, Depends(get_alpaca_client)],
-    status_filter: str = Query(default="all", alias="status"),
+    status_filter: str = Query(default="all", alias="status", description="Filter orders by status: 'open', 'closed', or 'all'."),
 ):
-    """Fetch list of submitted paper orders."""
     try:
         return await client.get_orders(status=status_filter)
     except Exception as exc:
@@ -112,3 +141,4 @@ async def get_orders_list(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Alpaca API error: {exc}",
         )
+
