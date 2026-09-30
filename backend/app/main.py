@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.db import models  # noqa: F401  (registers ORM models on Base.metadata)
 from app.db.base import Base
 from app.db.session import engine, get_db
+from app.llm.router import router as llm_router
 
 settings = get_settings()
 
@@ -84,6 +85,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(broker_router, prefix="/api/v1")
 
+app.include_router(llm_router)
 
 @app.get("/", include_in_schema=False)
 async def root():

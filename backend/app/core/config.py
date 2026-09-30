@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
 
+    # LLM Client Factory — switch providers via .env, no code changes.
+    llm_provider: str = "ollama"  # "openai" | "ollama"
+    openai_model: str = "gpt-4o-mini"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3.1"
+
 
 @lru_cache
 def get_settings() -> Settings:
