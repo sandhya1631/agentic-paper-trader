@@ -33,6 +33,20 @@ uvicorn app.main:app --reload --port 8000
 - `GET /market-data/bars` — protected route; latest OHLCV bars (default: 50 bars, 5-minute, for AAPL/NVDA/SPY)
   from Alpaca's Data API. Requires `ALPACA_API_KEY`/`ALPACA_API_SECRET` in `.env` (free paper-trading keys from
   https://app.alpaca.markets/); retries automatically on rate limiting (HTTP 429).
+- `GET /llm/health` — reports the configured LLM provider/model (no API call, no cost).
+
+### LLM Client Factory
+
+`app/llm/` gives a single provider-neutral interface (`LLMClient.generate(...)`) over OpenAI and a
+local Ollama model. Switch providers with one `.env` variable — no orchestration code changes:
+
+```bash
+LLM_PROVIDER=ollama   # or "openai"
+```
+
+- `ollama`: requires a local [Ollama](https://ollama.com) server running (`OLLAMA_BASE_URL`, default
+  `http://localhost:11434`) with the model pulled (`OLLAMA_MODEL`, default `llama3.1`).
+- `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
 
 ## Tests
 
