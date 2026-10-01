@@ -11,6 +11,7 @@ from app.db import models  # noqa: F401  (registers ORM models on Base.metadata)
 from app.db.base import Base
 from app.db.session import engine, get_db
 from app.llm.router import router as llm_router
+from app.market_data.router import router as market_data_router
 
 settings = get_settings()
 
@@ -38,6 +39,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(llm_router)
+app.include_router(market_data_router)
 
 
 @app.get("/health")
