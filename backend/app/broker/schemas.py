@@ -43,6 +43,7 @@ class MarketSnapshotRead(APIModel):
     latest_close: Decimal
     rsi_14: Decimal | None = None
     sma_20: Decimal | None = None
+    sma_50: Decimal | None = None
     bars_count: int
     timestamp: str | None = None
 

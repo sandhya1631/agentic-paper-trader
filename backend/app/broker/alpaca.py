@@ -10,50 +10,7 @@ from app.broker.schemas import (
     MarketSnapshotRead,
     OrderCreate,
 )
-
-
-def calculate_sma(close_prices: list[Decimal], period: int = 20) -> Decimal | None:
-    """Calculate Simple Moving Average (SMA)."""
-    if len(close_prices) < period:
-        return None
-    recent = close_prices[-period:]
-    return sum(recent) / Decimal(period)
-
-
-def calculate_rsi(close_prices: list[Decimal], period: int = 14) -> Decimal | None:
-    """Calculate Relative Strength Index (RSI) using Wilder's smoothing method."""
-    if len(close_prices) <= period:
-        return None
-
-    gains: list[Decimal] = []
-    losses: list[Decimal] = []
-
-    for i in range(1, len(close_prices)):
-        change = close_prices[i] - close_prices[i - 1]
-        if change > 0:
-            gains.append(change)
-            losses.append(Decimal("0"))
-        else:
-            gains.append(Decimal("0"))
-            losses.append(abs(change))
-
-    if len(gains) < period:
-        return None
-
-    avg_gain = sum(gains[:period]) / Decimal(period)
-    avg_loss = sum(losses[:period]) / Decimal(period)
-
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * Decimal(period - 1) + gains[i]) / Decimal(period)
-        avg_loss = (avg_loss * Decimal(period - 1) + losses[i]) / Decimal(period)
-
-    if avg_loss == 0:
-        return Decimal("100")
-
-    rs = avg_gain / avg_loss
-    rsi = Decimal("100") - (Decimal("100") / (Decimal("1") + rs))
-    return round(rsi, 2)
-
+from app.market_data.indicators import calculate_indicators
 
 class AlpacaClient:
     """Asynchronous client interacting with Alpaca REST API."""
@@ -64,6 +21,7 @@ class AlpacaClient:
         api_secret: str,
         base_url: str = "https://paper-api.alpaca.markets",
         data_base_url: str = "https://data.alpaca.markets",
+        client: httpx.AsyncClient | None = None,
     ):
         # Normalize base URL (strip trailing /v2 if passed by user)
         clean_base_url = base_url.rstrip("/")
@@ -77,14 +35,32 @@ class AlpacaClient:
             "APCA-API-SECRET-KEY": api_secret,
             "Content-Type": "application/json",
         }
+        self._client = client
+        self._owns_client = client is None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(headers=self.headers, timeout=10.0)
+            self._owns_client = True
+        return self._client
+
+    async def close(self) -> None:
+        if self._owns_client and self._client and not self._client.is_closed:
+            await self._client.aclose()
+
+    async def __aenter__(self) -> "AlpacaClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.close()
 
     async def get_account(self) -> AlpacaAccountRead:
         """Fetch paper trading account overview."""
         url = f"{self.base_url}/v2/account"
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=self.headers, timeout=10.0)
-            resp.raise_for_status()
-            data = resp.json()
+        client = self._get_client()
+        resp = await client.get(url, headers=self.headers, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
 
         return AlpacaAccountRead(
             id=data["id"],
@@ -106,10 +82,10 @@ class AlpacaClient:
     async def get_positions(self) -> list[AlpacaPositionRead]:
         """Fetch open paper positions."""
         url = f"{self.base_url}/v2/positions"
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=self.headers, timeout=10.0)
-            resp.raise_for_status()
-            items = resp.json()
+        client = self._get_client()
+        resp = await client.get(url, headers=self.headers, timeout=10.0)
+        resp.raise_for_status()
+        items = resp.json()
 
         positions: list[AlpacaPositionRead] = []
         for item in items:
@@ -139,34 +115,35 @@ class AlpacaClient:
             "limit": limit,
             "feed": "iex",
         }
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=self.headers, params=params, timeout=10.0)
-            resp.raise_for_status()
-            data = resp.json()
+        client = self._get_client()
+        resp = await client.get(url, headers=self.headers, params=params, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
 
         symbol_bars = data.get("bars", {}).get(symbol.upper(), [])
         return symbol_bars
 
     async def get_market_snapshot(self, symbol: str) -> MarketSnapshotRead:
-        """Fetch latest price snapshot and compute 14-period RSI & 20-period SMA."""
-        bars = await self.get_bars(symbol, timeframe="5Min", limit=60)
+        """Fetch latest price snapshot and compute 14-period RSI, 20-period SMA, and 50-period SMA."""
+        bars = await self.get_bars(symbol, timeframe="5Min", limit=75)
         if not bars:
             raise ValueError(f"No price bar data available for symbol '{symbol}'")
 
-        close_prices = [Decimal(str(bar["c"])) for bar in bars]
-        latest_close = close_prices[-1]
-        latest_timestamp = bars[-1].get("t")
+        close_prices = [float(bar["c"]) for bar in bars]
+        latest_close = Decimal(str(close_prices[-1]))
+        raw_timestamp = bars[-1].get("t")
+        latest_timestamp = str(raw_timestamp) if raw_timestamp is not None else None
 
-        sma_20 = calculate_sma(close_prices, period=20)
-        rsi_14 = calculate_rsi(close_prices, period=14)
+        indicators = calculate_indicators(close_prices)
 
         return MarketSnapshotRead(
             symbol=symbol.upper(),
             latest_close=latest_close,
-            rsi_14=rsi_14,
-            sma_20=sma_20,
+            rsi_14=Decimal(str(indicators["rsi_14"])) if indicators.get("rsi_14") is not None else None,
+            sma_20=Decimal(str(indicators["sma_20"])) if indicators.get("sma_20") is not None else None,
+            sma_50=Decimal(str(indicators["sma_50"])) if indicators.get("sma_50") is not None else None,
             bars_count=len(bars),
-            timestamp=str(latest_timestamp),
+            timestamp=latest_timestamp,
         )
 
     async def submit_order(self, order: OrderCreate) -> AlpacaOrderRead:
@@ -182,10 +159,10 @@ class AlpacaClient:
         if order.type.value.lower() == "limit" and order.limit_price is not None:
             payload["limit_price"] = str(order.limit_price)
 
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, headers=self.headers, json=payload, timeout=10.0)
-            resp.raise_for_status()
-            data = resp.json()
+        client = self._get_client()
+        resp = await client.post(url, headers=self.headers, json=payload, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
 
         return AlpacaOrderRead(
             id=data["id"],
@@ -205,10 +182,10 @@ class AlpacaClient:
         """Fetch list of paper orders."""
         url = f"{self.base_url}/v2/orders"
         params = {"status": status, "limit": limit}
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, headers=self.headers, params=params, timeout=10.0)
-            resp.raise_for_status()
-            items = resp.json()
+        client = self._get_client()
+        resp = await client.get(url, headers=self.headers, params=params, timeout=10.0)
+        resp.raise_for_status()
+        items = resp.json()
 
         orders: list[AlpacaOrderRead] = []
         for item in items:

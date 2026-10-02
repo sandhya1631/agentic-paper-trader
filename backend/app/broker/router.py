@@ -108,10 +108,15 @@ async def get_market_snapshot(
 ):
     try:
         return await client.get_market_snapshot(symbol)
-    except Exception as exc:
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Error fetching market snapshot for '{symbol}': {exc}",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Alpaca API error: {exc}",
         )
 
 
@@ -131,8 +136,8 @@ async def place_paper_order(
         return await client.submit_order(order)
     except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to place paper order: {exc}",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Alpaca API error: {exc}",
         )
 
 
