@@ -104,3 +104,13 @@ async def test_oauth2_form_login_and_protected_route(client: AsyncClient) -> Non
     assert authenticated.status_code == 200
     assert authenticated.json()["email"] == email
 
+
+@pytest.mark.asyncio
+async def test_oauth2_token_rejects_overlong_password(client: AsyncClient) -> None:
+    # bcrypt.checkpw() raises on >72 bytes; OAuth2 form login must reject cleanly (422), not 500.
+    email = f"test-{uuid.uuid4()}@example.com"
+    response = await client.post(
+        "/auth/token", data={"username": email, "password": "a" * 73}
+    )
+    assert response.status_code == 422
+

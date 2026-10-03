@@ -4,7 +4,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
-from app.auth.schemas import Token, UserCreate, UserLogin, UserRead
+from app.auth.schemas import (
+    Token,
+    UserCreate,
+    UserLogin,
+    UserRead,
+    _ensure_within_bcrypt_limit,
+)
 from app.auth.security import hash_password, issue_token, verify_password
 from app.db.models import User
 from app.db.session import get_db
@@ -66,6 +72,14 @@ async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: AsyncSession = Depends(get_db),
 ) -> Token:
+    try:
+        _ensure_within_bcrypt_limit(form_data.password)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
     result = await db.execute(select(User).where(User.email == form_data.username))
     user = result.scalar_one_or_none()
     if user is None or not verify_password(form_data.password, user.hashed_password):
