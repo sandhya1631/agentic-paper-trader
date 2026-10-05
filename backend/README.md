@@ -48,6 +48,18 @@ LLM_PROVIDER=ollama   # or "openai"
   `http://localhost:11434`) with the model pulled (`OLLAMA_MODEL`, default `llama3.1`).
 - `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
 
+### Tool Schema Definition & Validation
+
+`app/agent/tool_validation.py` is the strict boundary between raw LLM output and the shared
+`DecisionProposal` schema (`app/schemas.py` — the same type the Policy Engine consumes). The
+LLM's only allowed output is `DecisionProposal` (BUY/SELL/HOLD on a watchlist symbol).
+
+- `validate_decision_proposal(raw)` — parses a JSON string/bytes or dict into a `DecisionProposal`.
+  Malformed JSON or a schema violation never crashes the caller — it's logged and raised as
+  `ToolValidationError` instead.
+- `decision_proposal_json_schema()` — exports the JSON Schema, for registering with an LLM's
+  function-calling/structured-output API.
+
 ## Tests
 
 ```bash
