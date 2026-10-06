@@ -1,4 +1,21 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+
+@dataclass
+class LLMHealth:
+    """Result of an active connectivity probe against an LLM backend.
+
+    Unlike the cheap `/llm/health` echo, this reflects a real call to the
+    provider: whether the backend is reachable and whether the configured model
+    is actually available to serve requests.
+    """
+
+    provider: str
+    model: str
+    reachable: bool
+    model_available: bool
+    detail: str = ""
 
 
 class LLMClient(ABC):
@@ -9,6 +26,9 @@ class LLMClient(ABC):
     never branches on which provider is configured.
     """
 
+    #: Short provider identifier, overridden by each concrete client.
+    provider: str = "unknown"
+
     @abstractmethod
     async def generate(
         self,
@@ -18,4 +38,15 @@ class LLMClient(ABC):
         temperature: float = 0.2,
     ) -> str:
         """Return the model's text completion for the given prompt."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def health_check(self) -> LLMHealth:
+        """Actively probe the backend for reachability and model availability.
+
+        Implementations MUST NOT raise on a connectivity/HTTP failure; they
+        return ``LLMHealth(reachable=False, ...)`` with a human-readable
+        ``detail`` instead, so callers (health endpoint, verify script) can
+        report status without handling exceptions.
+        """
         raise NotImplementedError
