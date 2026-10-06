@@ -12,6 +12,7 @@ async def execute_with_allocation_check(
     current_exposure: Decimal,
     proposed_order_value: Decimal,
     submit_order: Callable[[], Awaitable[T]],
+    max_symbol_allocation: Decimal = Decimal("0.10"),
 ) -> tuple[AllocationResult, T | None]:
     """Check maximum allocation before calling the broker."""
 
@@ -19,6 +20,7 @@ async def execute_with_allocation_check(
         portfolio_equity=portfolio_equity,
         current_exposure=current_exposure,
         proposed_order_value=proposed_order_value,
+        max_symbol_allocation=max_symbol_allocation,
     )
 
     if not result.allowed:
