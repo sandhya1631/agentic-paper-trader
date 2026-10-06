@@ -6,9 +6,11 @@ in a thread (`asyncio.to_thread`) to keep the FastAPI app non-blocking.
 """
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import logging
 
 from alpaca.common.exceptions import APIError
+from alpaca.data.enums import DataFeed
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -58,20 +60,24 @@ class MarketDataCollector:
         *,
         limit: int = DEFAULT_BAR_LIMIT,
         timeframe_minutes: int = DEFAULT_TIMEFRAME_MINUTES,
+        validate: bool = False,
     ) -> dict[str, list[OHLCVBar]]:
         """Return the latest `limit` bars per symbol (default watchlist: AAPL, NVDA, SPY)."""
         symbols = symbols or DEFAULT_WATCHLIST
-        request = StockBarsRequest(
-            symbol_or_symbols=symbols,
-            timeframe=TimeFrame(timeframe_minutes, TimeFrameUnit.Minute),
-            limit=limit,
-        )
-
-        bar_set = await self._get_bars_with_retry(request)
-
+        start_time = datetime.now(timezone.utc) - timedelta(days=7)
         result: dict[str, list[OHLCVBar]] = {symbol: [] for symbol in symbols}
-        for symbol, bars in bar_set.data.items():
-            result[symbol] = [
+
+        for symbol in symbols:
+            request = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame(timeframe_minutes, TimeFrameUnit.Minute),
+                limit=limit,
+                start=start_time,
+                feed=DataFeed.IEX,
+            )
+            bar_set = await self._get_bars_with_retry(request)
+            bars = bar_set.data.get(symbol, [])
+            parsed_bars = [
                 OHLCVBar(
                     timestamp=bar.timestamp.isoformat(),
                     open=bar.open,
@@ -82,6 +88,10 @@ class MarketDataCollector:
                 )
                 for bar in bars
             ]
+            if validate:
+                from app.market_data.validation import validate_ohlcv_bars
+                parsed_bars = validate_ohlcv_bars(symbol, parsed_bars, min_bars=0)
+            result[symbol] = parsed_bars
         return result
 
     async def _get_bars_with_retry(self, request: StockBarsRequest):
