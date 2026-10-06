@@ -64,6 +64,13 @@ or plaintext.
 integration calls to get the plaintext key/secret for an actual Alpaca API call — never logged or
 returned to a client.
 
+The `/api/v1/broker/*` endpoints consume the vault: each request builds its Alpaca client from the
+authenticated user's decrypted credentials. If a user has no connected account, the broker falls
+back to `X-Alpaca-*` headers / `ALPACA_*` in `.env` **only when `APP_ENV=development`**; otherwise
+the request is rejected (400) and the broker is never called. If a connected account's ciphertext
+cannot be decrypted (e.g. the key changed), the request fails with 500 rather than silently falling
+back.
+
 ### Tool Schema Definition & Validation
 
 `app/agent/tool_validation.py` is the strict boundary between raw LLM output and the shared
