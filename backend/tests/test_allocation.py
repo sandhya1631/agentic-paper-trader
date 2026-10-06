@@ -79,3 +79,27 @@ async def test_broker_not_called_when_allocation_exceeds_limit():
     assert result.maximum_allowed == Decimal("1000")
     assert broker_result is None
     assert broker_called is False
+
+
+@pytest.mark.asyncio
+async def test_execution_uses_configurable_allocation_limit():
+    broker_called = False
+
+    async def fake_submit_order():
+        nonlocal broker_called
+        broker_called = True
+        return "order submitted"
+
+    result, broker_result = await execute_with_allocation_check(
+        portfolio_equity=Decimal("10000"),
+        current_exposure=Decimal("300"),
+        proposed_order_value=Decimal("300"),
+        submit_order=fake_submit_order,
+        max_symbol_allocation=Decimal("0.05"),
+    )
+
+    assert result.allowed is False
+    assert result.projected_exposure == Decimal("600")
+    assert result.maximum_allowed == Decimal("500")
+    assert broker_result is None
+    assert broker_called is False
