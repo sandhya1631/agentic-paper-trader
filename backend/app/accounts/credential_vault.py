@@ -3,7 +3,11 @@
 Alpaca API keys are symmetrically encrypted (Fernet) before they ever touch the
 database, and decrypted only at the point of use for an actual broker call —
 the plaintext never reaches the frontend, logs, or the LLM. Per the Core
-Controls Matrix: "never send secrets to frontend or model; rotate and revoke."
+Controls Matrix: "never send secrets to frontend or model."
+
+Revocation is implemented (DELETE /accounts/alpaca). Key rotation (re-encrypting
+stored credentials under a new Fernet key, e.g. via MultiFernet) is not — this
+module assumes a single active key for now.
 """
 
 import uuid
@@ -24,7 +28,19 @@ class CredentialVaultError(Exception):
 
 def _fernet() -> Fernet:
     settings = get_settings()
-    return Fernet(settings.credential_encryption_key.encode("utf-8"))
+    if not settings.credential_encryption_key:
+        raise CredentialVaultError(
+            "CREDENTIAL_ENCRYPTION_KEY is not set. Generate one with: "
+            "python -c \"from cryptography.fernet import Fernet; "
+            'print(Fernet.generate_key().decode())"'
+        )
+    try:
+        return Fernet(settings.credential_encryption_key.encode("utf-8"))
+    except ValueError as exc:
+        raise CredentialVaultError(
+            "CREDENTIAL_ENCRYPTION_KEY is not a valid Fernet key "
+            "(must be 32 url-safe base64-encoded bytes)"
+        ) from exc
 
 
 def encrypt_credential(plaintext: str) -> str:

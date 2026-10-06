@@ -1,4 +1,5 @@
 import uuid
+from unittest.mock import patch
 
 import pytest
 from conftest import TestSessionLocal
@@ -12,6 +13,7 @@ from app.accounts.credential_vault import (
     encrypt_credential,
     get_decrypted_alpaca_credentials,
 )
+from app.core.config import Settings
 from app.db.models import TradingAccount
 
 API_KEY = "AKFAKE1234567890"
@@ -35,6 +37,22 @@ def test_encrypted_value_does_not_contain_plaintext():
 def test_decrypt_invalid_token_raises():
     with pytest.raises(CredentialVaultError):
         decrypt_credential("not-a-real-fernet-token")
+
+
+def test_missing_encryption_key_fails_fast_with_clear_message():
+    """No baked-in default — an unset key must raise a clear error, not AttributeError."""
+    fake_settings = Settings(credential_encryption_key=None)
+    with patch("app.accounts.credential_vault.get_settings", return_value=fake_settings):
+        with pytest.raises(CredentialVaultError, match="CREDENTIAL_ENCRYPTION_KEY is not set"):
+            encrypt_credential(API_KEY)
+
+
+def test_malformed_encryption_key_fails_fast_with_clear_message():
+    """An invalid (non-Fernet) key must raise a clear error, not a raw cryptography ValueError."""
+    fake_settings = Settings(credential_encryption_key="not-a-valid-fernet-key")
+    with patch("app.accounts.credential_vault.get_settings", return_value=fake_settings):
+        with pytest.raises(CredentialVaultError, match="not a valid Fernet key"):
+            encrypt_credential(API_KEY)
 
 
 # --- Through the API, with direct DB verification ---

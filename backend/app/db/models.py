@@ -15,6 +15,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -75,7 +76,12 @@ class TradingAccount(Base, UUIDPrimaryKey, Timestamped):
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     user: Mapped[User] = relationship(back_populates="accounts")
     agents: Mapped[list[AgentConfig]] = relationship(back_populates="account")
-    __table_args__ = (CheckConstraint("is_paper = true", name="ck_account_paper_only"),)
+    __table_args__ = (
+        CheckConstraint("is_paper = true", name="ck_account_paper_only"),
+        # One connected account per (user, provider) — closes a race where concurrent
+        # POST /accounts/alpaca requests could otherwise create duplicate rows.
+        UniqueConstraint("user_id", "provider", name="uq_trading_account_user_provider"),
+    )
 
 
 class PolicySet(Base, UUIDPrimaryKey, Timestamped):

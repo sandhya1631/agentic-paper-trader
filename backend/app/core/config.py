@@ -43,10 +43,11 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
 
-    # Encrypted Alpaca Credential Vault — Fernet key, dev-only default.
-    # Generate a real one for anything beyond local dev:
+    # Encrypted Alpaca Credential Vault — Fernet key. No default: a working key
+    # baked into source would make "encryption at rest" meaningless for any
+    # deployment that forgets to override it. Required in every environment.
     #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-    credential_encryption_key: str = "YtmXdjfFYYQq-r4n2kcSNPUX03lIM2WfqvpM3YGC2k4="
+    credential_encryption_key: str | None = None
 
 
 @lru_cache
