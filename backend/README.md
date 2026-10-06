@@ -67,6 +67,34 @@ python scripts/verify_llm.py
 Running Ollama natively instead of via Compose? Set `OLLAMA_BASE_URL=http://localhost:11434`
 for local dev (or `http://host.docker.internal:11434` from a container reaching the host).
 
+### Encrypted Alpaca Credential Vault
+
+`app/accounts/` lets a logged-in user connect their own Alpaca paper-trading credentials, encrypted
+at rest (Fernet) via `CREDENTIAL_ENCRYPTION_KEY` — no endpoint ever returns the key/secret, encrypted
+or plaintext.
+
+- `POST /accounts/alpaca` — encrypt and store `{api_key, api_secret, is_paper}` for the current user
+  (updates in place if already connected).
+- `GET /accounts/alpaca` — connection status only (`provider`, `is_paper`, `is_connected`,
+  `last_verified_at`); 404 if nothing is connected.
+- `DELETE /accounts/alpaca` — revoke/remove the stored credentials.
+
+`get_decrypted_alpaca_credentials(db, user_id)` is the runtime-decryption entry point a broker
+integration calls to get the plaintext key/secret for an actual Alpaca API call — never logged or
+returned to a client.
+
+### Tool Schema Definition & Validation
+
+`app/agent/tool_validation.py` is the strict boundary between raw LLM output and the shared
+`DecisionProposal` schema (`app/schemas.py` — the same type the Policy Engine consumes). The
+LLM's only allowed output is `DecisionProposal` (BUY/SELL/HOLD on a watchlist symbol).
+
+- `validate_decision_proposal(raw)` — parses a JSON string/bytes or dict into a `DecisionProposal`.
+  Malformed JSON or a schema violation never crashes the caller — it's logged and raised as
+  `ToolValidationError` instead.
+- `decision_proposal_json_schema()` — exports the JSON Schema, for registering with an LLM's
+  function-calling/structured-output API.
+
 ## Tests
 
 ```bash
