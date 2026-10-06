@@ -51,7 +51,8 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           cd backend
-          pytest tests/
+          # Exclude integration tests (e.g. live-Ollama checks) — CI has no such services.
+          pytest tests/ -m "not integration"
 
   frontend-ci:
     name: Frontend CI (Typecheck & Build)
