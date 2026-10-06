@@ -48,6 +48,22 @@ LLM_PROVIDER=ollama   # or "openai"
   `http://localhost:11434`) with the model pulled (`OLLAMA_MODEL`, default `llama3.1`).
 - `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
 
+### Encrypted Alpaca Credential Vault
+
+`app/accounts/` lets a logged-in user connect their own Alpaca paper-trading credentials, encrypted
+at rest (Fernet) via `CREDENTIAL_ENCRYPTION_KEY` — no endpoint ever returns the key/secret, encrypted
+or plaintext.
+
+- `POST /accounts/alpaca` — encrypt and store `{api_key, api_secret, is_paper}` for the current user
+  (updates in place if already connected).
+- `GET /accounts/alpaca` — connection status only (`provider`, `is_paper`, `is_connected`,
+  `last_verified_at`); 404 if nothing is connected.
+- `DELETE /accounts/alpaca` — revoke/remove the stored credentials.
+
+`get_decrypted_alpaca_credentials(db, user_id)` is the runtime-decryption entry point a broker
+integration calls to get the plaintext key/secret for an actual Alpaca API call — never logged or
+returned to a client.
+
 ### Tool Schema Definition & Validation
 
 `app/agent/tool_validation.py` is the strict boundary between raw LLM output and the shared

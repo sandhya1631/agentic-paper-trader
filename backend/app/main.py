@@ -6,6 +6,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.accounts.router import router as accounts_router
 from app.auth.router import router as auth_router
 from app.broker.router import router as broker_router
 from app.core.config import get_settings
@@ -23,6 +24,13 @@ tags_metadata = [
         "name": "Authentication",
         "description": (
             "User registration, authentication, JWT token issuance, and user profile management."
+        ),
+    },
+    {
+        "name": "accounts",
+        "description": (
+            "Connect, check status of, and disconnect a user's Alpaca credentials. "
+            "Secrets are encrypted at rest (Fernet) and never returned by any endpoint."
         ),
     },
     {
@@ -84,6 +92,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(accounts_router)
 app.include_router(broker_router, prefix="/api/v1")
 
 app.include_router(llm_router)
