@@ -48,6 +48,25 @@ LLM_PROVIDER=ollama   # or "openai"
   `http://localhost:11434`) with the model pulled (`OLLAMA_MODEL`, default `llama3.1`).
 - `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
 
+#### Install & verify the local LLM
+
+The project's `docker-compose.yml` runs Ollama as a service (reachable from the backend
+container at `http://ollama:11434`). Pull the model and verify connectivity:
+
+```bash
+docker compose up -d ollama
+docker compose exec ollama ollama pull llama3.1
+
+# Active health probe (503 if unreachable):
+curl "http://localhost:8000/llm/health?probe=true"
+
+# Or run the standalone verifier (reachable + model available + a live generation):
+python scripts/verify_llm.py
+```
+
+Running Ollama natively instead of via Compose? Set `OLLAMA_BASE_URL=http://localhost:11434`
+for local dev (or `http://host.docker.internal:11434` from a container reaching the host).
+
 ### Encrypted Alpaca Credential Vault
 
 `app/accounts/` lets a logged-in user connect their own Alpaca paper-trading credentials, encrypted
@@ -79,5 +98,7 @@ LLM's only allowed output is `DecisionProposal` (BUY/SELL/HOLD on a watchlist sy
 ## Tests
 
 ```bash
-pytest
+pytest                      # unit tests (no external services)
+pytest -m "not integration" # what CI runs
+OLLAMA_INTEGRATION=1 pytest -m integration   # live-Ollama test (needs the model pulled)
 ```
