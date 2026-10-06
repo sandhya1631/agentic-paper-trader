@@ -45,6 +45,19 @@ def test_allocation_over_limit_is_rejected():
     assert "exceeds" in result.reason
 
 
+def test_configurable_allocation_limit():
+    result = check_maximum_allocation(
+        portfolio_equity=Decimal("10000"),
+        current_exposure=Decimal("300"),
+        proposed_order_value=Decimal("300"),
+        max_symbol_allocation=Decimal("0.05"),
+    )
+
+    assert result.allowed is False
+    assert result.projected_exposure == Decimal("600")
+    assert result.maximum_allowed == Decimal("500")
+
+
 @pytest.mark.asyncio
 async def test_broker_not_called_when_allocation_exceeds_limit():
     broker_called = False
