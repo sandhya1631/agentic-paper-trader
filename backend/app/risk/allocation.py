@@ -2,9 +2,6 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 
-MAX_SYMBOL_ALLOCATION = Decimal("0.10")
-
-
 @dataclass
 class AllocationResult:
     allowed: bool
@@ -19,16 +16,17 @@ def check_maximum_allocation(
     portfolio_equity: Decimal,
     current_exposure: Decimal,
     proposed_order_value: Decimal,
+    max_symbol_allocation: Decimal = Decimal("0.10"),
 ) -> AllocationResult:
-    """Check that projected symbol exposure does not exceed 10%."""
+    """Check projected symbol exposure against the configured allocation limit."""
 
-    maximum_allowed = portfolio_equity * MAX_SYMBOL_ALLOCATION
+    maximum_allowed = portfolio_equity * max_symbol_allocation
     projected_exposure = current_exposure + proposed_order_value
 
     allowed = projected_exposure <= maximum_allowed
 
     if allowed:
-        reason = "Projected symbol exposure is within the 10% allocation limit."
+        reason = "Projected symbol exposure is within the allocation limit."
     else:
         reason = (
             f"Projected exposure {projected_exposure} exceeds "
