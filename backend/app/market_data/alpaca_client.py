@@ -61,21 +61,30 @@ class MarketDataCollector:
         limit: int = DEFAULT_BAR_LIMIT,
         timeframe_minutes: int = DEFAULT_TIMEFRAME_MINUTES,
         validate: bool = False,
+        min_bars: int | None = None,
     ) -> dict[str, list[OHLCVBar]]:
         """Return the latest `limit` bars per symbol (default watchlist: AAPL, NVDA, SPY)."""
         symbols = symbols or DEFAULT_WATCHLIST
+        # A 7-day lookback window ensures enough 5-minute bars are returned across weekends,
+        # holidays, and non-trading hours to fulfill the requested `limit`.
         start_time = datetime.now(timezone.utc) - timedelta(days=7)
+
+        # Batch all symbols into a single StockBarsRequest instead of sequential per-symbol requests.
+        # DataFeed.IEX is specified because Alpaca free/paper accounts only have access to the IEX feed;
+        # defaulting to SIP feed results in HTTP 403 Forbidden errors.
+        request = StockBarsRequest(
+            symbol_or_symbols=symbols,
+            timeframe=TimeFrame(timeframe_minutes, TimeFrameUnit.Minute),
+            limit=limit,
+            start=start_time,
+            feed=DataFeed.IEX,
+        )
+        bar_set = await self._get_bars_with_retry(request)
+
         result: dict[str, list[OHLCVBar]] = {symbol: [] for symbol in symbols}
+        effective_min_bars = min_bars if min_bars is not None else limit
 
         for symbol in symbols:
-            request = StockBarsRequest(
-                symbol_or_symbols=symbol,
-                timeframe=TimeFrame(timeframe_minutes, TimeFrameUnit.Minute),
-                limit=limit,
-                start=start_time,
-                feed=DataFeed.IEX,
-            )
-            bar_set = await self._get_bars_with_retry(request)
             bars = bar_set.data.get(symbol, [])
             parsed_bars = [
                 OHLCVBar(
@@ -90,7 +99,7 @@ class MarketDataCollector:
             ]
             if validate:
                 from app.market_data.validation import validate_ohlcv_bars
-                parsed_bars = validate_ohlcv_bars(symbol, parsed_bars, min_bars=0)
+                parsed_bars = validate_ohlcv_bars(symbol, parsed_bars, min_bars=effective_min_bars)
             result[symbol] = parsed_bars
         return result
 
