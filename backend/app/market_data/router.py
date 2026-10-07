@@ -9,6 +9,7 @@ from app.market_data.alpaca_client import (
     OHLCVBar,
     create_market_data_collector,
 )
+from app.market_data.validation import MarketDataValidationError
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
 
@@ -17,6 +18,7 @@ router = APIRouter(prefix="/market-data", tags=["market-data"])
 async def get_bars(
     symbols: list[str] = Query(default=DEFAULT_WATCHLIST),
     limit: int = Query(default=DEFAULT_BAR_LIMIT, ge=1, le=1000),
+    validate: bool = Query(default=False, description="Run market data quality validation checks"),
     _current_user: User = Depends(get_current_user),
 ) -> dict[str, list[OHLCVBar]]:
     """Latest OHLCV bars per symbol (default watchlist: AAPL, NVDA, SPY). Protected route."""
@@ -27,4 +29,10 @@ async def get_bars(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
 
-    return await collector.fetch_latest_bars(symbols, limit=limit)
+    try:
+        return await collector.fetch_latest_bars(symbols, limit=limit, validate=validate)
+    except MarketDataValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"symbol": exc.symbol, "reason_code": exc.reason_code, "reason": exc.reason},
+        ) from exc

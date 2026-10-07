@@ -57,6 +57,45 @@ async def test_fetch_latest_bars_parses_response():
 
 
 @pytest.mark.asyncio
+async def test_fetch_latest_bars_batches_multiple_symbols():
+    collector = MarketDataCollector(api_key="fake-key", api_secret="fake-secret")
+
+    fake_bar_set = MagicMock()
+    fake_bar_set.data = {
+        "AAPL": [_make_bar(150.0)],
+        "NVDA": [_make_bar(180.0)],
+        "SPY": [_make_bar(500.0)],
+    }
+
+    mock_get_bars = MagicMock(return_value=fake_bar_set)
+    with patch.object(collector._client, "get_stock_bars", mock_get_bars):
+        result = await collector.fetch_latest_bars(["AAPL", "NVDA", "SPY"], limit=1)
+
+    # Verify a single request was sent with the list of symbols
+    assert mock_get_bars.call_count == 1
+    req = mock_get_bars.call_args[0][0]
+    assert req.symbol_or_symbols == ["AAPL", "NVDA", "SPY"]
+    assert len(result) == 3
+
+
+@pytest.mark.asyncio
+async def test_fetch_latest_bars_enforces_min_bars_when_validating():
+    from app.market_data.validation import MarketDataValidationError, ValidationErrorReason
+
+    collector = MarketDataCollector(api_key="fake-key", api_secret="fake-secret")
+
+    fake_bar_set = MagicMock()
+    fake_bar_set.data = {"AAPL": [_make_bar(150.0)]}  # Only 1 bar returned
+
+    with patch.object(collector._client, "get_stock_bars", return_value=fake_bar_set):
+        with pytest.raises(MarketDataValidationError) as exc_info:
+            # limit=50 requires at least 50 bars when validate=True
+            await collector.fetch_latest_bars(["AAPL"], limit=50, validate=True)
+
+    assert exc_info.value.reason_code == ValidationErrorReason.INSUFFICIENT_BARS
+
+
+@pytest.mark.asyncio
 async def test_fetch_latest_bars_retries_on_rate_limit_then_succeeds():
     collector = MarketDataCollector(api_key="fake-key", api_secret="fake-secret")
 
