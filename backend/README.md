@@ -48,6 +48,25 @@ LLM_PROVIDER=ollama   # or "openai"
   `http://localhost:11434`) with the model pulled (`OLLAMA_MODEL`, default `llama3.1`).
 - `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
 
+#### Install & verify the local LLM
+
+The project's `docker-compose.yml` runs Ollama as a service (reachable from the backend
+container at `http://ollama:11434`). Pull the model and verify connectivity:
+
+```bash
+docker compose up -d ollama
+docker compose exec ollama ollama pull llama3.1
+
+# Active health probe (503 if unreachable):
+curl "http://localhost:8000/llm/health?probe=true"
+
+# Or run the standalone verifier (reachable + model available + a live generation):
+python scripts/verify_llm.py
+```
+
+Running Ollama natively instead of via Compose? Set `OLLAMA_BASE_URL=http://localhost:11434`
+for local dev (or `http://host.docker.internal:11434` from a container reaching the host).
+
 ### Encrypted Alpaca Credential Vault
 
 `app/accounts/` lets a logged-in user connect their own Alpaca paper-trading credentials, encrypted
@@ -64,6 +83,13 @@ or plaintext.
 integration calls to get the plaintext key/secret for an actual Alpaca API call — never logged or
 returned to a client.
 
+The `/api/v1/broker/*` endpoints consume the vault: each request builds its Alpaca client from the
+authenticated user's decrypted credentials. If a user has no connected account, the broker falls
+back to `X-Alpaca-*` headers / `ALPACA_*` in `.env` **only when `APP_ENV=development`**; otherwise
+the request is rejected (400) and the broker is never called. If a connected account's ciphertext
+cannot be decrypted (e.g. the key changed), the request fails with 500 rather than silently falling
+back.
+
 ### Tool Schema Definition & Validation
 
 `app/agent/tool_validation.py` is the strict boundary between raw LLM output and the shared
@@ -79,5 +105,7 @@ LLM's only allowed output is `DecisionProposal` (BUY/SELL/HOLD on a watchlist sy
 ## Tests
 
 ```bash
-pytest
+pytest                      # unit tests (no external services)
+pytest -m "not integration" # what CI runs
+OLLAMA_INTEGRATION=1 pytest -m integration   # live-Ollama test (needs the model pulled)
 ```
