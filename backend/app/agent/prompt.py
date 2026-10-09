@@ -68,5 +68,8 @@ STRATEGY_REGISTRY: dict[str, str] = {
 def get_system_prompt(strategy_version: str = "S-001") -> str:
     """Retrieve the versioned system prompt text for a specified strategy version."""
     if strategy_version not in STRATEGY_REGISTRY:
-        raise ValueError(f"Unknown strategy version: {strategy_version}. Available: {list(STRATEGY_REGISTRY.keys())}")
+        raise ValueError(
+            f"Unknown strategy version: {strategy_version}. "
+            f"Available: {list(STRATEGY_REGISTRY.keys())}"
+        )
     return STRATEGY_REGISTRY[strategy_version]

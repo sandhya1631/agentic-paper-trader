@@ -6,8 +6,8 @@ in a thread (`asyncio.to_thread`) to keep the FastAPI app non-blocking.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 import logging
+from datetime import datetime, timedelta, timezone
 
 from alpaca.common.exceptions import APIError
 from alpaca.data.enums import DataFeed

@@ -7,13 +7,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.router import router as accounts_router
+from app.agent.router import router as agent_router
 from app.auth.router import router as auth_router
 from app.broker.router import router as broker_router
 from app.core.config import get_settings
 from app.db import models  # noqa: F401  (registers ORM models on Base.metadata)
 from app.db.base import Base
 from app.db.session import engine, get_db
-from app.agent.router import router as agent_router
 from app.llm.router import router as llm_router
 from app.market_data.router import router as market_data_router
 

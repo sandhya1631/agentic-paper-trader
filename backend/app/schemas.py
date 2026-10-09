@@ -47,6 +47,12 @@ class DecisionProposal(APIModel):
     quantity: int = Field(default=0, ge=0)
     reasoning: str
 
+    @model_validator(mode="after")
+    def check_quantity_for_action(self) -> "DecisionProposal":
+        if self.action != DecisionAction.HOLD and self.quantity <= 0:
+            raise ValueError("quantity must be a positive integer for BUY/SELL")
+        return self
+
 
 class MarketSnapshot(APIModel):
     symbol: Symbol

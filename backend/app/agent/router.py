@@ -26,7 +26,10 @@ async def trigger_manual_cycle(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Any:
-    """Manually trigger one execution cycle for an agent. Auto-creates default agent if none exists."""
+    """Manually trigger one execution cycle for an agent.
+
+    Auto-creates a default agent if none exists.
+    """
     if agent_id is None:
         stmt = select(AgentConfig).limit(1)
         res = await db.execute(stmt)
@@ -48,7 +51,7 @@ async def trigger_manual_cycle(
                 db.add(account)
                 await db.flush()
 
-            pol_stmt = select(PolicySet).where(PolicySet.is_active == True).limit(1)
+            pol_stmt = select(PolicySet).where(PolicySet.is_active).limit(1)
             pol_res = await db.execute(pol_stmt)
             policy_set = pol_res.scalar_one_or_none()
             if not policy_set:

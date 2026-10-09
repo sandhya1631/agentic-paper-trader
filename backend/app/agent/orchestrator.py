@@ -114,13 +114,19 @@ async def run_agent_cycle(
                 raw_response = repaired_response
                 proposal = validate_decision_proposal(repaired_response)
             except ToolValidationError as repair_err:
-                logger.error("Self-repair retry also failed schema validation: %s. Defaulting to HOLD.", repair_err)
+                logger.error(
+                    "Self-repair retry also failed schema validation: %s. Defaulting to HOLD.",
+                    repair_err,
+                )
                 default_symbol = Symbol(agent.watchlist[0]) if agent.watchlist else Symbol.AAPL
                 proposal = DecisionProposal(
                     symbol=default_symbol,
                     action=DecisionAction.HOLD,
-                    quantity=1,
-                    reasoning=f"LLM output validation failed twice; defaulted to HOLD. Error: {repair_err}",
+                    quantity=0,
+                    reasoning=(
+                        f"LLM output validation failed twice; defaulted to HOLD. "
+                        f"Error: {repair_err}"
+                    ),
                 )
 
         # 7. Persist Cycle Success & Snapshot State
