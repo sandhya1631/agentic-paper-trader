@@ -1,4 +1,7 @@
-"""Unit and integration tests for Agent Context Builder & Orchestrator (Stories 2.1.1, 2.1.2, 2.3.1, 2.3.2)."""
+"""Unit and integration tests for Agent Context Builder & Orchestrator.
+
+Stories 2.1.1, 2.1.2, 2.3.1, 2.3.2.
+"""
 
 import json
 from datetime import datetime, timezone
@@ -10,11 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.context import build_agent_context
 from app.agent.orchestrator import run_agent_cycle
 from app.agent.prompt import get_system_prompt
-from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
-from app.db.enums import ApprovalMode, CycleStatus, CycleTrigger, DecisionAction, UserRole
-from app.db.models import AgentConfig, AgentCycle, PolicySet, TradingAccount, User
+from app.db.enums import ApprovalMode, CycleStatus, CycleTrigger, UserRole
+from app.db.models import AgentConfig, PolicySet, TradingAccount, User
 from app.market_data.alpaca_client import OHLCVBar
-from app.schemas import DecisionProposal
 
 
 def _make_bar(price: float) -> OHLCVBar:
@@ -106,7 +107,10 @@ async def test_run_agent_cycle_success(db_session: AsyncSession):
             "symbol": "AAPL",
             "action": "BUY",
             "quantity": 10,
-            "reasoning": "RSI-14 is 32.5 (oversold) and price is above SMA-20. Citing RSI=32.5, SMA20=149.50.",
+            "reasoning": (
+                "RSI-14 is 32.5 (oversold) and price is above SMA-20. "
+                "Citing RSI=32.5, SMA20=149.50."
+            ),
         }
     )
     mock_llm.generate = AsyncMock(return_value=valid_json)
