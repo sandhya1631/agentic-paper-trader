@@ -5,9 +5,9 @@ corrupted market data does not proceed to technical indicator calculation, LLM
 decision making, or order execution.
 """
 
+import math
 from datetime import datetime
 from enum import Enum
-import math
 from typing import Any
 
 from app.market_data.alpaca_client import OHLCVBar

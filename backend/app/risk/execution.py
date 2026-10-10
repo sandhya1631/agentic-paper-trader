@@ -3,7 +3,6 @@ from typing import Awaitable, Callable, TypeVar
 
 from app.risk.allocation import AllocationResult, check_maximum_allocation
 
-
 T = TypeVar("T")
 
 
