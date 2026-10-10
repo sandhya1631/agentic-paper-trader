@@ -81,27 +81,31 @@ class MarketDataCollector:
                 start=start_time,
                 feed=DataFeed.IEX,
             )
-            try:
-                bar_set = await self._get_bars_with_retry(req)
-                bars = bar_set.data.get(sym, [])
-                parsed = [
-                    OHLCVBar(
-                        timestamp=bar.timestamp.isoformat(),
-                        open=bar.open,
-                        high=bar.high,
-                        low=bar.low,
-                        close=bar.close,
-                        volume=bar.volume,
-                    )
-                    for bar in bars
-                ]
-                if validate:
-                    from app.market_data.validation import validate_ohlcv_bars
-                    parsed = validate_ohlcv_bars(sym, parsed, min_bars=effective_min_bars)
-                return sym, parsed
-            except Exception as exc:
-                logger.warning("Failed to fetch bars for symbol %s: %s", sym, exc)
-                return sym, []
+            # Deliberately not caught here: a fetch/retry failure (APIError) or a
+            # data-quality failure (MarketDataValidationError) must propagate, per the
+            # architecture doc's failure-handling spec ("fail cycle if freshness cannot
+            # be met"). The caller (run_agent_cycle) already catches broadly and falls
+            # back safely; swallowing it here instead would silently hide the failure
+            # as an empty bar list indistinguishable from "symbol legitimately has no
+            # bars," and would make /market-data/bars?validate=true never actually
+            # return its documented 422 on bad data.
+            bar_set = await self._get_bars_with_retry(req)
+            bars = bar_set.data.get(sym, [])
+            parsed = [
+                OHLCVBar(
+                    timestamp=bar.timestamp.isoformat(),
+                    open=bar.open,
+                    high=bar.high,
+                    low=bar.low,
+                    close=bar.close,
+                    volume=bar.volume,
+                )
+                for bar in bars
+            ]
+            if validate:
+                from app.market_data.validation import validate_ohlcv_bars
+                parsed = validate_ohlcv_bars(sym, parsed, min_bars=effective_min_bars)
+            return sym, parsed
 
         tasks = [_fetch_single_symbol(s) for s in symbols]
         fetched_tuples = await asyncio.gather(*tasks)
