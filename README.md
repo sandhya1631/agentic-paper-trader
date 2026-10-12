@@ -46,3 +46,27 @@ Dispatches approved orders to the Trading API
 - Testing: PyTest (safety guardrail verification)
 - DevOps: Docker & Docker Compose
 - CI/CD: GitHub Actions
+
+## Deployment
+
+| Part | Platform | URL |
+|---|---|---|
+| Backend (FastAPI) | Render | https://agentic-paper-trader.onrender.com |
+| Frontend (Next.js) | Vercel | _URL here_ |
+| Database (Postgres) | Supabase | n/a |
+
+- API docs: [/docs](https://agentic-paper-trader.onrender.com/docs)
+- Health check: [/health/db](https://agentic-paper-trader.onrender.com/health/db)
+
+> The backend runs on Render's free tier, so the first request after inactivity can take ~50 seconds to wake up.
+
+### Backend on Render
+- Runtime: Docker
+- Root directory: `backend`
+- Health check path: `/health`
+
+Environment variables (set in Render → Environment; **never commit values**):
+
+### Frontend on Vercel
+- Root directory: `frontend`
+- Env var: `NEXT_PUBLIC_API_BASE_URL=https://agentic-paper-trader.onrender.com`
