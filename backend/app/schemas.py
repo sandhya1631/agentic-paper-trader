@@ -44,8 +44,14 @@ class AgentConfigRead(APIModel):
 class DecisionProposal(APIModel):
     symbol: Symbol
     action: DecisionAction
-    quantity: int = Field(gt=0)
+    quantity: int = Field(default=0, ge=0)
     reasoning: str
+
+    @model_validator(mode="after")
+    def check_quantity_for_action(self) -> "DecisionProposal":
+        if self.action != DecisionAction.HOLD and self.quantity <= 0:
+            raise ValueError("quantity must be a positive integer for BUY/SELL")
+        return self
 
 
 class MarketSnapshot(APIModel):
@@ -157,6 +163,11 @@ class CycleRead(APIModel):
     completed_at: datetime | None = None
     failure_code: str | None = None
     failure_message: str | None = None
+    snapshot_json: dict[str, Any] | None = None
+    prompt_text: str | None = None
+    llm_raw_response: str | None = None
+    proposal_json: dict[str, Any] | None = None
+    correlation_id: UUID | None = None
 
 
 class AuditEventRead(APIModel):
