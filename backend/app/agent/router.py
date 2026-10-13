@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.orchestrator import run_agent_cycle
+from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.auth.dependencies import get_current_user
 from app.db.enums import CycleTrigger
 from app.db.models import AgentConfig, AgentCycle, PolicySet, TradingAccount, User
@@ -88,6 +88,10 @@ async def trigger_manual_cycle(
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except CycleOverlapError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
         ) from exc
     except Exception as exc:
         raise HTTPException(
