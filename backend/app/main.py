@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.router import router as accounts_router
+from app.agent.router import router as agent_router
 from app.auth.router import router as auth_router
 from app.broker.router import router as broker_router
 from app.core.config import get_settings
@@ -97,6 +98,7 @@ app.include_router(broker_router, prefix="/api/v1")
 
 app.include_router(llm_router)
 app.include_router(market_data_router)
+app.include_router(agent_router)
 
 @app.get("/", include_in_schema=False)
 async def root():

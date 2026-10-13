@@ -57,25 +57,28 @@ async def test_fetch_latest_bars_parses_response():
 
 
 @pytest.mark.asyncio
-async def test_fetch_latest_bars_batches_multiple_symbols():
+async def test_fetch_latest_bars_fetches_each_symbol_individually():
+    """Alpaca's combined limit applies across all symbols in one batched request
+    (only the first symbol gets data back), so each symbol must be requested
+    separately — confirmed with Dhruv, this isn't the PR #86 regression repeating."""
     collector = MarketDataCollector(api_key="fake-key", api_secret="fake-secret")
 
-    fake_bar_set = MagicMock()
-    fake_bar_set.data = {
-        "AAPL": [_make_bar(150.0)],
-        "NVDA": [_make_bar(180.0)],
-        "SPY": [_make_bar(500.0)],
-    }
+    def fake_get_bars(request):
+        sym = request.symbol_or_symbols
+        fake_bar_set = MagicMock()
+        fake_bar_set.data = {sym: [_make_bar(100.0)]}
+        return fake_bar_set
 
-    mock_get_bars = MagicMock(return_value=fake_bar_set)
+    mock_get_bars = MagicMock(side_effect=fake_get_bars)
     with patch.object(collector._client, "get_stock_bars", mock_get_bars):
         result = await collector.fetch_latest_bars(["AAPL", "NVDA", "SPY"], limit=1)
 
-    # Verify a single request was sent with the list of symbols
-    assert mock_get_bars.call_count == 1
-    req = mock_get_bars.call_args[0][0]
-    assert req.symbol_or_symbols == ["AAPL", "NVDA", "SPY"]
+    # One request per symbol, each for a single symbol (not a combined list)
+    assert mock_get_bars.call_count == 3
+    requested_symbols = {call.args[0].symbol_or_symbols for call in mock_get_bars.call_args_list}
+    assert requested_symbols == {"AAPL", "NVDA", "SPY"}
     assert len(result) == 3
+    assert all(len(bars) == 1 for bars in result.values())
 
 
 @pytest.mark.asyncio

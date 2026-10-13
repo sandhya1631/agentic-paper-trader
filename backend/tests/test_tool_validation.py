@@ -83,6 +83,21 @@ def test_validate_rejects_non_positive_quantity():
         validate_decision_proposal(bad)
 
 
+def test_validate_rejects_buy_with_omitted_quantity():
+    """A BUY/SELL must not silently become 'quantity: 0' just because it's optional."""
+    bad = {"symbol": "AAPL", "action": "BUY", "reasoning": "missing quantity"}
+    with pytest.raises(ToolValidationError):
+        validate_decision_proposal(bad)
+
+
+def test_validate_accepts_hold_with_omitted_quantity():
+    """A HOLD has nothing to quantify, so omitting quantity is valid and defaults to 0."""
+    result = validate_decision_proposal(
+        {"symbol": "AAPL", "action": "HOLD", "reasoning": "no clear signal"}
+    )
+    assert result.quantity == 0
+
+
 def test_validate_rejects_missing_required_field():
     bad = {"symbol": "AAPL", "action": "BUY", "quantity": 10}  # no reasoning
     with pytest.raises(ToolValidationError):
@@ -101,5 +116,8 @@ def test_validate_logs_error_on_schema_violation(caplog):
 
 def test_decision_proposal_json_schema_has_required_fields():
     schema = decision_proposal_json_schema()
-    assert schema["required"] == ["symbol", "action", "quantity", "reasoning"]
+    # `quantity` is intentionally not required at the schema level — a HOLD decision
+    # has nothing to quantify, so the LLM can omit it (it defaults to 0). Positivity
+    # for BUY/SELL is enforced separately by DecisionProposal's model validator.
+    assert schema["required"] == ["symbol", "action", "reasoning"]
     assert set(schema["properties"].keys()) == {"symbol", "action", "quantity", "reasoning"}

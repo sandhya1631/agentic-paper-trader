@@ -128,4 +128,10 @@ class AgentCycle(Base, UUIDPrimaryKey):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    snapshot_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    prompt_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proposal_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    correlation_id: Mapped[uuid.UUID] = mapped_column(Uuid, default=uuid.uuid4, index=True)
     agent: Mapped[AgentConfig] = relationship(back_populates="cycles")
+
