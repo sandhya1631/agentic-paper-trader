@@ -158,6 +158,8 @@ class AlpacaClient:
         }
         if order.type.value.lower() == "limit" and order.limit_price is not None:
             payload["limit_price"] = str(order.limit_price)
+        if order.client_order_id:
+            payload["client_order_id"] = order.client_order_id
 
         client = self._get_client()
         resp = await client.post(url, headers=self.headers, json=payload, timeout=10.0)

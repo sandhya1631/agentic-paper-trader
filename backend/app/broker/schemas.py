@@ -55,6 +55,7 @@ class OrderCreate(APIModel):
     type: OrderType = OrderType.MARKET
     time_in_force: TimeInForce = TimeInForce.DAY
     limit_price: Decimal | None = Field(default=None, gt=0)
+    client_order_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class AlpacaOrderRead(APIModel):
