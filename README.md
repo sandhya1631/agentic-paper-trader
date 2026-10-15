@@ -52,7 +52,7 @@ Dispatches approved orders to the Trading API
 | Part | Platform | URL |
 |---|---|---|
 | Backend (FastAPI) | Render | https://agentic-paper-trader.onrender.com |
-| Frontend (Next.js) | Vercel | _URL here_ |
+| Frontend (Next.js) | Vercel | https://agentic-paper-trader.vercel.app |
 | Database (Postgres) | Supabase | n/a |
 
 - API docs: [/docs](https://agentic-paper-trader.onrender.com/docs)
