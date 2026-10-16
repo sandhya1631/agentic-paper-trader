@@ -23,8 +23,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 from app.db.enums import (
     ApprovalMode,
+    BrokerOrderStatus,
     CycleStatus,
     CycleTrigger,
+    OrderSide,
     UserRole,
 )
 
@@ -134,4 +136,29 @@ class AgentCycle(Base, UUIDPrimaryKey):
     proposal_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     correlation_id: Mapped[uuid.UUID] = mapped_column(Uuid, default=uuid.uuid4, index=True)
     agent: Mapped[AgentConfig] = relationship(back_populates="cycles")
+
+
+class BrokerOrder(Base, UUIDPrimaryKey, Timestamped):
+    """A paper order submitted to the broker (Story 1.3.1 / Issue #62).
+
+    `decision_id` references AgentCycle.id — there is no separate Decision table
+    yet (AgentCycle.proposal_json is the decision record for the MVP).
+    """
+
+    __tablename__ = "broker_orders"
+    decision_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_cycles.id", ondelete="RESTRICT"), index=True
+    )
+    client_order_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    broker_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[BrokerOrderStatus] = mapped_column(
+        Enum(BrokerOrderStatus), default=BrokerOrderStatus.PENDING_SUBMISSION
+    )
+    symbol: Mapped[str] = mapped_column(String(10))
+    side: Mapped[OrderSide] = mapped_column(Enum(OrderSide))
+    requested_quantity: Mapped[int] = mapped_column(Integer)
+    filled_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    average_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
