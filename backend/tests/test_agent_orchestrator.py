@@ -4,6 +4,7 @@ Stories 2.1.1, 2.1.2, 2.3.1, 2.3.2.
 """
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.context import build_agent_context
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
-from app.agent.prompt import get_system_prompt
+from app.agent.prompt import get_prompt_definition, get_system_prompt
 from app.db.enums import ApprovalMode, CycleStatus, CycleTrigger, UserRole
 from app.db.models import AgentConfig, AgentCycle, PolicySet, TradingAccount, User
 from app.market_data.alpaca_client import OHLCVBar
@@ -42,9 +43,47 @@ def test_get_system_prompt_s001():
     assert "HOLD" in prompt
 
 
+def test_prompt_lists_only_buy_sell_hold():
+    prompt = get_system_prompt("S-001")
+    permitted_actions = prompt.partition("PERMITTED ACTIONS:")[2].partition(
+        "STRATEGY RULES:"
+    )[0]
+
+    assert permitted_actions
+    actions = re.findall(r"^\d+\.\s+([A-Z]+)", permitted_actions, re.MULTILINE)
+    assert actions == ["BUY", "SELL", "HOLD"]
+    assert "No other action is permitted." in permitted_actions
+    assert "SHORT" not in prompt
+    assert "MARGIN" not in prompt
+
+
+def test_prompt_requires_numeric_evidence():
+    prompt = get_system_prompt("S-001")
+
+    assert "exact numerical values" in prompt
+    assert "exact RSI-14 value" in prompt
+    assert "exact SMA-20 and SMA-50 values" in prompt
+    assert "current price and cash balances" in prompt
+
+
+def test_prompt_instructs_hold_on_uncertainty():
+    prompt = get_system_prompt("S-001")
+
+    assert "IF uncertain -> DEFAULT TO HOLD." in prompt
+    assert "NEVER GUESS OR FABRICATE DATA." in prompt
+    assert "MUST output HOLD" in prompt
+
+
 def test_get_system_prompt_unknown_raises():
     with pytest.raises(ValueError):
         get_system_prompt("INVALID_VERSION")
+
+
+def test_get_prompt_definition_records_revision_separately():
+    definition = get_prompt_definition("S-001")
+
+    assert definition.revision == "1.0.0"
+    assert "PROMPT REVISION: 1.0.0" in definition.text
 
 
 def test_build_agent_context():
@@ -134,6 +173,8 @@ async def test_run_agent_cycle_success(db_session: AsyncSession):
     assert cycle.proposal_json["action"] == "BUY"
     assert cycle.proposal_json["symbol"] == "AAPL"
     assert cycle.snapshot_json["watchlist"] == ["AAPL", "NVDA"]
+    assert cycle.prompt_version == agent.strategy_version
+    assert cycle.prompt_revision == "1.0.0"
     assert "S-001" in cycle.prompt_text
 
 
