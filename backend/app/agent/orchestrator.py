@@ -31,6 +31,7 @@ from app.db.models import AgentConfig, AgentCycle, utcnow
 from app.llm.base import LLMClient
 from app.llm.factory import get_llm_client
 from app.market_data.alpaca_client import MarketDataCollector, create_market_data_collector
+from app.risk.policies import POLICY_VERSION
 from app.schemas import DecisionProposal
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,10 @@ async def run_agent_cycle(
             bars_per_symbol=bars_per_symbol,
             strategy_version=agent.strategy_version,
         )
+        context["versions"] = {
+            "strategy": agent.strategy_version,
+            "policy": POLICY_VERSION,
+        }
 
         system_prompt = get_system_prompt(agent.strategy_version)
         prompt_input = json.dumps(context, indent=2)

@@ -6,6 +6,7 @@ Stories 2.1.1, 2.1.2, 2.3.1, 2.3.2.
 import json
 import uuid
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from app.agent.prompt import get_system_prompt
 from app.db.enums import ApprovalMode, CycleStatus, CycleTrigger, UserRole
 from app.db.models import AgentConfig, AgentCycle, PolicySet, TradingAccount, User
 from app.market_data.alpaca_client import OHLCVBar
+from app.risk.policies import POLICY_VERSION
 
 
 def _make_bar(price: float) -> OHLCVBar:
@@ -45,6 +47,18 @@ def test_get_system_prompt_s001():
 def test_get_system_prompt_unknown_raises():
     with pytest.raises(ValueError):
         get_system_prompt("INVALID_VERSION")
+
+
+def test_agent_config_rejects_unknown_strategy_version():
+    agent = AgentConfig(strategy_version="S-001")
+
+    with pytest.raises(ValueError, match="Unknown strategy version"):
+        agent.strategy_version = "INVALID_VERSION"
+
+
+def test_agent_config_rejects_unknown_strategy_version_on_creation():
+    with pytest.raises(ValueError, match="Unknown strategy version"):
+        AgentConfig(strategy_version="INVALID_VERSION")
 
 
 def test_build_agent_context():
@@ -134,7 +148,59 @@ async def test_run_agent_cycle_success(db_session: AsyncSession):
     assert cycle.proposal_json["action"] == "BUY"
     assert cycle.proposal_json["symbol"] == "AAPL"
     assert cycle.snapshot_json["watchlist"] == ["AAPL", "NVDA"]
+    assert cycle.snapshot_json["strategy_version"] == "S-001"
+    assert cycle.snapshot_json["versions"] == {
+        "strategy": "S-001",
+        "policy": POLICY_VERSION,
+    }
     assert "S-001" in cycle.prompt_text
+    assert mock_llm.generate.await_args.kwargs["system"] == get_system_prompt("S-001")
+
+
+@pytest.mark.asyncio
+async def test_run_agent_cycle_records_version_metadata_without_database():
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        watchlist=["AAPL"],
+        strategy_version="S-001",
+    )
+    agent_result = MagicMock()
+    agent_result.scalar_one_or_none.return_value = agent
+    no_active_cycle_result = MagicMock()
+    no_active_cycle_result.scalars.return_value.first.return_value = None
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[agent_result, no_active_cycle_result])
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+
+    mock_llm = MagicMock()
+    mock_llm.generate = AsyncMock(
+        return_value=json.dumps(
+            {
+                "symbol": "AAPL",
+                "action": "HOLD",
+                "quantity": 0,
+                "reasoning": "No signal.",
+            }
+        )
+    )
+    mock_collector = MagicMock()
+    mock_collector.fetch_latest_bars = AsyncMock(return_value={"AAPL": []})
+
+    cycle = await run_agent_cycle(
+        agent.id,
+        db,
+        llm_client=mock_llm,
+        collector=mock_collector,
+    )
+
+    assert cycle.snapshot_json["strategy_version"] == "S-001"
+    assert cycle.snapshot_json["versions"] == {
+        "strategy": "S-001",
+        "policy": POLICY_VERSION,
+    }
+    assert mock_llm.generate.await_args.kwargs["system"] == get_system_prompt("S-001")
 
 
 @pytest.mark.asyncio

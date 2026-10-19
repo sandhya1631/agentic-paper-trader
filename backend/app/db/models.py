@@ -18,8 +18,9 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
+from app.agent.prompt import get_system_prompt
 from app.db.base import Base
 from app.db.enums import (
     ApprovalMode,
@@ -114,6 +115,12 @@ class AgentConfig(Base, UUIDPrimaryKey, Timestamped):
     account: Mapped[TradingAccount] = relationship(back_populates="agents")
     policy_set: Mapped[PolicySet] = relationship(back_populates="agents")
     cycles: Mapped[list[AgentCycle]] = relationship(back_populates="agent")
+
+    @validates("strategy_version")
+    def validate_strategy_version(self, _key: str, value: str) -> str:
+        get_system_prompt(value)
+        return value
+
     __table_args__ = (
         CheckConstraint("cadence_minutes = 15", name="ck_agent_mvp_cadence"),
         CheckConstraint("target_allocation > 0 AND target_allocation <= max_symbol_allocation", name="ck_agent_target_allocation"),
@@ -161,4 +168,3 @@ class BrokerOrder(Base, UUIDPrimaryKey, Timestamped):
     average_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-

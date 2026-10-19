@@ -35,6 +35,35 @@ Dispatches approved orders to the Trading API
 - Safety & Risk Guardrails: Hardcoded validation rules prevent over-allocation and invalid trades.
 - Full Observability: PostgreSQL audit trail and React web dashboard displaying live decisions and rationale.
 
+## Versioning and testing
+
+Strategy versions identify immutable system prompts. Each agent config selects a registered ID
+(currently `S-001`); the ORM rejects unknown IDs when a config is created or updated, and the
+cycle runner resolves that ID before invoking the LLM. To change strategy behavior, add a new
+entry (for example, `S-002`) in `backend/app/agent/prompt.py` and explicitly move agents to it.
+Do not edit an existing version's prompt in place: completed cycles retain the prompt and
+snapshot used to produce their decisions.
+
+Each cycle's saved `snapshot_json` includes the selected strategy version and the current
+deterministic risk-policy version (`POLICY_VERSION`). These are distinct: changing the prompt
+does not change risk rules. The policy version is a ruleset stamp, not evidence that the policy
+evaluator was run for that cycle; the current cycle runner does not invoke policy evaluation.
+`AgentConfig.version` is not the strategy version and is not currently used for optimistic
+concurrency.
+
+Run focused tests from the repository root:
+
+```powershell
+backend\.venv\Scripts\python.exe -m pytest backend\tests\test_agent_orchestrator.py backend\tests\test_policies.py -q
+```
+
+The orchestrator tests verify prompt lookup, rejection of unknown strategy IDs, propagation of
+the chosen prompt to the LLM, and persistence of strategy/policy version metadata. The policy
+tests exercise deterministic safety rules independently of the LLM. Orchestrator integration
+tests use the isolated PostgreSQL test database configured by `TEST_DATABASE_URL` (or derived
+from `DATABASE_URL` with a `_test` suffix); never point it at production. Database migrations
+are not configured yet, so deployed schema changes still require a separate migration setup.
+
 ## Tech Stack
 - Language: Python 3.11+
 - API: FastAPI
