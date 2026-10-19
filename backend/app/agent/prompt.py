@@ -3,12 +3,23 @@
 Defines versioned system prompts for the trading engine. Every prompt specifies
 the agent persona, allowed actions (BUY, SELL, HOLD), technical strategy rules,
 numerical evidence requirements, and strict JSON output schema formatting.
+
+Prompts guide the model but are not the safety boundary; proposal schema
+validation and policy enforcement remain authoritative.
 """
 
-SYSTEM_PROMPT_S001 = """================================================================================
-STRATEGY VERSION: S-001 (Technical Momentum Confluence)
-REVISION: 1.0.0
-================================================================================
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class PromptDefinition:
+    """A prompt's independently versioned text revision and rendered content."""
+
+    revision: str
+    text: str
+
+
+SYSTEM_PROMPT_S001 = """STRATEGY: Technical Momentum Confluence
 
 YOU ARE: An autonomous paper-trading quantitative agent executing technical trading strategies.
 
@@ -20,6 +31,7 @@ PERMITTED ACTIONS:
 1. BUY  - Propose buying a positive integer quantity of shares for a watchlist symbol.
 2. SELL - Propose selling a positive integer quantity of shares for an owned position.
 3. HOLD - Propose no trade action for this cycle.
+No other action is permitted.
 
 --------------------------------------------------------------------------------
 STRATEGY RULES (S-001: RSI & Moving Average Confluence):
@@ -60,16 +72,31 @@ You MUST respond with a single valid JSON object matching this schema ONLY. Do N
 }
 """
 
-STRATEGY_REGISTRY: dict[str, str] = {
-    "S-001": SYSTEM_PROMPT_S001,
+STRATEGY_REGISTRY: dict[str, PromptDefinition] = {
+    "S-001": PromptDefinition(revision="1.0.0", text=SYSTEM_PROMPT_S001),
 }
 
 
-def get_system_prompt(strategy_version: str = "S-001") -> str:
-    """Retrieve the versioned system prompt text for a specified strategy version."""
+def get_prompt_definition(strategy_version: str = "S-001") -> PromptDefinition:
+    """Retrieve a strategy's revision and fully rendered system prompt."""
     if strategy_version not in STRATEGY_REGISTRY:
         raise ValueError(
             f"Unknown strategy version: {strategy_version}. "
             f"Available: {list(STRATEGY_REGISTRY.keys())}"
         )
-    return STRATEGY_REGISTRY[strategy_version]
+    definition = STRATEGY_REGISTRY[strategy_version]
+    return PromptDefinition(
+        revision=definition.revision,
+        text=(
+            "================================================================================\n"
+            f"STRATEGY VERSION: {strategy_version}\n"
+            f"PROMPT REVISION: {definition.revision}\n"
+            "================================================================================\n"
+            f"{definition.text}"
+        ),
+    )
+
+
+def get_system_prompt(strategy_version: str = "S-001") -> str:
+    """Retrieve the versioned system prompt text for a specified strategy version."""
+    return get_prompt_definition(strategy_version).text
