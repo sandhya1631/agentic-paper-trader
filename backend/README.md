@@ -35,6 +35,18 @@ uvicorn app.main:app --reload --port 8000
   https://app.alpaca.markets/); retries automatically on rate limiting (HTTP 429).
 - `GET /llm/health` — reports the configured LLM provider/model (no API call, no cost).
 
+### Scheduled Agent Cycles
+
+Set `SCHEDULER_ENABLED=true` to start the in-process APScheduler worker with the API.
+It checks enabled agents every 15 minutes by default (`SCHEDULER_INTERVAL_MINUTES`),
+and only runs scheduled cycles when the Alpaca market clock reports the market open.
+The global `KILL_SWITCH_ENABLED=true` setting skips all scheduled cycles. Both settings
+default to safe/off values, so tests and normal local runs do not start a scheduler.
+Scheduled cycles require `ALPACA_API_KEY` and `ALPACA_API_SECRET` to verify market
+hours; clock errors fail closed. This single-process scheduler is intended for the
+single-host MVP; use a distributed worker and scheduler before running multiple API
+instances with scheduling enabled.
+
 ### LLM Client Factory
 
 `app/llm/` gives a single provider-neutral interface (`LLMClient.generate(...)`) over OpenAI and a

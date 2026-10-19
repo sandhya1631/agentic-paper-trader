@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.router import router as accounts_router
 from app.agent.router import router as agent_router
+from app.agent.scheduler import create_scheduler
 from app.auth.router import router as auth_router
 from app.broker.router import router as broker_router
 from app.core.config import get_settings
@@ -53,7 +54,15 @@ async def lifespan(app: FastAPI):
     # No migrations story yet (Alembic isn't set up) — create tables on startup for local dev.
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    yield
+    scheduler = None
+    if settings.scheduler_enabled:
+        scheduler = create_scheduler(settings)
+        scheduler.start()
+    try:
+        yield
+    finally:
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
 
 
 app = FastAPI(
@@ -117,4 +126,3 @@ async def health_db(db: AsyncSession = Depends(get_db)) -> dict:
     """Readiness check — verifies a non-blocking round trip to PostgreSQL."""
     result = await db.execute(text("SELECT 1"))
     return {"status": "ok", "result": result.scalar_one()}
-
