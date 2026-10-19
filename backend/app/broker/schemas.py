@@ -23,6 +23,7 @@ class AlpacaAccountRead(APIModel):
     maintenance_margin: Decimal = Decimal("0")
     daytrading_buying_power: Decimal = Decimal("0")
     regt_buying_power: Decimal = Decimal("0")
+    last_equity: Decimal = Decimal("0")
     is_paper: bool = True
 
 
@@ -64,6 +65,7 @@ class AlpacaOrderRead(APIModel):
     symbol: str
     qty: Decimal
     filled_qty: Decimal = Decimal("0")
+    average_fill_price: Decimal | None = None
     side: str
     type: str
     time_in_force: str

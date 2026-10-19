@@ -15,19 +15,29 @@ Orchestrates automated and manual agent cycles:
       `proposal_json`) to PostgreSQL and marks status `SUCCESS` or `FAILED`.
 """
 
+import hashlib
 import json
 import logging
 import uuid
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.approval import evaluate_and_submit_cycle_trade
 from app.agent.context import build_agent_context
 from app.agent.prompt import get_system_prompt
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
-from app.db.enums import CycleStatus, CycleTrigger, DecisionAction, Symbol
-from app.db.models import AgentConfig, AgentCycle, utcnow
+from app.db.enums import (
+    ApprovalMode,
+    ApprovalStatus,
+    CycleStatus,
+    CycleTrigger,
+    DecisionAction,
+    Symbol,
+)
+from app.db.models import AgentConfig, AgentCycle, CycleApproval, utcnow
 from app.llm.base import LLMClient
 from app.llm.factory import get_llm_client
 from app.market_data.alpaca_client import MarketDataCollector, create_market_data_collector
@@ -95,6 +105,9 @@ async def run_agent_cycle(
     await db.refresh(cycle)
 
     try:
+        cycle.status = CycleStatus.COLLECTING
+        await db.commit()
+
         # 4. Collect Market Data
         if collector is None:
             try:
@@ -126,12 +139,16 @@ async def run_agent_cycle(
         prompt_input = json.dumps(context, indent=2)
 
         # 6. Execute LLM Call
+        cycle.status = CycleStatus.REASONING
+        await db.commit()
         if llm_client is None:
             llm_client = get_llm_client()
 
         raw_response = await llm_client.generate(prompt_input, system=system_prompt)
 
         # 7. Validate Output with 1-Retry Self-Repair
+        cycle.status = CycleStatus.VALIDATING
+        await db.commit()
         proposal: DecisionProposal
         try:
             proposal = validate_decision_proposal(raw_response)
@@ -170,9 +187,66 @@ async def run_agent_cycle(
         cycle.prompt_text = system_prompt
         cycle.llm_raw_response = raw_response
         cycle.proposal_json = proposal.model_dump(mode="json")
-        cycle.status = CycleStatus.COMPLETED
-        cycle.completed_at = utcnow()
 
+        if proposal.action == DecisionAction.HOLD:
+            cycle.status = CycleStatus.HOLD
+            cycle.completed_at = utcnow()
+            context["execution_status"] = "NO_TRADE_PROPOSED"
+        elif agent.approval_mode == ApprovalMode.OBSERVE_ONLY:
+            cycle.status = CycleStatus.COMPLETED
+            cycle.completed_at = utcnow()
+            context["execution_status"] = "OBSERVE_ONLY"
+        elif agent.approval_mode == ApprovalMode.REQUIRED:
+            proposal_hash = hashlib.sha256(
+                json.dumps(cycle.proposal_json, sort_keys=True).encode()
+            ).hexdigest()
+            approval = CycleApproval(
+                cycle_id=cycle.id,
+                status=ApprovalStatus.PENDING,
+                proposal_hash=proposal_hash,
+                expires_at=utcnow() + timedelta(hours=24),
+            )
+            db.add(approval)
+            cycle.approval = approval
+            cycle.status = CycleStatus.PENDING_APPROVAL
+            context["execution_status"] = "PENDING_APPROVAL"
+        else:
+            cycle.status = CycleStatus.EXECUTING
+            context["execution_status"] = "EXECUTING"
+            await db.commit()
+            try:
+                policy_decision, broker_order = await evaluate_and_submit_cycle_trade(
+                    db,
+                    agent,
+                    cycle,
+                )
+            except Exception as exc:
+                logger.exception("Automatic paper-order execution needs reconciliation")
+                cycle.status = CycleStatus.RECONCILING
+                cycle.failure_code = "ORDER_EXECUTION_UNCERTAIN"
+                cycle.failure_message = str(exc)
+                cycle.completed_at = utcnow()
+                context["execution_status"] = "RECONCILIATION_REQUIRED"
+                cycle.snapshot_json = context
+                await db.commit()
+                await db.refresh(cycle)
+                return cycle
+            context["policy_evaluation"] = policy_decision.model_dump(mode="json")
+            if broker_order is None:
+                cycle.status = CycleStatus.REJECTED
+                cycle.failure_code = "POLICY_DENIED"
+                context["execution_status"] = "POLICY_DENIED"
+            elif broker_order.status.value == "REJECTED":
+                cycle.status = CycleStatus.REJECTED
+                cycle.failure_code = "BROKER_REJECTED"
+                cycle.failure_message = broker_order.rejection_reason
+                context["execution_status"] = "ORDER_REJECTED"
+            else:
+                cycle.status = CycleStatus.COMPLETED
+                context["execution_status"] = "ORDER_SUBMITTED"
+            cycle.completed_at = utcnow()
+
+        cycle.snapshot_json = context
         await db.commit()
         await db.refresh(cycle)
         return cycle

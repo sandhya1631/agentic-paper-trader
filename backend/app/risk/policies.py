@@ -33,7 +33,7 @@ class PolicyContext:
     inp: PolicyInput
     equity: Decimal
     cash: Decimal
-    position_qty: int = 0                      # shares already owned of the proposed symbol
+    position_qty: Decimal = Decimal("0")
     open_order_symbols: set[str] = field(default_factory=set)
     market_open: bool = True
     data_age_seconds: float = 0.0

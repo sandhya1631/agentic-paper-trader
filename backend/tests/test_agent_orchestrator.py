@@ -16,8 +16,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.context import build_agent_context
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.agent.prompt import get_system_prompt
-from app.db.enums import ApprovalMode, CycleStatus, CycleTrigger, UserRole
-from app.db.models import AgentConfig, AgentCycle, PolicySet, TradingAccount, User
+from app.db.enums import ApprovalMode, ApprovalStatus, CycleStatus, CycleTrigger, UserRole
+from app.db.models import (
+    AgentConfig,
+    AgentCycle,
+    CycleApproval,
+    PolicySet,
+    TradingAccount,
+    User,
+)
 from app.market_data.alpaca_client import OHLCVBar
 from app.risk.policies import POLICY_VERSION
 
@@ -144,7 +151,7 @@ async def test_run_agent_cycle_success(db_session: AsyncSession):
         collector=mock_collector,
     )
 
-    assert cycle.status == CycleStatus.COMPLETED
+    assert cycle.status == CycleStatus.PENDING_APPROVAL
     assert cycle.proposal_json["action"] == "BUY"
     assert cycle.proposal_json["symbol"] == "AAPL"
     assert cycle.snapshot_json["watchlist"] == ["AAPL", "NVDA"]
@@ -153,8 +160,10 @@ async def test_run_agent_cycle_success(db_session: AsyncSession):
         "strategy": "S-001",
         "policy": POLICY_VERSION,
     }
+    assert cycle.snapshot_json["execution_status"] == "PENDING_APPROVAL"
     assert "S-001" in cycle.prompt_text
     assert mock_llm.generate.await_args.kwargs["system"] == get_system_prompt("S-001")
+    assert cycle.approval.status == ApprovalStatus.PENDING
 
 
 @pytest.mark.asyncio
@@ -201,6 +210,125 @@ async def test_run_agent_cycle_records_version_metadata_without_database():
         "policy": POLICY_VERSION,
     }
     assert mock_llm.generate.await_args.kwargs["system"] == get_system_prompt("S-001")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trigger",
+    [CycleTrigger.MANUAL, CycleTrigger.SCHEDULED],
+)
+async def test_required_buy_creates_pending_approval_without_database(trigger):
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        watchlist=["AAPL"],
+        strategy_version="S-001",
+        approval_mode=ApprovalMode.REQUIRED,
+    )
+    agent_result = MagicMock()
+    agent_result.scalar_one_or_none.return_value = agent
+    no_active_cycle_result = MagicMock()
+    no_active_cycle_result.scalars.return_value.first.return_value = None
+    added = []
+
+    def refresh(model):
+        if isinstance(model, AgentCycle) and model.id is None:
+            model.id = uuid.uuid4()
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[agent_result, no_active_cycle_result])
+    db.add = MagicMock(side_effect=added.append)
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock(side_effect=refresh)
+
+    mock_llm = MagicMock()
+    mock_llm.generate = AsyncMock(
+        return_value=json.dumps(
+            {
+                "symbol": "AAPL",
+                "action": "BUY",
+                "quantity": 1,
+                "reasoning": "Test proposal",
+            }
+        )
+    )
+    collector = MagicMock()
+    collector.fetch_latest_bars = AsyncMock(return_value={"AAPL": []})
+
+    cycle = await run_agent_cycle(
+        agent.id,
+        db,
+        trigger=trigger,
+        llm_client=mock_llm,
+        collector=collector,
+    )
+
+    approval = next(item for item in added if isinstance(item, CycleApproval))
+    assert cycle.status == CycleStatus.PENDING_APPROVAL
+    assert approval.status == ApprovalStatus.PENDING
+    assert approval.cycle_id == cycle.id
+    assert len(approval.proposal_hash) == 64
+    assert cycle.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_scheduled_auto_buy_executes_without_human_approval(monkeypatch):
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        watchlist=["AAPL"],
+        strategy_version="S-001",
+        approval_mode=ApprovalMode.AUTO,
+    )
+    agent_result = MagicMock()
+    agent_result.scalar_one_or_none.return_value = agent
+    no_active_cycle_result = MagicMock()
+    no_active_cycle_result.scalars.return_value.first.return_value = None
+    added = []
+
+    def refresh(model):
+        if isinstance(model, AgentCycle) and model.id is None:
+            model.id = uuid.uuid4()
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[agent_result, no_active_cycle_result])
+    db.add = MagicMock(side_effect=added.append)
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock(side_effect=refresh)
+
+    mock_llm = MagicMock()
+    mock_llm.generate = AsyncMock(
+        return_value=json.dumps(
+            {
+                "symbol": "AAPL",
+                "action": "BUY",
+                "quantity": 1,
+                "reasoning": "Scheduled proposal",
+            }
+        )
+    )
+    collector = MagicMock()
+    collector.fetch_latest_bars = AsyncMock(return_value={"AAPL": []})
+    policy_decision = SimpleNamespace(
+        model_dump=lambda mode: {"decision": "ALLOW"}
+    )
+    broker_order = SimpleNamespace(status=SimpleNamespace(value="SUBMITTED"))
+    execute_trade = AsyncMock(return_value=(policy_decision, broker_order))
+    monkeypatch.setattr(
+        "app.agent.orchestrator.evaluate_and_submit_cycle_trade",
+        execute_trade,
+    )
+
+    cycle = await run_agent_cycle(
+        agent.id,
+        db,
+        trigger=CycleTrigger.SCHEDULED,
+        llm_client=mock_llm,
+        collector=collector,
+    )
+
+    execute_trade.assert_awaited_once_with(db, agent, cycle)
+    assert not any(isinstance(item, CycleApproval) for item in added)
+    assert cycle.status == CycleStatus.COMPLETED
+    assert cycle.snapshot_json["execution_status"] == "ORDER_SUBMITTED"
 
 
 @pytest.mark.asyncio
@@ -263,7 +391,7 @@ async def test_run_agent_cycle_self_repair_on_invalid_json(db_session: AsyncSess
     )
 
     assert mock_llm.generate.call_count == 2
-    assert cycle.status == CycleStatus.COMPLETED
+    assert cycle.status == CycleStatus.PENDING_APPROVAL
     assert cycle.proposal_json["action"] == "BUY"
     assert cycle.proposal_json["symbol"] == "SPY"
 
@@ -356,7 +484,7 @@ async def test_run_agent_cycle_allowed_after_previous_cycle_completed(
         agent.id, db_session, llm_client=mock_llm, collector=mock_collector
     )
 
-    assert cycle.status == CycleStatus.COMPLETED
+    assert cycle.status == CycleStatus.HOLD
     assert cycle.id != finished.id
 
 

@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.broker.alpaca import AlpacaClient
 from app.broker.schemas import OrderCreate
 from app.db.enums import BrokerOrderStatus
-from app.db.models import BrokerOrder
+from app.db.models import BrokerOrder, utcnow
 from app.schemas import ApprovedOrder
 
 
@@ -75,8 +75,22 @@ async def submit_approved_order(
         return broker_order
 
     broker_order.broker_order_id = alpaca_order.id
-    broker_order.status = BrokerOrderStatus.SUBMITTED
+    broker_order.submitted_at = utcnow()
     broker_order.filled_quantity = int(alpaca_order.filled_qty)
+    broker_order.average_fill_price = alpaca_order.average_fill_price
+    order_status = alpaca_order.status.lower()
+    if order_status == "filled":
+        broker_order.status = BrokerOrderStatus.FILLED
+    elif order_status in {"partially_filled", "partially-filled"}:
+        broker_order.status = BrokerOrderStatus.PARTIALLY_FILLED
+    elif order_status in {"rejected", "canceled", "cancelled"}:
+        broker_order.status = (
+            BrokerOrderStatus.REJECTED
+            if order_status == "rejected"
+            else BrokerOrderStatus.CANCELED
+        )
+    else:
+        broker_order.status = BrokerOrderStatus.SUBMITTED
     await db.commit()
     await db.refresh(broker_order)
     return broker_order

@@ -98,25 +98,31 @@ class PolicyDecision(APIModel):
 
 
 class ApprovalRequest(APIModel):
-    decision_id: UUID
+    cycle_id: UUID
     proposal_hash: str = Field(min_length=32, max_length=128)
     expires_at: datetime
 
 
 class ApprovalAction(APIModel):
-    expected_decision_version: int = Field(ge=1)
     comment: str | None = Field(default=None, max_length=500)
 
 
 class ApprovalRead(APIModel):
     id: UUID
-    decision_id: UUID
+    cycle_id: UUID
     status: ApprovalStatus
     requested_at: datetime
     expires_at: datetime
     acted_at: datetime | None = None
     actor_id: UUID | None = None
     comment: str | None = None
+    policy_version: str | None = None
+    policy_result_json: dict[str, Any] | None = None
+
+
+class PendingApprovalRead(APIModel):
+    approval: ApprovalRead
+    proposal: DecisionProposal
 
 
 class ApprovedOrder(APIModel):
@@ -168,6 +174,91 @@ class CycleRead(APIModel):
     llm_raw_response: str | None = None
     proposal_json: dict[str, Any] | None = None
     correlation_id: UUID | None = None
+    approval: ApprovalRead | None = None
+
+
+class ScheduleStartRequest(APIModel):
+    agent_id: UUID
+    interval_minutes: int = Field(ge=1, le=1440)
+
+
+class KillSwitchUpdate(APIModel):
+    enabled: bool
+
+
+class KillSwitchRead(APIModel):
+    enabled: bool
+    enforced_by_environment: bool
+    updated_at: datetime | None = None
+    updated_by: UUID | None = None
+
+
+class SchedulerTickStatus(APIModel):
+    status: str
+    reason: str | None = None
+    started_at: datetime
+    completed_at: datetime
+    enabled_agents: int = Field(ge=0)
+    attempted_agents: int = Field(ge=0)
+    successful_agents: int = Field(ge=0)
+    failed_agents: int = Field(ge=0)
+    overlapping_agents: int = Field(ge=0)
+
+
+class SchedulerTickLog(APIModel):
+    schedule_id: UUID | None = None
+    tick: SchedulerTickStatus
+
+
+class SchedulerLogsRead(APIModel):
+    logs: list[SchedulerTickLog] = Field(default_factory=list)
+
+
+class ScheduledOrderStatus(APIModel):
+    id: UUID
+    status: BrokerOrderStatus
+    symbol: str
+    side: OrderSide
+    requested_quantity: int
+    filled_quantity: int
+    average_fill_price: Money | None = None
+
+
+class ScheduledCycleStatus(APIModel):
+    cycle_id: UUID
+    agent_id: UUID
+    status: CycleStatus
+    started_at: datetime
+    completed_at: datetime | None = None
+    proposal: dict[str, Any] | None = None
+    execution_status: str
+    approval: ApprovalRead | None = None
+    orders: list[ScheduledOrderStatus] = Field(default_factory=list)
+
+
+class AgentScheduleRead(APIModel):
+    id: UUID
+    agent_id: UUID
+    interval_minutes: int
+    enabled: bool
+    next_run_time: datetime | None = None
+    last_tick: SchedulerTickStatus | None = None
+
+
+class ScheduleStartRead(APIModel):
+    schedule: AgentScheduleRead
+    status_url: str
+
+
+class SchedulerStatusRead(APIModel):
+    enabled: bool
+    running: bool
+    interval_minutes: int
+    next_run_time: datetime | None = None
+    last_tick: SchedulerTickStatus | None = None
+    schedules: list[AgentScheduleRead] = Field(default_factory=list)
+    recent_cycles: list[ScheduledCycleStatus] = Field(default_factory=list)
+    trade_execution_note: str
 
 
 class AuditEventRead(APIModel):

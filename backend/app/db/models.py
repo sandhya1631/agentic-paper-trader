@@ -24,6 +24,7 @@ from app.agent.prompt import get_system_prompt
 from app.db.base import Base
 from app.db.enums import (
     ApprovalMode,
+    ApprovalStatus,
     BrokerOrderStatus,
     CycleStatus,
     CycleTrigger,
@@ -143,6 +144,46 @@ class AgentCycle(Base, UUIDPrimaryKey):
     proposal_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     correlation_id: Mapped[uuid.UUID] = mapped_column(Uuid, default=uuid.uuid4, index=True)
     agent: Mapped[AgentConfig] = relationship(back_populates="cycles")
+    approval: Mapped[CycleApproval | None] = relationship(
+        back_populates="cycle", uselist=False
+    )
+
+
+class AgentSchedule(Base, UUIDPrimaryKey, Timestamped):
+    __tablename__ = "agent_schedules"
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_configs.id", ondelete="CASCADE"), index=True)
+    interval_minutes: Mapped[int] = mapped_column(Integer)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    __table_args__ = (UniqueConstraint("user_id", "agent_id", name="uq_schedule_user_agent"),)
+
+
+class SystemRuntimeControl(Base, Timestamped):
+    __tablename__ = "system_runtime_controls"
+    key: Mapped[str] = mapped_column(String(30), primary_key=True)
+    kill_switch_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class CycleApproval(Base, UUIDPrimaryKey):
+    __tablename__ = "cycle_approvals"
+    cycle_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("agent_cycles.id", ondelete="RESTRICT"), unique=True, index=True
+    )
+    status: Mapped[ApprovalStatus] = mapped_column(
+        Enum(ApprovalStatus), default=ApprovalStatus.PENDING
+    )
+    proposal_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    acted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    comment: Mapped[str | None] = mapped_column(String(500))
+    policy_version: Mapped[str | None] = mapped_column(String(40))
+    policy_result_json: Mapped[dict | None] = mapped_column(JSON)
+    cycle: Mapped[AgentCycle] = relationship(back_populates="approval")
 
 
 class BrokerOrder(Base, UUIDPrimaryKey, Timestamped):
