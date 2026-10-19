@@ -64,6 +64,29 @@ tests use the isolated PostgreSQL test database configured by `TEST_DATABASE_URL
 from `DATABASE_URL` with a `_test` suffix); never point it at production. Database migrations
 are not configured yet, so deployed schema changes still require a separate migration setup.
 
+## Scheduler architecture and testing
+
+The APScheduler interval job is created and started by the FastAPI application lifespan when
+`SCHEDULER_ENABLED=true`; it is shut down when the app stops. Its interval comes from
+`SCHEDULER_INTERVAL_MINUTES` (default: 15). Each tick loads enabled agent IDs, exits if the
+kill switch is on, checks the Alpaca market clock, then runs one `SCHEDULED` cycle per agent.
+An overlap or failure for one agent is logged and does not prevent later agents from running.
+The interval job is configured with one concurrent instance and coalesces missed ticks.
+
+Run the scheduler tests from the repository root:
+
+```powershell
+backend\.venv\Scripts\python.exe -m pytest backend\tests\test_scheduler.py -q
+```
+
+These are isolated unit tests: database sessions, market clock responses, and cycle execution
+are mocked. They verify enabled-agent selection, scheduled trigger values, closed-market and
+kill-switch skips, agent-level failure isolation, and configured interval. They do not start
+the app or call Alpaca, PostgreSQL, or an LLM. To smoke-test the actual lifespan wiring, run
+the backend with `SCHEDULER_ENABLED=true` and a short `SCHEDULER_INTERVAL_MINUTES` in a
+non-production environment, then inspect logs for ticks; ensure database access and Alpaca
+paper credentials are configured. Keep the interval at least 1 minute as required by settings.
+
 ## Tech Stack
 - Language: Python 3.11+
 - API: FastAPI
