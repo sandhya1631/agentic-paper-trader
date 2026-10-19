@@ -25,6 +25,9 @@ CREATE DATABASE agentic_paper_trader;
 uvicorn app.main:app --reload --port 8000
 ```
 
+On startup, the API creates missing tables and adds the `prompt_version` and
+`prompt_revision` columns to existing `agent_cycles` tables.
+
 - `GET /health` — liveness check, no DB access.
 - `GET /health/db` — readiness check, runs `SELECT 1` through the async session to confirm connectivity.
 - `POST /auth/register` — create a user (bcrypt-hashed password).

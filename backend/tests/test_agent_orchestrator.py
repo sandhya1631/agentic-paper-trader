@@ -45,8 +45,9 @@ def test_get_system_prompt_s001():
 
 def test_prompt_lists_only_buy_sell_hold():
     prompt = get_system_prompt("S-001")
+    assert "STRATEGY RULES (" in prompt
     permitted_actions = prompt.partition("PERMITTED ACTIONS:")[2].partition(
-        "STRATEGY RULES:"
+        "STRATEGY RULES ("
     )[0]
 
     assert permitted_actions
