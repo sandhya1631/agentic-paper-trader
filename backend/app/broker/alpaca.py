@@ -10,6 +10,7 @@ from app.broker.schemas import (
     MarketSnapshotRead,
     OrderCreate,
 )
+from app.core.paper_guard import ensure_alpaca_paper_url
 from app.market_data.indicators import calculate_indicators
 
 class AlpacaClient:
@@ -28,7 +29,8 @@ class AlpacaClient:
         if clean_base_url.endswith("/v2"):
             clean_base_url = clean_base_url[:-3]
 
-        self.base_url = clean_base_url
+        # Paper only (#70): a live-money URL can never build a client.
+        self.base_url = ensure_alpaca_paper_url(clean_base_url)
         self.data_base_url = data_base_url.rstrip("/")
         self.headers = {
             "APCA-API-KEY-ID": api_key,

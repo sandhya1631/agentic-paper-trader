@@ -1,6 +1,9 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.paper_guard import ensure_alpaca_paper_url
 
 
 class Settings(BaseSettings):
@@ -48,6 +51,12 @@ class Settings(BaseSettings):
     # deployment that forgets to override it. Required in every environment.
     #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     credential_encryption_key: str | None = None
+
+    @field_validator("alpaca_paper_base_url")
+    @classmethod
+    def _paper_endpoint_only(cls, value: str) -> str:
+        """Fail at startup if the Alpaca URL is anything but the paper endpoint (#70)."""
+        return ensure_alpaca_paper_url(value)
 
 
 @lru_cache
