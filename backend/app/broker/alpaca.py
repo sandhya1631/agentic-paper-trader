@@ -209,3 +209,28 @@ class AlpacaClient:
                 )
             )
         return orders
+
+    async def get_order_by_client_order_id(self, client_order_id: str) -> AlpacaOrderRead | None:
+        """Fetch a single order by client_order_id, or None if Alpaca has no record of it."""
+        url = f"{self.base_url}/v2/orders:by_client_order_id"
+        params = {"client_order_id": client_order_id}
+        client = self._get_client()
+        resp = await client.get(url, headers=self.headers, params=params, timeout=10.0)
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        item = resp.json()
+
+        return AlpacaOrderRead(
+            id=item["id"],
+            client_order_id=item["client_order_id"],
+            symbol=item["symbol"],
+            qty=Decimal(str(item["qty"])),
+            filled_qty=Decimal(str(item.get("filled_qty", 0))),
+            side=item["side"],
+            type=item["type"],
+            time_in_force=item["time_in_force"],
+            status=item["status"],
+            submitted_at=item.get("submitted_at"),
+            filled_at=item.get("filled_at"),
+        )
