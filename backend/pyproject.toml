@@ -55,3 +55,6 @@ select = ["E", "F", "I"]
 # Long lines here are inside the literal LLM system prompt text, not code structure;
 # wrapping them would change what's actually sent to the model.
 "app/agent/prompt.py" = ["E501"]
+# SQLAlchemy declarative mapped_column() / constraint definitions read best as single
+# lines; wrapping them hurts the readability of the model schema. Allow long lines here.
+"app/db/models.py" = ["E501"]
