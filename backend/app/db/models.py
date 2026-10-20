@@ -17,6 +17,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
@@ -139,6 +140,12 @@ class AgentCycle(Base, UUIDPrimaryKey):
     failure_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     snapshot_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    prompt_version: Mapped[str] = mapped_column(
+        String(30), default="S-001", server_default=text("'S-001'")
+    )
+    prompt_revision: Mapped[str] = mapped_column(
+        String(30), default="1.0.0", server_default=text("'1.0.0'")
+    )
     prompt_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     llm_raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     proposal_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)

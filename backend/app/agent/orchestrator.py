@@ -11,8 +11,8 @@ Orchestrates automated and manual agent cycles:
   7. Validates the decision output via `validate_decision_proposal`.
   8. On JSON/schema validation error, attempts 1 self-repair prompt retry.
   9. If self-repair also fails, defaults safely to a `HOLD` proposal.
-  10. Persists complete cycle state (`snapshot_json`, `prompt_text`, `llm_raw_response`,
-      `proposal_json`) to PostgreSQL and marks status `SUCCESS` or `FAILED`.
+  10. Persists complete cycle state (`snapshot_json`, prompt version/revision/text,
+      `llm_raw_response`, `proposal_json`) to PostgreSQL and marks status `SUCCESS` or `FAILED`.
 """
 
 import hashlib
@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.approval import evaluate_and_submit_cycle_trade
 from app.agent.context import build_agent_context
-from app.agent.prompt import get_system_prompt
+from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.db.enums import (
     ApprovalMode,
@@ -93,12 +93,15 @@ async def run_agent_cycle(
         )
 
     # 3. Create AgentCycle record (PENDING)
+    prompt_definition = get_prompt_definition(agent.strategy_version)
     cycle = AgentCycle(
         agent_id=agent.id,
         trigger=trigger,
         status=CycleStatus.PENDING,
         started_at=utcnow(),
         correlation_id=uuid.uuid4(),
+        prompt_version=agent.strategy_version,
+        prompt_revision=prompt_definition.revision,
     )
     db.add(cycle)
     await db.commit()
@@ -135,7 +138,7 @@ async def run_agent_cycle(
             "policy": POLICY_VERSION,
         }
 
-        system_prompt = get_system_prompt(agent.strategy_version)
+        system_prompt = prompt_definition.text
         prompt_input = json.dumps(context, indent=2)
 
         # 6. Execute LLM Call
@@ -184,6 +187,8 @@ async def run_agent_cycle(
 
         # 8. Persist Cycle Success & Snapshot State
         cycle.snapshot_json = context
+        cycle.prompt_version = agent.strategy_version
+        cycle.prompt_revision = prompt_definition.revision
         cycle.prompt_text = system_prompt
         cycle.llm_raw_response = raw_response
         cycle.proposal_json = proposal.model_dump(mode="json")

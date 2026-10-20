@@ -170,6 +170,8 @@ class CycleRead(APIModel):
     failure_code: str | None = None
     failure_message: str | None = None
     snapshot_json: dict[str, Any] | None = None
+    prompt_version: str
+    prompt_revision: str
     prompt_text: str | None = None
     llm_raw_response: str | None = None
     proposal_json: dict[str, Any] | None = None

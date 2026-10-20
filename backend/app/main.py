@@ -14,6 +14,7 @@ from app.broker.router import router as broker_router
 from app.core.config import get_settings
 from app.db import models  # noqa: F401  (registers ORM models on Base.metadata)
 from app.db.base import Base
+from app.db.schema import ensure_agent_cycle_prompt_columns
 from app.db.models import AgentConfig, AgentSchedule
 from app.db.session import AsyncSessionLocal, engine, get_db
 from app.llm.router import router as llm_router
@@ -55,6 +56,8 @@ async def lifespan(app: FastAPI):
     # No migrations story yet (Alembic isn't set up) — create tables on startup for local dev.
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await ensure_agent_cycle_prompt_columns(conn)
+    yield
     scheduler = create_scheduler(
         settings,
         include_global_job=settings.scheduler_enabled,
