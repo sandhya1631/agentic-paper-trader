@@ -11,7 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from conftest import TestSessionLocal
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.context import build_agent_context
@@ -538,7 +540,40 @@ async def test_trigger_cycle_endpoint_returns_409_on_overlap(client: AsyncClient
     login = await client.post("/auth/login", json={"email": email, "password": password})
     token = login.json()["access_token"]
 
-    some_agent_id = uuid.uuid4()
+    async with TestSessionLocal() as db:
+        user_result = await db.execute(select(User).where(User.email == email))
+        user = user_result.scalar_one()
+        account = TradingAccount(
+            user_id=user.id,
+            provider="ALPACA",
+            encrypted_api_key="enc_key",
+            encrypted_api_secret="enc_secret",
+            is_paper=True,
+        )
+        db.add(account)
+        await db.flush()
+        policy_set = PolicySet(
+            version=f"P-{uuid.uuid4()}",
+            limits_json={},
+            is_active=True,
+        )
+        db.add(policy_set)
+        await db.flush()
+        agent = AgentConfig(
+            account_id=account.id,
+            policy_set_id=policy_set.id,
+            name="HTTP Overlap Agent",
+            watchlist=["AAPL"],
+            strategy_version="S-001",
+            approval_mode=ApprovalMode.REQUIRED,
+            enabled=True,
+            model_provider="ollama",
+            model_name="llama3.1",
+        )
+        db.add(agent)
+        await db.commit()
+        some_agent_id = agent.id
+
     with patch(
         "app.agent.router.run_agent_cycle",
         side_effect=CycleOverlapError(f"Agent '{some_agent_id}' already has an active cycle"),

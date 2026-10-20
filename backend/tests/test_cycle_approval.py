@@ -154,6 +154,9 @@ async def test_gateway_persists_broker_order_execution_state(
 ):
     db = SimpleNamespace(
         add=lambda _: None,
+        execute=AsyncMock(
+            return_value=SimpleNamespace(scalar_one_or_none=lambda: None)
+        ),
         commit=AsyncMock(),
         refresh=AsyncMock(),
     )

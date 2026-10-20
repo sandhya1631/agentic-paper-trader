@@ -299,7 +299,15 @@ async def test_scheduler_status_reports_scheduler_and_order_status():
     user_id = uuid.uuid4()
     cycle_id = uuid.uuid4()
     agent_id = uuid.uuid4()
+    schedule_id = uuid.uuid4()
     next_run_time = datetime.now(UTC)
+    schedule = AgentSchedule(
+        id=schedule_id,
+        user_id=user_id,
+        agent_id=agent_id,
+        interval_minutes=5,
+        enabled=True,
+    )
     cycle = SimpleNamespace(
         id=cycle_id,
         agent_id=agent_id,
@@ -335,7 +343,9 @@ async def test_scheduler_status_reports_scheduler_and_order_status():
         db=SimpleNamespace(
             execute=AsyncMock(
                 side_effect=[
-                    SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
+                    SimpleNamespace(
+                        scalars=lambda: SimpleNamespace(all=lambda: [schedule])
+                    ),
                     SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [cycle])),
                     SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [order])),
                 ]

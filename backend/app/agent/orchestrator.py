@@ -24,6 +24,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.agent.approval import evaluate_and_submit_cycle_trade
 from app.agent.context import build_agent_context
@@ -192,6 +193,7 @@ async def run_agent_cycle(
         cycle.prompt_text = system_prompt
         cycle.llm_raw_response = raw_response
         cycle.proposal_json = proposal.model_dump(mode="json")
+        pending_approval = None
 
         if proposal.action == DecisionAction.HOLD:
             cycle.status = CycleStatus.HOLD
@@ -212,6 +214,7 @@ async def run_agent_cycle(
                 expires_at=utcnow() + timedelta(hours=24),
             )
             db.add(approval)
+            pending_approval = approval
             cycle.approval = approval
             cycle.status = CycleStatus.PENDING_APPROVAL
             context["execution_status"] = "PENDING_APPROVAL"
@@ -254,6 +257,9 @@ async def run_agent_cycle(
         cycle.snapshot_json = context
         await db.commit()
         await db.refresh(cycle)
+        if pending_approval is not None:
+            await db.refresh(pending_approval)
+            set_committed_value(cycle, "approval", pending_approval)
         return cycle
 
     except Exception as exc:
