@@ -27,6 +27,8 @@ dev = [
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
     "ruff>=0.12",
+    "mypy>=1.11",
+    "pre-commit>=3.8",
 ]
 
 [build-system]
@@ -55,3 +57,26 @@ select = ["E", "F", "I"]
 # Long lines here are inside the literal LLM system prompt text, not code structure;
 # wrapping them would change what's actually sent to the model.
 "app/agent/prompt.py" = ["E501"]
+
+[tool.mypy]
+# Lenient baseline — we start permissive and tighten over time. Third-party
+# packages without type stubs (alpaca-py, etc.) are not treated as errors.
+python_version = "3.11"
+files = ["app"]
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+# Intentionally NOT enabling disallow_untyped_defs / strict yet; raise the bar
+# incrementally as modules are annotated.
+
+# Modules with pre-existing type gaps are exempted for now so the baseline is
+# green. Remove these overrides as each module is cleaned up (tighten over time).
+[[tool.mypy.overrides]]
+module = [
+    "app.llm.openai_client",
+    "app.broker.alpaca",
+    "app.broker.router",
+    "app.market_data.alpaca_client",
+    "app.accounts.router",
+]
+ignore_errors = true

@@ -19,6 +19,29 @@ Create the database (once, using `psql` or any Postgres client):
 CREATE DATABASE agentic_paper_trader;
 ```
 
+## Code quality: lint, types & pre-commit
+
+Ruff (lint), mypy (static types), and pre-commit are installed with the `[dev]` extra.
+
+```bash
+ruff check app tests        # lint (E, F, I; line-length 100)
+mypy                        # static type check (config in pyproject.toml)
+```
+
+mypy starts from a **lenient baseline** (`[tool.mypy]` in `pyproject.toml`) and is
+tightened over time; a handful of modules with pre-existing type gaps are exempted via
+`overrides` until they're annotated.
+
+Install the git pre-commit hooks once so Ruff and mypy run automatically before each commit:
+
+```bash
+pre-commit install              # from the repo root (or anywhere in the repo)
+pre-commit run --all-files      # optional: run the hooks against the whole repo now
+```
+
+The hook config lives at `.pre-commit-config.yaml` (repo root) and wires Ruff lint + format
+and mypy. CI enforces the same Ruff and mypy checks in `.github/workflows/lint.yml`.
+
 ## Run
 
 ```bash
