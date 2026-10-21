@@ -53,7 +53,9 @@ jobs:
         run: |
           cd backend
           # Exclude integration tests (e.g. live-Ollama checks) — CI has no such services.
-          pytest tests/ -m "not integration"
+          # Measure coverage of app/ and print a terminal summary; also emit coverage.xml.
+          pytest tests/ -m "not integration" \
+            --cov=app --cov-report=term-missing --cov-report=xml
 
   frontend-ci:
     name: Frontend CI (Typecheck & Build)
@@ -85,10 +87,10 @@ jobs:
           cd frontend
           npm run typecheck
 
-      - name: Run Vitest Unit Tests
+      - name: Run Vitest Unit Tests with coverage
         run: |
           cd frontend
-          npm test
+          npm run test:coverage
 
       - name: Run Next.js Build
         run: |
