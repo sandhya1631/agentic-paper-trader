@@ -38,7 +38,9 @@ class MarketDataValidationError(Exception):
         self.symbol = symbol.upper() if symbol else "UNKNOWN"
         self.reason_code = reason_code
         self.reason = reason
-        super().__init__(f"[{self.symbol}] Market data validation failed ({reason_code.value}): {reason}")
+        super().__init__(
+            f"[{self.symbol}] Market data validation failed ({reason_code.value}): {reason}"
+        )
 
 
 def _parse_timestamp(ts: Any) -> datetime:
@@ -154,7 +156,8 @@ def validate_ohlcv_bars(
                 reason_code=ValidationErrorReason.INVALID_PRICE_BOUNDS,
                 reason=(
                     f"Bar at index {idx} has invalid 'high' ({bar_obj.high}) "
-                    f"relative to open ({bar_obj.open}), close ({bar_obj.close}), or low ({bar_obj.low})."
+                    f"relative to open ({bar_obj.open}), close ({bar_obj.close}), "
+                    f"or low ({bar_obj.low})."
                 ),
             )
 
@@ -164,7 +167,8 @@ def validate_ohlcv_bars(
                 reason_code=ValidationErrorReason.INVALID_PRICE_BOUNDS,
                 reason=(
                     f"Bar at index {idx} has invalid 'low' ({bar_obj.low}) "
-                    f"relative to open ({bar_obj.open}), close ({bar_obj.close}), or high ({bar_obj.high})."
+                    f"relative to open ({bar_obj.open}), close ({bar_obj.close}), "
+                    f"or high ({bar_obj.high})."
                 ),
             )
 
