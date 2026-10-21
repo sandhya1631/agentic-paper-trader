@@ -14,6 +14,12 @@ from app.core.paper_guard import ensure_alpaca_paper_url
 from app.market_data.indicators import calculate_indicators
 
 
+def _optional_decimal(value: Any) -> Decimal | None:
+    """Convert an indicator value to Decimal, preserving None for absent indicators."""
+    return Decimal(str(value)) if value is not None else None
+
+
+
 class AlpacaClient:
     """Asynchronous client interacting with Alpaca REST API."""
 
@@ -128,7 +134,7 @@ class AlpacaClient:
         return symbol_bars
 
     async def get_market_snapshot(self, symbol: str) -> MarketSnapshotRead:
-        """Fetch latest price snapshot and compute 14-period RSI, 20-period SMA, and 50-period SMA."""
+        """Fetch latest price snapshot and compute 14-period RSI, 20- and 50-period SMA."""
         bars = await self.get_bars(symbol, timeframe="5Min", limit=75)
         if not bars:
             raise ValueError(f"No price bar data available for symbol '{symbol}'")
@@ -143,9 +149,9 @@ class AlpacaClient:
         return MarketSnapshotRead(
             symbol=symbol.upper(),
             latest_close=latest_close,
-            rsi_14=Decimal(str(indicators["rsi_14"])) if indicators.get("rsi_14") is not None else None,
-            sma_20=Decimal(str(indicators["sma_20"])) if indicators.get("sma_20") is not None else None,
-            sma_50=Decimal(str(indicators["sma_50"])) if indicators.get("sma_50") is not None else None,
+            rsi_14=_optional_decimal(indicators.get("rsi_14")),
+            sma_20=_optional_decimal(indicators.get("sma_20")),
+            sma_50=_optional_decimal(indicators.get("sma_50")),
             bars_count=len(bars),
             timestamp=latest_timestamp,
         )

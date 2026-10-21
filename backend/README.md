@@ -19,6 +19,36 @@ Create the database (once, using `psql` or any Postgres client):
 CREATE DATABASE agentic_paper_trader;
 ```
 
+## Code quality: lint, types & pre-commit
+
+Ruff (lint), mypy (static types), and pre-commit are installed with the `[dev]` extra.
+
+```bash
+ruff check app tests        # lint (E, F, I; line-length 100)
+mypy                        # static type check (config in pyproject.toml)
+```
+
+mypy starts from a **lenient baseline** (`[tool.mypy]` in `pyproject.toml`) and is
+tightened over time; a handful of modules with pre-existing type gaps are exempted via
+`overrides` until they're annotated.
+
+Install the git pre-commit hooks once so Ruff and mypy run automatically before each commit.
+Normal commits only touch the files you changed:
+
+```bash
+pre-commit install              # from the repo root (or anywhere in the repo)
+```
+
+The hook config lives at `.pre-commit-config.yaml` (repo root) and wires Ruff lint + format
+and mypy. CI enforces the same Ruff and mypy checks in `.github/workflows/lint.yml`.
+
+> **Heads-up on `pre-commit run --all-files`:** the codebase has not yet been
+> formatted with `ruff format`, so running the hooks across the whole repo will
+> reformat a number of backend files in one pass (the `ruff-format` hook reports
+> "Failed" when it rewrites files — re-running it then passes). That's expected;
+> review and commit the formatting diff deliberately (ideally as its own commit)
+> rather than mixing it into an unrelated change.
+
 ## Run
 
 ```bash
