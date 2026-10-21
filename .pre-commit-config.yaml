@@ -1,0 +1,31 @@
+# Pre-commit hooks for the Agentic Paper Trader.
+#
+# One-time setup (from the backend venv, see backend/README.md):
+#   cd backend && pip install -e ".[dev]"
+#   pre-commit install            # installs the git hook
+#   pre-commit run --all-files    # optional: run against the whole repo
+#
+# Hooks mirror what CI enforces (Ruff lint, mypy) plus Ruff formatting.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.9
+    hooks:
+      # Lint (E, F, I) — config lives in backend/pyproject.toml.
+      - id: ruff-check
+        args: [--fix]
+        files: ^backend/.*\.py$
+      # Format Python as it changes (forward-looking; not applied repo-wide yet).
+      - id: ruff-format
+        files: ^backend/.*\.py$
+
+  - repo: local
+    hooks:
+      # Run the project's own mypy so imports resolve against the installed deps
+      # and the [tool.mypy] baseline in backend/pyproject.toml is honored.
+      - id: mypy
+        name: mypy (type check)
+        entry: bash -c 'cd backend && mypy'
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: ^backend/.*\.py$

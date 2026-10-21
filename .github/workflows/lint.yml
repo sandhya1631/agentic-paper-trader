@@ -29,3 +29,24 @@ jobs:
       # not by narrowing this scope.
       - name: Ruff check
         run: ruff check app tests
+
+  mypy:
+    name: mypy (Python type check)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install backend (with dev deps)
+        run: pip install -e ".[dev]"
+
+      - name: mypy check
+        run: mypy
