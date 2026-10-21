@@ -14,8 +14,11 @@ from app.broker.router import router as broker_router
 from app.core.config import get_settings
 from app.db import models  # noqa: F401  (registers ORM models on Base.metadata)
 from app.db.base import Base
-from app.db.models import AgentConfig, AgentSchedule
-from app.db.schema import ensure_agent_cycle_prompt_columns
+from app.db.models import AgentConfig, AgentSchedule, TradingAccount, User
+from app.db.schema import (
+    ensure_agent_cycle_prompt_columns,
+    ensure_user_scheduler_column,
+)
 from app.db.session import AsyncSessionLocal, engine, get_db
 from app.llm.router import router as llm_router
 from app.market_data.router import router as market_data_router
@@ -57,6 +60,7 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await ensure_agent_cycle_prompt_columns(conn)
+        await ensure_user_scheduler_column(conn)
     scheduler = create_scheduler(
         settings,
         include_global_job=settings.scheduler_enabled,
@@ -65,9 +69,12 @@ async def lifespan(app: FastAPI):
         result = await db.execute(
             select(AgentSchedule)
             .join(AgentConfig, AgentSchedule.agent_id == AgentConfig.id)
+            .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+            .join(User, TradingAccount.user_id == User.id)
             .where(
                 AgentSchedule.enabled.is_(True),
                 AgentConfig.enabled.is_(True),
+                User.scheduler_enabled.is_(True),
             )
         )
         for schedule in result.scalars().all():

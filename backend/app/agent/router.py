@@ -8,6 +8,7 @@ import hmac
 import json
 import uuid
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -250,6 +251,8 @@ def _job_id(schedule_id: uuid.UUID) -> str:
 def _schedule_read(
     schedule: AgentSchedule,
     scheduler_instance,
+    *,
+    user_enabled: bool = True,
 ) -> AgentScheduleRead:
     job = (
         scheduler_instance.get_job(_job_id(schedule.id))
@@ -260,7 +263,7 @@ def _schedule_read(
         id=schedule.id,
         agent_id=schedule.agent_id,
         interval_minutes=schedule.interval_minutes,
-        enabled=schedule.enabled,
+        enabled=schedule.enabled and user_enabled,
         next_run_time=job.next_run_time if job else None,
         last_tick=scheduler_service.get_last_tick_status(schedule.id),
     )
@@ -474,7 +477,7 @@ async def reject_cycle_trade(
     "/scheduler/start",
     response_model=ScheduleStartRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Start or update a recurring schedule for one agent",
+    summary="Start a recurring schedule and resume scheduling for this user",
 )
 async def start_agent_schedule(
     body: ScheduleStartRequest,
@@ -482,7 +485,7 @@ async def start_agent_schedule(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ScheduleStartRead:
-    """Persist an authenticated user's recurring schedule and register its interval job."""
+    """Persist one schedule, resume this user, and restore all their enabled schedules."""
     scheduler_instance = getattr(request.app.state, "scheduler", None)
     if scheduler_instance is None or not scheduler_instance.running:
         raise HTTPException(
@@ -525,6 +528,7 @@ async def start_agent_schedule(
     else:
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
+    current_user.scheduler_enabled = True
     try:
         await db.commit()
     except IntegrityError:
@@ -540,13 +544,21 @@ async def start_agent_schedule(
             raise
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
+        current_user.scheduler_enabled = True
         await db.commit()
     await db.refresh(schedule)
-    scheduler_service.add_agent_schedule_job(
-        scheduler_instance,
-        schedule.id,
-        schedule.interval_minutes,
+    schedules_result = await db.execute(
+        select(AgentSchedule).where(
+            AgentSchedule.user_id == current_user.id,
+            AgentSchedule.enabled.is_(True),
+        )
     )
+    for active_schedule in schedules_result.scalars().all():
+        scheduler_service.add_agent_schedule_job(
+            scheduler_instance,
+            active_schedule.id,
+            active_schedule.interval_minutes,
+        )
     return ScheduleStartRead(
         schedule=_schedule_read(schedule, scheduler_instance),
         status_url="/agent/scheduler/status",
@@ -556,7 +568,7 @@ async def start_agent_schedule(
 @router.post(
     "/scheduler/{schedule_id}/stop",
     response_model=AgentScheduleRead,
-    summary="Stop a recurring agent schedule",
+    summary="Pause scheduled processing for this user",
 )
 async def stop_agent_schedule(
     schedule_id: uuid.UUID,
@@ -564,6 +576,7 @@ async def stop_agent_schedule(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> AgentScheduleRead:
+    """Pause all scheduled cycles for the owning user; in-flight cycles may finish."""
     result = await db.execute(
         select(AgentSchedule).where(
             AgentSchedule.id == schedule_id,
@@ -573,16 +586,26 @@ async def stop_agent_schedule(
     schedule = result.scalar_one_or_none()
     if schedule is None:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    schedule.enabled = False
+    current_user.scheduler_enabled = False
     await db.commit()
     await db.refresh(schedule)
 
     scheduler_instance = getattr(request.app.state, "scheduler", None)
     if scheduler_instance is not None:
-        job = scheduler_instance.get_job(_job_id(schedule.id))
-        if job is not None:
-            scheduler_instance.remove_job(_job_id(schedule.id))
-    return _schedule_read(schedule, scheduler_instance)
+        schedules_result = await db.execute(
+            select(AgentSchedule.id).where(
+                AgentSchedule.user_id == current_user.id,
+            )
+        )
+        for owned_schedule_id in schedules_result.scalars().all():
+            job_id = _job_id(owned_schedule_id)
+            if scheduler_instance.get_job(job_id) is not None:
+                scheduler_instance.remove_job(job_id)
+    return _schedule_read(
+        schedule,
+        scheduler_instance,
+        user_enabled=current_user.scheduler_enabled,
+    )
 
 
 @router.get(
@@ -595,7 +618,7 @@ async def get_scheduler_status(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> SchedulerStatusRead:
-    """Report scheduler health and this user's recent scheduled cycles and orders."""
+    """Report this user's scheduler state and recent scheduled cycles and orders."""
     settings = get_settings()
     scheduler_instance = getattr(request.app.state, "scheduler", None)
     job = (
@@ -685,16 +708,22 @@ async def get_scheduler_status(
                 completed_at=cycle.completed_at,
                 proposal=cycle.proposal_json,
                 execution_status=execution_status,
-                approval=cycle.approval,
+                approval=(
+                    ApprovalRead.model_validate(cycle.approval)
+                    if cycle.approval is not None
+                    else None
+                ),
                 orders=orders,
             )
         )
 
     return SchedulerStatusRead(
-        enabled=settings.scheduler_enabled or any(schedule.enabled for schedule in schedules),
+        enabled=current_user.scheduler_enabled
+        and (settings.scheduler_enabled or any(schedule.enabled for schedule in schedules)),
         running=bool(
             scheduler_instance
             and scheduler_instance.running
+            and current_user.scheduler_enabled
             and (
                 settings.scheduler_enabled
                 or any(schedule.enabled for schedule in schedules)
@@ -704,7 +733,12 @@ async def get_scheduler_status(
         next_run_time=job.next_run_time if job else None,
         last_tick=scheduler_service.get_last_tick_status(),
         schedules=[
-            _schedule_read(schedule, scheduler_instance) for schedule in schedules
+            _schedule_read(
+                schedule,
+                scheduler_instance,
+                user_enabled=current_user.scheduler_enabled,
+            )
+            for schedule in schedules
         ],
         recent_cycles=recent_cycles,
         trade_execution_note=(
@@ -730,6 +764,7 @@ async def get_scheduler_logs(
     if not 1 <= limit <= 100:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
 
+    schedule_ids: Sequence[uuid.UUID]
     if schedule_id is not None:
         schedule_result = await db.execute(
             select(AgentSchedule.id).where(

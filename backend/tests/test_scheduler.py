@@ -85,6 +85,11 @@ async def test_lifespan_starts_scheduler_before_yield_and_stops_it(monkeypatch):
     )
     monkeypatch.setattr(
         main_module,
+        "ensure_user_scheduler_column",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        main_module,
         "AsyncSessionLocal",
         lambda: AsyncContext(db),
     )
@@ -107,8 +112,15 @@ def scheduled_tick(monkeypatch):
     enabled_agent_ids = [uuid.uuid4(), uuid.uuid4()]
     query_session = _make_session(enabled_agent_ids)
     cycle_sessions = [
-        SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(all=lambda: [])))
-        for _ in enabled_agent_ids
+        SimpleNamespace(
+            execute=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(scalar_one_or_none=lambda: agent_id),
+                    SimpleNamespace(all=lambda: []),
+                ]
+            )
+        )
+        for agent_id in enabled_agent_ids
     ]
     sessions = iter([_SessionContext(None), query_session, *cycle_sessions])
     monkeypatch.setattr(
@@ -147,7 +159,35 @@ async def test_scheduled_tick_runs_each_enabled_agent(scheduled_tick):
     assert "agent_configs.enabled IS true" in str(
         query_session.execute.await_args.args[0]
     )
+    assert "users.scheduler_enabled IS true" in str(
+        query_session.execute.await_args.args[0]
+    )
     assert scheduler.get_tick_history(limit=1)[0] == result
+
+
+@pytest.mark.asyncio
+async def test_agent_schedule_does_not_run_for_paused_user(monkeypatch):
+    query = None
+
+    class SessionContext:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def execute(self, statement):
+            nonlocal query
+            query = statement
+            return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    monkeypatch.setattr(scheduler, "AsyncSessionLocal", SessionContext)
+
+    result = await scheduler.run_agent_schedule(uuid.uuid4())
+
+    assert result is None
+    assert query is not None
+    assert "users.scheduler_enabled IS true" in str(query)
 
 
 @pytest.mark.asyncio
@@ -278,6 +318,7 @@ async def test_start_schedule_persists_interval_and_registers_job():
         add_job=MagicMock(),
         get_job=lambda _: None,
     )
+    schedule_job = SimpleNamespace(id=schedule_id, interval_minutes=5)
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(scheduler=scheduler_instance))
     )
@@ -290,24 +331,30 @@ async def test_start_schedule_persists_interval_and_registers_job():
             side_effect=[
                 SimpleNamespace(scalar_one_or_none=lambda: agent),
                 SimpleNamespace(scalar_one_or_none=lambda: None),
+                SimpleNamespace(
+                    scalars=lambda: SimpleNamespace(all=lambda: [schedule_job])
+                ),
             ]
         ),
         add=MagicMock(),
         commit=AsyncMock(),
         refresh=AsyncMock(side_effect=assign_schedule_id),
     )
+    user = SimpleNamespace(id=user_id, scheduler_enabled=False)
     result = await start_agent_schedule(
         ScheduleStartRequest(agent_id=agent.id, interval_minutes=5),
         request=request,
         db=db,
-        current_user=SimpleNamespace(id=user_id),
+        current_user=user,
     )
 
     assert result.schedule.id == schedule_id
     assert result.schedule.interval_minutes == 5
     assert result.schedule.enabled is True
+    assert user.scheduler_enabled is True
     scheduler_instance.add_job.assert_called_once()
     assert scheduler_instance.add_job.call_args.kwargs["minutes"] == 5
+    assert scheduler_instance.add_job.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -336,6 +383,9 @@ async def test_start_schedule_recovers_from_concurrent_insert():
                 SimpleNamespace(scalar_one_or_none=lambda: agent),
                 SimpleNamespace(scalar_one_or_none=lambda: None),
                 SimpleNamespace(scalar_one_or_none=lambda: winner_schedule),
+                SimpleNamespace(
+                    scalars=lambda: SimpleNamespace(all=lambda: [winner_schedule])
+                ),
             ]
         ),
         add=MagicMock(),
@@ -353,7 +403,7 @@ async def test_start_schedule_recovers_from_concurrent_insert():
         ScheduleStartRequest(agent_id=agent.id, interval_minutes=5),
         request=request,
         db=db,
-        current_user=SimpleNamespace(id=user_id),
+        current_user=SimpleNamespace(id=user_id, scheduler_enabled=False),
     )
 
     assert result.schedule.id == schedule_id
@@ -365,7 +415,7 @@ async def test_start_schedule_recovers_from_concurrent_insert():
 
 
 @pytest.mark.asyncio
-async def test_stop_schedule_disables_persisted_schedule():
+async def test_stop_schedule_pauses_all_schedules_for_user():
     schedule = AgentSchedule(
         id=uuid.uuid4(),
         user_id=uuid.uuid4(),
@@ -373,6 +423,7 @@ async def test_stop_schedule_disables_persisted_schedule():
         interval_minutes=5,
         enabled=True,
     )
+    other_schedule_id = uuid.uuid4()
     scheduler_instance = SimpleNamespace(
         get_job=lambda _: SimpleNamespace(
             id="scheduled-job",
@@ -380,6 +431,7 @@ async def test_stop_schedule_disables_persisted_schedule():
         ),
         remove_job=MagicMock(),
     )
+    user = SimpleNamespace(id=schedule.user_id, scheduler_enabled=True)
     result = await stop_agent_schedule(
         schedule.id,
         request=SimpleNamespace(
@@ -387,17 +439,25 @@ async def test_stop_schedule_disables_persisted_schedule():
         ),
         db=SimpleNamespace(
             execute=AsyncMock(
-                return_value=SimpleNamespace(scalar_one_or_none=lambda: schedule)
+                side_effect=[
+                    SimpleNamespace(scalar_one_or_none=lambda: schedule),
+                    SimpleNamespace(
+                        scalars=lambda: SimpleNamespace(
+                            all=lambda: [schedule.id, other_schedule_id]
+                        )
+                    ),
+                ]
             ),
             commit=AsyncMock(),
             refresh=AsyncMock(),
         ),
-        current_user=SimpleNamespace(id=schedule.user_id),
+        current_user=user,
     )
 
-    assert schedule.enabled is False
+    assert user.scheduler_enabled is False
+    assert schedule.enabled is True
     assert result.enabled is False
-    scheduler_instance.remove_job.assert_called_once()
+    assert scheduler_instance.remove_job.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -457,7 +517,7 @@ async def test_scheduler_status_reports_scheduler_and_order_status():
                 ]
             )
         ),
-        current_user=SimpleNamespace(id=user_id),
+        current_user=SimpleNamespace(id=user_id, scheduler_enabled=True),
     )
 
     assert result.running is True
@@ -495,10 +555,49 @@ async def test_scheduler_status_reports_when_proposal_has_no_order(monkeypatch):
                 ]
             )
         ),
-        current_user=SimpleNamespace(id=uuid.uuid4()),
+        current_user=SimpleNamespace(id=uuid.uuid4(), scheduler_enabled=True),
     )
 
     assert result.enabled is False
     assert result.running is False
     assert result.recent_cycles[0].execution_status == "NO_ORDER"
     assert result.recent_cycles[0].orders == []
+
+
+@pytest.mark.asyncio
+async def test_scheduler_status_reports_user_pause_for_all_schedules():
+    schedule = AgentSchedule(
+        id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        interval_minutes=5,
+        enabled=True,
+    )
+    result = await get_scheduler_status(
+        request=SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(
+                    scheduler=SimpleNamespace(
+                        running=True,
+                        get_job=lambda _: SimpleNamespace(next_run_time=None),
+                    )
+                )
+            )
+        ),
+        db=SimpleNamespace(
+            execute=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [schedule])),
+                    SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
+                ]
+            )
+        ),
+        current_user=SimpleNamespace(
+            id=schedule.user_id,
+            scheduler_enabled=False,
+        ),
+    )
+
+    assert result.enabled is False
+    assert result.running is False
+    assert result.schedules[0].enabled is False

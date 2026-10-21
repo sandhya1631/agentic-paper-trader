@@ -54,6 +54,9 @@ class User(Base, UUIDPrimaryKey, Timestamped):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[UserRole] = mapped_column(Enum(UserRole), default=UserRole.VIEWER)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    scheduler_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true"), nullable=False
+    )
     accounts: Mapped[list[TradingAccount]] = relationship(back_populates="user")
 
     def __init__(self, **kwargs):

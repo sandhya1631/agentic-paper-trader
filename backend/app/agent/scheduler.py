@@ -18,6 +18,8 @@ from app.db.models import (
     AgentCycle,
     AgentSchedule,
     CycleApproval,
+    TradingAccount,
+    User,
     utcnow,
 )
 from app.db.session import AsyncSessionLocal
@@ -142,7 +144,15 @@ async def run_scheduled_cycles(
 
     try:
         async with AsyncSessionLocal() as db:
-            query = select(AgentConfig.id).where(AgentConfig.enabled.is_(True))
+            query = (
+                select(AgentConfig.id)
+                .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+                .join(User, TradingAccount.user_id == User.id)
+                .where(
+                    AgentConfig.enabled.is_(True),
+                    User.scheduler_enabled.is_(True),
+                )
+            )
             if agent_id_filter is not None:
                 query = query.where(AgentConfig.id == agent_id_filter)
             else:
@@ -172,9 +182,21 @@ async def run_scheduled_cycles(
         return finish("SKIPPED", "market_closed")
 
     for agent_id in agent_ids:
-        attempted_agents += 1
         try:
             async with AsyncSessionLocal() as db:
+                enabled_result = await db.execute(
+                    select(AgentConfig.id)
+                    .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+                    .join(User, TradingAccount.user_id == User.id)
+                    .where(
+                        AgentConfig.id == agent_id,
+                        AgentConfig.enabled.is_(True),
+                        User.scheduler_enabled.is_(True),
+                    )
+                )
+                if enabled_result.scalar_one_or_none() is None:
+                    continue
+                attempted_agents += 1
                 await _expire_pending_approvals(db, agent_id)
                 await run_agent_cycle(
                     agent_id,
@@ -209,10 +231,13 @@ async def run_agent_schedule(schedule_id: UUID) -> SchedulerTickStatus | None:
         result = await db.execute(
             select(AgentSchedule.agent_id)
             .join(AgentConfig, AgentConfig.id == AgentSchedule.agent_id)
+            .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+            .join(User, TradingAccount.user_id == User.id)
             .where(
                 AgentSchedule.id == schedule_id,
                 AgentSchedule.enabled.is_(True),
                 AgentConfig.enabled.is_(True),
+                User.scheduler_enabled.is_(True),
             )
         )
         agent_id = result.scalar_one_or_none()
