@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -20,6 +21,7 @@ from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.auth.dependencies import get_current_user
+from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
 from app.db.enums import (
     ApprovalStatus,
@@ -364,6 +366,22 @@ async def approve_cycle_trade(
             agent,
             cycle,
         )
+    except TradingDisabledError as exc:
+        approval.status = ApprovalStatus.REJECTED
+        approval.comment = "Execution blocked by the global kill switch"
+        cycle.status = CycleStatus.REJECTED
+        cycle.failure_code = "KILL_SWITCH_ENABLED"
+        cycle.failure_message = str(exc)
+        cycle.completed_at = datetime.now(UTC)
+        cycle.snapshot_json = {
+            **(cycle.snapshot_json or {}),
+            "execution_status": "KILL_SWITCH_ENABLED",
+        }
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail="Order execution is blocked by the global kill switch",
+        ) from exc
     except Exception as exc:
         approval.status = ApprovalStatus.APPROVED
         approval.actor_id = current_user.id
@@ -507,7 +525,22 @@ async def start_agent_schedule(
     else:
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        existing_result = await db.execute(
+            select(AgentSchedule).where(
+                AgentSchedule.user_id == current_user.id,
+                AgentSchedule.agent_id == agent.id,
+            )
+        )
+        schedule = existing_result.scalar_one_or_none()
+        if schedule is None:
+            raise
+        schedule.interval_minutes = body.interval_minutes
+        schedule.enabled = True
+        await db.commit()
     await db.refresh(schedule)
     scheduler_service.add_agent_schedule_job(
         scheduler_instance,

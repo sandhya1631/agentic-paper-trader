@@ -89,7 +89,8 @@ per scheduler/schedule) and reset on backend restart.
 The global kill switch is available at `GET /agent/kill-switch` and `PUT /agent/kill-switch`
 with `{"enabled":true}` or `{"enabled":false}`. Both endpoints require the `ADMIN` role.
 Its API-managed state is stored in PostgreSQL and applies to all scheduled cycles and trade
-policy checks.
+policy checks. The execution gateway and direct `POST /api/v1/broker/orders` endpoint both
+enforce the switch immediately before order submission.
 `KILL_SWITCH_ENABLED=true` in the environment remains a force-on override for everyone and
 cannot be disabled through the API. Scheduler tick history itself is not stored in the database.
 
@@ -103,6 +104,8 @@ Scheduled cycles respect the agent's approval mode:
   an order to Alpaca paper only if policies allow it.
 
 Manual cycles follow the same approval-mode rules.
+Before a new cycle starts, any cycle left in `RECONCILING` is checked against Alpaca using its
+persisted client order ID. The agent stays blocked if the broker outcome is still unknown.
 
 Approval endpoints for pending proposals:
 

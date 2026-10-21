@@ -11,9 +11,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.accounts.credential_vault import get_decrypted_alpaca_credentials
 from app.broker.alpaca import AlpacaClient
 from app.broker.gateway import submit_approved_order
+from app.broker.reconcile import reconcile_order
 from app.core.config import get_settings
-from app.db.enums import DecisionAction, OrderSide, OrderType, TimeInForce
-from app.db.models import AgentConfig, AgentCycle, BrokerOrder, TradingAccount
+from app.db.enums import (
+    BrokerOrderStatus,
+    CycleStatus,
+    DecisionAction,
+    OrderSide,
+    OrderType,
+    TimeInForce,
+)
+from app.db.models import AgentConfig, AgentCycle, BrokerOrder, TradingAccount, utcnow
 from app.risk.kill_switch import is_kill_switch_enabled
 from app.risk.market_hours import fetch_market_clock_for
 from app.risk.policies import PolicyContext, evaluate_policies
@@ -158,3 +166,73 @@ async def evaluate_and_submit_cycle_trade(
         )
         broker_order = await submit_approved_order(approved_order, client, db)
         return decision, broker_order
+
+
+async def reconcile_uncertain_cycle(
+    db: AsyncSession,
+    agent: AgentConfig,
+    cycle: AgentCycle,
+) -> bool:
+    """Resolve a cycle left uncertain by an interrupted broker-order submission."""
+    result = await db.execute(
+        select(BrokerOrder).where(BrokerOrder.decision_id == cycle.id)
+    )
+    broker_order = result.scalar_one_or_none()
+    if broker_order is None:
+        cycle.status = CycleStatus.FAILED
+        cycle.failure_code = "ORDER_SUBMISSION_NOT_STARTED"
+        cycle.failure_message = "No broker order was persisted for this cycle"
+        cycle.completed_at = utcnow()
+        await db.commit()
+        return True
+
+    account_result = await db.execute(
+        select(TradingAccount).where(TradingAccount.id == agent.account_id)
+    )
+    account = account_result.scalar_one_or_none()
+    if account is None or not account.is_connected or not account.is_paper:
+        raise ValueError("A connected Alpaca paper account is required to reconcile orders")
+
+    settings = get_settings()
+    api_key, api_secret = await get_decrypted_alpaca_credentials(db, account.user_id)
+    async with AlpacaClient(
+        api_key=api_key,
+        api_secret=api_secret,
+        base_url=settings.alpaca_paper_base_url,
+    ) as client:
+        broker_order = await reconcile_order(db, client, broker_order)
+
+    if broker_order.status == BrokerOrderStatus.PENDING_SUBMISSION:
+        broker_order.status = BrokerOrderStatus.REJECTED
+        broker_order.rejection_reason = (
+            "Order was not found at Alpaca during reconciliation; it was not resubmitted."
+        )
+        cycle.status = CycleStatus.FAILED
+        cycle.failure_code = "ORDER_NOT_FOUND"
+        cycle.failure_message = broker_order.rejection_reason
+    elif broker_order.status == BrokerOrderStatus.RECONCILING:
+        return False
+    elif broker_order.status in {
+        BrokerOrderStatus.REJECTED,
+        BrokerOrderStatus.CANCELED,
+    }:
+        cycle.status = CycleStatus.REJECTED
+        cycle.failure_code = "BROKER_ORDER_NOT_EXECUTED"
+        cycle.failure_message = broker_order.rejection_reason
+    else:
+        cycle.status = CycleStatus.COMPLETED
+        cycle.failure_code = None
+        cycle.failure_message = None
+
+    cycle.completed_at = utcnow()
+    cycle.snapshot_json = {
+        **(cycle.snapshot_json or {}),
+        "execution_status": (
+            "ORDER_NOT_FOUND"
+            if broker_order.status == BrokerOrderStatus.REJECTED
+            and cycle.failure_code == "ORDER_NOT_FOUND"
+            else broker_order.status.value
+        ),
+    }
+    await db.commit()
+    return True

@@ -20,6 +20,7 @@ from app.broker.schemas import (
 from app.core.config import get_settings
 from app.db.models import User
 from app.db.session import get_db
+from app.risk.kill_switch import is_kill_switch_enabled
 
 router = APIRouter(prefix="/broker", tags=["Broker Integration"])
 
@@ -169,7 +170,13 @@ async def place_paper_order(
     order: OrderCreate,
     current_user: Annotated[User, Depends(get_current_user)],
     client: Annotated[AlpacaClient, Depends(get_alpaca_client)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    if await is_kill_switch_enabled(db):
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail="Order submission blocked by the global kill switch",
+        )
     try:
         return await client.submit_order(order)
     except Exception as exc:
@@ -201,4 +208,3 @@ async def get_orders_list(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Alpaca API error: {exc}",
         )
-

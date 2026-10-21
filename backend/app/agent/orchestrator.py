@@ -26,10 +26,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
-from app.agent.approval import evaluate_and_submit_cycle_trade
+from app.agent.approval import (
+    evaluate_and_submit_cycle_trade,
+    reconcile_uncertain_cycle,
+)
 from app.agent.context import build_agent_context
 from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
+from app.broker.gateway import TradingDisabledError
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -87,6 +91,17 @@ async def run_agent_cycle(
     )
     active_res = await db.execute(active_stmt)
     active_cycle = active_res.scalars().first()
+    if active_cycle is not None and active_cycle.status == CycleStatus.RECONCILING:
+        try:
+            resolved = await reconcile_uncertain_cycle(db, agent, active_cycle)
+        except Exception:
+            logger.exception(
+                "Could not reconcile uncertain cycle %s; keeping it active",
+                active_cycle.id,
+            )
+            resolved = False
+        if resolved:
+            active_cycle = None
     if active_cycle is not None:
         raise CycleOverlapError(
             f"Agent '{agent_id}' already has an active cycle "
@@ -228,6 +243,17 @@ async def run_agent_cycle(
                     agent,
                     cycle,
                 )
+            except TradingDisabledError as exc:
+                cycle.status = CycleStatus.REJECTED
+                cycle.failure_code = "KILL_SWITCH_ENABLED"
+                cycle.failure_message = str(exc)
+                cycle.completed_at = utcnow()
+                context["execution_status"] = "KILL_SWITCH_ENABLED"
+                cycle.snapshot_json = context
+                await db.commit()
+                await db.refresh(cycle)
+                set_committed_value(cycle, "approval", None)
+                return cycle
             except Exception as exc:
                 logger.exception("Automatic paper-order execution needs reconciliation")
                 cycle.status = CycleStatus.RECONCILING
@@ -238,6 +264,7 @@ async def run_agent_cycle(
                 cycle.snapshot_json = context
                 await db.commit()
                 await db.refresh(cycle)
+                set_committed_value(cycle, "approval", None)
                 return cycle
             context["policy_evaluation"] = policy_decision.model_dump(mode="json")
             if broker_order is None:
@@ -259,7 +286,7 @@ async def run_agent_cycle(
         await db.refresh(cycle)
         if pending_approval is not None:
             await db.refresh(pending_approval)
-            set_committed_value(cycle, "approval", pending_approval)
+        set_committed_value(cycle, "approval", pending_approval)
         return cycle
 
     except Exception as exc:

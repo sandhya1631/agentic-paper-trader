@@ -5,7 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
+from app import main as main_module
 from app.agent import scheduler
 from app.agent.orchestrator import CycleOverlapError
 from app.agent.router import (
@@ -48,6 +50,56 @@ def _make_session(agent_ids):
 
 def _open_market():
     return MarketClock(is_open=True)
+
+
+@pytest.mark.asyncio
+async def test_lifespan_starts_scheduler_before_yield_and_stops_it(monkeypatch):
+    class AsyncContext:
+        def __init__(self, value):
+            self.value = value
+
+        async def __aenter__(self):
+            return self.value
+
+        async def __aexit__(self, *_):
+            return None
+
+    connection = SimpleNamespace(run_sync=AsyncMock())
+    engine = SimpleNamespace(begin=lambda: AsyncContext(connection))
+    db = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=SimpleNamespace(
+                scalars=lambda: SimpleNamespace(all=lambda: [])
+            )
+        )
+    )
+    scheduler_instance = SimpleNamespace(
+        start=MagicMock(),
+        shutdown=MagicMock(),
+    )
+    monkeypatch.setattr(main_module, "engine", engine)
+    monkeypatch.setattr(
+        main_module,
+        "ensure_agent_cycle_prompt_columns",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "AsyncSessionLocal",
+        lambda: AsyncContext(db),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "create_scheduler",
+        MagicMock(return_value=scheduler_instance),
+    )
+
+    async with main_module.lifespan(main_module.app):
+        assert main_module.app.state.scheduler is scheduler_instance
+        scheduler_instance.start.assert_called_once()
+
+    scheduler_instance.shutdown.assert_called_once_with(wait=False)
+    assert main_module.app.state.scheduler is None
 
 
 @pytest.fixture
@@ -256,6 +308,60 @@ async def test_start_schedule_persists_interval_and_registers_job():
     assert result.schedule.enabled is True
     scheduler_instance.add_job.assert_called_once()
     assert scheduler_instance.add_job.call_args.kwargs["minutes"] == 5
+
+
+@pytest.mark.asyncio
+async def test_start_schedule_recovers_from_concurrent_insert():
+    schedule_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    agent = SimpleNamespace(id=uuid.uuid4(), enabled=True)
+    winner_schedule = AgentSchedule(
+        id=schedule_id,
+        user_id=user_id,
+        agent_id=agent.id,
+        interval_minutes=10,
+        enabled=True,
+    )
+    scheduler_instance = SimpleNamespace(
+        running=True,
+        add_job=MagicMock(),
+        get_job=lambda _: None,
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(scheduler=scheduler_instance))
+    )
+    db = SimpleNamespace(
+        execute=AsyncMock(
+            side_effect=[
+                SimpleNamespace(scalar_one_or_none=lambda: agent),
+                SimpleNamespace(scalar_one_or_none=lambda: None),
+                SimpleNamespace(scalar_one_or_none=lambda: winner_schedule),
+            ]
+        ),
+        add=MagicMock(),
+        commit=AsyncMock(
+            side_effect=[
+                IntegrityError("duplicate schedule", {}, Exception()),
+                None,
+            ]
+        ),
+        rollback=AsyncMock(),
+        refresh=AsyncMock(),
+    )
+
+    result = await start_agent_schedule(
+        ScheduleStartRequest(agent_id=agent.id, interval_minutes=5),
+        request=request,
+        db=db,
+        current_user=SimpleNamespace(id=user_id),
+    )
+
+    assert result.schedule.id == schedule_id
+    assert result.schedule.interval_minutes == 5
+    assert winner_schedule.enabled is True
+    db.rollback.assert_awaited_once()
+    assert db.commit.await_count == 2
+    scheduler_instance.add_job.assert_called_once()
 
 
 @pytest.mark.asyncio

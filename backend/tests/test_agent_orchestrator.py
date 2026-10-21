@@ -16,6 +16,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.approval import reconcile_uncertain_cycle
 from app.agent.context import build_agent_context
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.agent.prompt import get_prompt_definition, get_system_prompt
@@ -373,6 +374,33 @@ async def test_scheduled_auto_buy_executes_without_human_approval(monkeypatch):
     assert not any(isinstance(item, CycleApproval) for item in added)
     assert cycle.status == CycleStatus.COMPLETED
     assert cycle.snapshot_json["execution_status"] == "ORDER_SUBMITTED"
+    assert cycle.approval is None
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_clears_cycle_when_submission_never_started():
+    cycle = SimpleNamespace(
+        id=uuid.uuid4(),
+        status=CycleStatus.RECONCILING,
+        failure_code="ORDER_EXECUTION_UNCERTAIN",
+        failure_message="temporary failure",
+        completed_at=None,
+        snapshot_json={"execution_status": "RECONCILIATION_REQUIRED"},
+    )
+    db = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=SimpleNamespace(scalar_one_or_none=lambda: None)
+        ),
+        commit=AsyncMock(),
+    )
+
+    resolved = await reconcile_uncertain_cycle(db, SimpleNamespace(), cycle)
+
+    assert resolved is True
+    assert cycle.status == CycleStatus.FAILED
+    assert cycle.failure_code == "ORDER_SUBMISSION_NOT_STARTED"
+    assert cycle.completed_at is not None
+    db.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

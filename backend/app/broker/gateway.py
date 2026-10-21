@@ -28,11 +28,16 @@ from app.broker.reconcile import reconcile_order
 from app.broker.schemas import OrderCreate
 from app.db.enums import BrokerOrderStatus
 from app.db.models import BrokerOrder, utcnow
+from app.risk.kill_switch import is_kill_switch_enabled
 from app.schemas import ApprovedOrder
 
 
 class ApprovedOrderRequiredError(Exception):
     """Raised when something other than a validated ApprovedOrder reaches the gateway."""
+
+
+class TradingDisabledError(Exception):
+    """Raised when the global kill switch blocks an order submission."""
 
 
 async def get_order_by_client_id(db: AsyncSession, client_order_id: str) -> BrokerOrder | None:
@@ -59,6 +64,8 @@ async def submit_approved_order(
         )
     if not approved.policy_token:
         raise ApprovedOrderRequiredError("ApprovedOrder is missing a policy_token")
+    if await is_kill_switch_enabled(db):
+        raise TradingDisabledError("Order submission blocked by the global kill switch")
 
     broker_order = await get_order_by_client_id(db, approved.client_order_id)
     if broker_order is not None:
