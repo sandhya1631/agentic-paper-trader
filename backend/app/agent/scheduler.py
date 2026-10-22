@@ -7,20 +7,16 @@ from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.broker.alpaca import AlpacaClient
 from app.core.config import Settings, get_settings
-from app.db.enums import ApprovalStatus, CycleStatus, CycleTrigger
+from app.db.enums import CycleTrigger
 from app.db.models import (
     AgentConfig,
-    AgentCycle,
     AgentSchedule,
-    CycleApproval,
     TradingAccount,
     User,
-    utcnow,
 )
 from app.db.session import AsyncSessionLocal
 from app.risk.kill_switch import is_kill_switch_enabled
@@ -33,33 +29,6 @@ _schedule_tick_statuses: dict[UUID, SchedulerTickStatus] = {}
 _tick_history: dict[UUID | None, deque[SchedulerTickStatus]] = defaultdict(
     lambda: deque(maxlen=100)
 )
-
-
-async def _expire_pending_approvals(db: AsyncSession, agent_id: UUID) -> None:
-    now = utcnow()
-    result = await db.execute(
-        select(CycleApproval, AgentCycle)
-        .join(AgentCycle, CycleApproval.cycle_id == AgentCycle.id)
-        .where(
-            AgentCycle.agent_id == agent_id,
-            CycleApproval.status == ApprovalStatus.PENDING,
-            CycleApproval.expires_at <= now,
-        )
-        .with_for_update()
-    )
-    expired = result.all()
-    for approval, cycle in expired:
-        approval.status = ApprovalStatus.EXPIRED
-        approval.acted_at = now
-        cycle.status = CycleStatus.REJECTED
-        cycle.failure_code = "APPROVAL_EXPIRED"
-        cycle.completed_at = now
-        cycle.snapshot_json = {
-            **(cycle.snapshot_json or {}),
-            "execution_status": "APPROVAL_EXPIRED",
-        }
-    if expired:
-        await db.commit()
 
 
 def get_last_tick_status(schedule_id: UUID | None = None) -> SchedulerTickStatus | None:
@@ -197,7 +166,8 @@ async def run_scheduled_cycles(
                 if enabled_result.scalar_one_or_none() is None:
                     continue
                 attempted_agents += 1
-                await _expire_pending_approvals(db, agent_id)
+                # run_agent_cycle expires stale approvals itself before the
+                # active-cycle gate, so scheduled ticks get it for free too.
                 await run_agent_cycle(
                     agent_id,
                     db,

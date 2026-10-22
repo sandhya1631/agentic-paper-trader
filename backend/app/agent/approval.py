@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,7 @@ from app.broker.gateway import submit_approved_order
 from app.broker.reconcile import reconcile_order
 from app.core.config import get_settings
 from app.db.enums import (
+    ApprovalStatus,
     BrokerOrderStatus,
     CycleStatus,
     DecisionAction,
@@ -21,7 +22,14 @@ from app.db.enums import (
     OrderType,
     TimeInForce,
 )
-from app.db.models import AgentConfig, AgentCycle, BrokerOrder, TradingAccount, utcnow
+from app.db.models import (
+    AgentConfig,
+    AgentCycle,
+    BrokerOrder,
+    CycleApproval,
+    TradingAccount,
+    utcnow,
+)
 from app.risk.kill_switch import is_kill_switch_enabled
 from app.risk.market_hours import fetch_market_clock_for
 from app.risk.policies import PolicyContext, evaluate_policies
@@ -236,3 +244,37 @@ async def reconcile_uncertain_cycle(
     }
     await db.commit()
     return True
+
+
+async def expire_pending_approvals(db: AsyncSession, agent_id: UUID) -> None:
+    """Expire this agent's PENDING approvals past their expires_at.
+
+    Shared by both entry points that can hit the active-cycle gate: the
+    scheduler's tick (so a stale approval doesn't block the next scheduled
+    run) and run_agent_cycle itself (so a manual trigger can clean up and
+    proceed instead of hitting CycleOverlapError against a dead approval).
+    """
+    now = utcnow()
+    result = await db.execute(
+        select(CycleApproval, AgentCycle)
+        .join(AgentCycle, CycleApproval.cycle_id == AgentCycle.id)
+        .where(
+            AgentCycle.agent_id == agent_id,
+            CycleApproval.status == ApprovalStatus.PENDING,
+            CycleApproval.expires_at <= now,
+        )
+        .with_for_update()
+    )
+    expired = result.all()
+    for approval, cycle in expired:
+        approval.status = ApprovalStatus.EXPIRED
+        approval.acted_at = now
+        cycle.status = CycleStatus.REJECTED
+        cycle.failure_code = "APPROVAL_EXPIRED"
+        cycle.completed_at = now
+        cycle.snapshot_json = {
+            **(cycle.snapshot_json or {}),
+            "execution_status": "APPROVAL_EXPIRED",
+        }
+    if expired:
+        await db.commit()

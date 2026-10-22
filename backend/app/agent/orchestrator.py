@@ -28,6 +28,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from app.agent.approval import (
     evaluate_and_submit_cycle_trade,
+    expire_pending_approvals,
     reconcile_uncertain_cycle,
 )
 from app.agent.context import build_agent_context
@@ -85,6 +86,10 @@ async def run_agent_cycle(
         raise ValueError(f"AgentConfig with id '{agent_id}' not found")
 
     # 2. Gate: reject if this agent already has an active cycle (no overlap)
+    # Expire stale approvals first so a forgotten PENDING_APPROVAL cycle
+    # doesn't block a fresh attempt forever - applies to every caller
+    # (manual trigger, scheduler tick), not just the scheduler's own tick.
+    await expire_pending_approvals(db, agent.id)
     active_stmt = select(AgentCycle).where(
         AgentCycle.agent_id == agent.id,
         AgentCycle.status.in_(ACTIVE_CYCLE_STATUSES),

@@ -6,7 +6,7 @@ Stories 2.1.1, 2.1.2, 2.3.1, 2.3.2.
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -222,9 +222,13 @@ async def test_run_agent_cycle_records_version_metadata_without_database():
     agent_result.scalar_one_or_none.return_value = agent
     no_active_cycle_result = MagicMock()
     no_active_cycle_result.scalars.return_value.first.return_value = None
+    no_expired_approvals_result = MagicMock()
+    no_expired_approvals_result.all.return_value = []
 
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=[agent_result, no_active_cycle_result])
+    db.execute = AsyncMock(
+        side_effect=[agent_result, no_expired_approvals_result, no_active_cycle_result]
+    )
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
 
@@ -273,6 +277,8 @@ async def test_required_buy_creates_pending_approval_without_database(trigger):
     agent_result.scalar_one_or_none.return_value = agent
     no_active_cycle_result = MagicMock()
     no_active_cycle_result.scalars.return_value.first.return_value = None
+    no_expired_approvals_result = MagicMock()
+    no_expired_approvals_result.all.return_value = []
     added = []
 
     def refresh(model):
@@ -280,7 +286,9 @@ async def test_required_buy_creates_pending_approval_without_database(trigger):
             model.id = uuid.uuid4()
 
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=[agent_result, no_active_cycle_result])
+    db.execute = AsyncMock(
+        side_effect=[agent_result, no_expired_approvals_result, no_active_cycle_result]
+    )
     db.add = MagicMock(side_effect=added.append)
     db.commit = AsyncMock()
     db.refresh = AsyncMock(side_effect=refresh)
@@ -327,6 +335,8 @@ async def test_scheduled_auto_buy_executes_without_human_approval(monkeypatch):
     agent_result.scalar_one_or_none.return_value = agent
     no_active_cycle_result = MagicMock()
     no_active_cycle_result.scalars.return_value.first.return_value = None
+    no_expired_approvals_result = MagicMock()
+    no_expired_approvals_result.all.return_value = []
     added = []
 
     def refresh(model):
@@ -334,7 +344,9 @@ async def test_scheduled_auto_buy_executes_without_human_approval(monkeypatch):
             model.id = uuid.uuid4()
 
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=[agent_result, no_active_cycle_result])
+    db.execute = AsyncMock(
+        side_effect=[agent_result, no_expired_approvals_result, no_active_cycle_result]
+    )
     db.add = MagicMock(side_effect=added.append)
     db.commit = AsyncMock()
     db.refresh = AsyncMock(side_effect=refresh)
@@ -527,6 +539,51 @@ async def test_run_agent_cycle_rejects_when_active_cycle_exists(db_session: Asyn
 
     # No new cycle should be created, and the LLM should never be called.
     mock_llm.generate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manual_trigger_expires_stale_approval_instead_of_blocking(
+    db_session: AsyncSession,
+):
+    """A forgotten PENDING_APPROVAL cycle past its expiry must not block forever (#106)."""
+    agent = await _make_agent(db_session, "expired-approval@example.com")
+
+    stuck_cycle = AgentCycle(
+        agent_id=agent.id,
+        trigger=CycleTrigger.MANUAL,
+        status=CycleStatus.PENDING_APPROVAL,
+    )
+    db_session.add(stuck_cycle)
+    await db_session.flush()
+
+    stale_approval = CycleApproval(
+        cycle_id=stuck_cycle.id,
+        status=ApprovalStatus.PENDING,
+        proposal_hash="x" * 64,
+        expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    db_session.add(stale_approval)
+    await db_session.commit()
+
+    mock_llm = MagicMock()
+    mock_llm.generate = AsyncMock(
+        return_value=json.dumps({"symbol": "AAPL", "action": "HOLD", "reasoning": "no signal"})
+    )
+    mock_collector = MagicMock()
+    mock_collector.fetch_latest_bars = AsyncMock(return_value={"AAPL": []})
+
+    cycle = await run_agent_cycle(
+        agent.id, db_session, llm_client=mock_llm, collector=mock_collector
+    )
+
+    assert cycle.id != stuck_cycle.id
+    assert cycle.status == CycleStatus.HOLD
+
+    await db_session.refresh(stuck_cycle)
+    await db_session.refresh(stale_approval)
+    assert stuck_cycle.status == CycleStatus.REJECTED
+    assert stuck_cycle.failure_code == "APPROVAL_EXPIRED"
+    assert stale_approval.status == ApprovalStatus.EXPIRED
 
 
 @pytest.mark.asyncio
