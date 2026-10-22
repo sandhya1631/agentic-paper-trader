@@ -109,6 +109,28 @@ async def test_lifespan_starts_scheduler_before_yield_and_stops_it(monkeypatch):
 
 @pytest.fixture
 def scheduled_tick(monkeypatch):
+    class FakeRedis:
+        def __init__(self):
+            self.values = {}
+
+        def rpush(self, key, value):
+            self.values.setdefault(key, []).append(value)
+
+        def ltrim(self, key, _start, _end):
+            self.values[key] = self.values[key][-100:]
+
+        def expire(self, *_args):
+            pass
+
+        def lrange(self, key, start, end):
+            values = self.values.get(key, [])
+            return values[start:] if end == -1 else values[start:end + 1]
+
+        def close(self):
+            pass
+
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(scheduler, "_new_redis_client", lambda: fake_redis)
     enabled_agent_ids = [uuid.uuid4(), uuid.uuid4()]
     query_session = _make_session(enabled_agent_ids)
     cycle_sessions = [
@@ -306,6 +328,117 @@ def test_scheduler_uses_configured_interval():
 
     assert job is not None
     assert job.trigger.interval.total_seconds() == 15 * 60
+    assert job.func is scheduler.dispatch_scheduled_cycles
+    assert job.args == (15,)
+
+
+def test_agent_schedule_job_passes_interval_to_dispatcher():
+    scheduler_instance = scheduler.create_scheduler(include_global_job=False)
+    schedule_id = uuid.uuid4()
+
+    scheduler.add_agent_schedule_job(scheduler_instance, schedule_id, 5)
+
+    job = scheduler_instance.get_job(f"agent-schedule-{schedule_id}")
+    assert job is not None
+    assert job.func is scheduler.dispatch_agent_schedule
+    assert job.args == (schedule_id, 5)
+
+
+def test_scheduler_dispatch_deduplicates_interval_across_instances(monkeypatch):
+    class FakeRedis:
+        def __init__(self):
+            self.keys = set()
+            self.closed = False
+
+        def set(self, key, value, *, nx, ex):
+            assert nx is True
+            assert ex == 600
+            if key in self.keys:
+                return None
+            self.keys.add(key)
+            return True
+
+        def close(self):
+            self.closed = True
+
+    redis_client = FakeRedis()
+    monkeypatch.setattr(scheduler, "_new_redis_client", lambda: redis_client)
+    monkeypatch.setattr(scheduler.time, "time", lambda: 1_800)
+    enqueue = MagicMock()
+
+    first = scheduler._dispatch_once("global", 5, enqueue, "arg")
+    duplicate = scheduler._dispatch_once("global", 5, enqueue, "arg")
+
+    assert first is True
+    assert duplicate is False
+    assert enqueue.call_count == 1
+    assert next(iter(redis_client.keys)) == "agent-scheduler:global:6"
+    assert redis_client.closed is True
+
+
+def test_scheduler_dispatch_releases_deduplication_key_on_enqueue_error(monkeypatch):
+    class FakeRedis:
+        def __init__(self):
+            self.deleted = []
+
+        def set(self, *_args, **_kwargs):
+            return True
+
+        def delete(self, key):
+            self.deleted.append(key)
+
+        def close(self):
+            pass
+
+    redis_client = FakeRedis()
+    monkeypatch.setattr(scheduler, "_new_redis_client", lambda: redis_client)
+    monkeypatch.setattr(scheduler.time, "time", lambda: 1_800)
+    enqueue = MagicMock(side_effect=RuntimeError("broker unavailable"))
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        scheduler._dispatch_once("global", 5, enqueue)
+
+    assert redis_client.deleted == ["agent-scheduler:global:6"]
+
+
+def test_scheduler_tick_history_is_shared_through_redis(monkeypatch):
+    class FakeRedis:
+        values = {}
+
+        def rpush(self, key, value):
+            self.values.setdefault(key, []).append(value)
+
+        def ltrim(self, key, _start, _end):
+            self.values[key] = self.values[key][-100:]
+
+        def expire(self, _key, seconds):
+            assert seconds == 30 * 24 * 60 * 60
+
+        def lrange(self, key, start, end):
+            values = self.values.get(key, [])
+            return values[start:] if end == -1 else values[start:end + 1]
+
+        def close(self):
+            pass
+
+    redis_client = FakeRedis()
+    monkeypatch.setattr(scheduler, "_new_redis_client", lambda: redis_client)
+    monkeypatch.setattr(scheduler, "get_settings", lambda: Settings())
+    tick = SchedulerTickStatus(
+        status="COMPLETED",
+        started_at=datetime.now(UTC),
+        completed_at=datetime.now(UTC),
+        enabled_agents=1,
+        attempted_agents=1,
+        successful_agents=1,
+        failed_agents=0,
+        overlapping_agents=0,
+    )
+
+    scheduler._store_tick_status(None, tick)
+
+    assert scheduler.get_last_tick_status() == tick
+    assert scheduler.get_tick_history(limit=1) == [tick]
 
 
 @pytest.mark.asyncio

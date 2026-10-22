@@ -1,14 +1,18 @@
 """Periodic entry point for enabled agent cycles."""
 
 import logging
+import time
 from collections import defaultdict, deque
+from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from redis import Redis
 from sqlalchemy import select
 
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
+from app.agent.tasks import run_agent_schedule_task, run_scheduled_cycles_task
 from app.broker.alpaca import AlpacaClient
 from app.core.config import Settings, get_settings
 from app.db.enums import CycleTrigger
@@ -31,7 +35,29 @@ _tick_history: dict[UUID | None, deque[SchedulerTickStatus]] = defaultdict(
 )
 
 
+def _tick_history_key(schedule_id: UUID | None) -> str:
+    return f"agent-scheduler:tick-history:{schedule_id or 'global'}"
+
+
+def _new_redis_client() -> Redis:
+    return Redis.from_url(
+        get_settings().redis_url,
+        socket_connect_timeout=2,
+        socket_timeout=2,
+    )
+
+
 def get_last_tick_status(schedule_id: UUID | None = None) -> SchedulerTickStatus | None:
+    try:
+        redis_client = _new_redis_client()
+        try:
+            values = redis_client.lrange(_tick_history_key(schedule_id), -1, -1)
+        finally:
+            redis_client.close()
+        if isinstance(values, list) and values:
+            return SchedulerTickStatus.model_validate_json(values[0])
+    except Exception:
+        logger.exception("Unable to read scheduler tick status from Redis")
     if schedule_id is not None:
         return _schedule_tick_statuses.get(schedule_id)
     return _last_tick_status
@@ -40,8 +66,37 @@ def get_last_tick_status(schedule_id: UUID | None = None) -> SchedulerTickStatus
 def get_tick_history(
     schedule_id: UUID | None = None, *, limit: int = 50
 ) -> list[SchedulerTickStatus]:
-    """Return the most recent in-process tick summaries, newest first."""
+    """Return recent shared tick summaries, newest first."""
+    try:
+        redis_client = _new_redis_client()
+        try:
+            values = redis_client.lrange(_tick_history_key(schedule_id), -limit, -1)
+        finally:
+            redis_client.close()
+        if isinstance(values, list) and values:
+            return [
+                SchedulerTickStatus.model_validate_json(value)
+                for value in reversed(values)
+            ]
+    except Exception:
+        logger.exception("Unable to read scheduler tick history from Redis")
     return list(_tick_history[schedule_id])[-limit:][::-1]
+
+
+def _store_tick_status(
+    schedule_id: UUID | None,
+    tick: SchedulerTickStatus,
+) -> None:
+    redis_client = _new_redis_client()
+    try:
+        key = _tick_history_key(schedule_id)
+        redis_client.rpush(key, tick.model_dump_json())
+        redis_client.ltrim(key, -100, -1)
+        redis_client.expire(key, 30 * 24 * 60 * 60)
+    except Exception:
+        logger.exception("Unable to persist scheduler tick status in Redis")
+    finally:
+        redis_client.close()
 
 
 async def _fetch_market_clock(settings: Settings) -> MarketClock:
@@ -59,7 +114,7 @@ async def _fetch_market_clock(settings: Settings) -> MarketClock:
 async def run_scheduled_cycles(
     *, agent_id_filter: UUID | None = None, schedule_id: UUID | None = None
 ) -> SchedulerTickStatus:
-    """Run one scheduled tick and retain an in-process summary for monitoring."""
+    """Run one scheduled tick and publish its summary for monitoring."""
     global _last_tick_status
 
     started_at = datetime.now(UTC)
@@ -85,6 +140,7 @@ async def run_scheduled_cycles(
         if schedule_id is not None:
             _schedule_tick_statuses[schedule_id] = _last_tick_status
         _tick_history[schedule_id].append(_last_tick_status)
+        _store_tick_status(schedule_id, _last_tick_status)
         logger.info(
             "Scheduled tick finished: schedule_id=%s status=%s reason=%s "
             "enabled_agents=%d attempted_agents=%d successful_agents=%d "
@@ -225,14 +281,68 @@ def add_agent_schedule_job(
     interval_minutes: int,
 ) -> None:
     scheduler.add_job(
-        run_agent_schedule,
+        dispatch_agent_schedule,
         trigger="interval",
         minutes=interval_minutes,
-        args=[schedule_id],
+        args=[schedule_id, interval_minutes],
         id=f"agent-schedule-{schedule_id}",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+    )
+
+
+def _dispatch_once(
+    job_id: str,
+    interval_minutes: int,
+    enqueue: Callable[..., object],
+    *args: object,
+) -> bool:
+    """Enqueue a scheduled task once per interval across API instances."""
+    interval_seconds = interval_minutes * 60
+    slot = int(time.time() // interval_seconds)
+    key = f"agent-scheduler:{job_id}:{slot}"
+    redis_client = _new_redis_client()
+    try:
+        acquired = redis_client.set(
+            key,
+            "queued",
+            nx=True,
+            ex=interval_seconds * 2,
+        )
+    finally:
+        redis_client.close()
+    if not acquired:
+        logger.info("Skipping duplicate scheduler dispatch for %s", job_id)
+        return False
+    try:
+        enqueue(*args)
+    except Exception:
+        redis_client = _new_redis_client()
+        try:
+            redis_client.delete(key)
+        finally:
+            redis_client.close()
+        raise
+    return True
+
+
+def dispatch_agent_schedule(schedule_id: UUID, interval_minutes: int) -> None:
+    """Queue one persisted schedule for execution by a Celery worker."""
+    _dispatch_once(
+        f"schedule-{schedule_id}",
+        interval_minutes,
+        run_agent_schedule_task.delay,
+        str(schedule_id),
+    )
+
+
+def dispatch_scheduled_cycles(interval_minutes: int) -> None:
+    """Queue a global scheduled tick for execution by a Celery worker."""
+    _dispatch_once(
+        "global",
+        interval_minutes,
+        run_scheduled_cycles_task.delay,
     )
 
 
@@ -244,9 +354,10 @@ def create_scheduler(
     scheduler = AsyncIOScheduler()
     if include_global_job:
         scheduler.add_job(
-            run_scheduled_cycles,
+            dispatch_scheduled_cycles,
             trigger="interval",
             minutes=settings.scheduler_interval_minutes,
+            args=[settings.scheduler_interval_minutes],
             id="scheduled-agent-cycles",
             max_instances=1,
             coalesce=True,
