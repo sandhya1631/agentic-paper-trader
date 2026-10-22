@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from urllib.parse import urlparse
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -165,7 +165,13 @@ async def evaluate_and_submit_cycle_trade(
         approved_order = ApprovedOrder(
             decision_id=cycle.id,
             policy_token=decision.policy_token,
-            client_order_id=str(uuid4()),
+            # Deterministic, not random (Story 3.2.2 / Issue #73): if this
+            # function is ever invoked twice for the same cycle - a double
+            # -click race on approve, a retried scheduler tick - both calls
+            # produce the SAME client_order_id, so the gateway's existing
+            # dedup (#63) actually catches it instead of submitting two
+            # real orders with two different random IDs.
+            client_order_id=str(cycle.id),
             symbol=proposal.symbol,
             side=OrderSide(proposal.action.value),
             quantity=decision.final_quantity or proposal.quantity,
