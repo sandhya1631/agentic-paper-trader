@@ -30,6 +30,7 @@ from app.db.models import (
     TradingAccount,
     utcnow,
 )
+from app.risk import daily_limits
 from app.risk.kill_switch import is_kill_switch_enabled
 from app.risk.market_hours import fetch_market_clock_for
 from app.risk.policies import PolicyContext, evaluate_policies
@@ -97,8 +98,7 @@ async def evaluate_and_submit_cycle_trade(
         )
 
         orders = await client.get_orders(status="all")
-        today = datetime.now(UTC).date()
-        orders_today = 0
+        orders_today = daily_limits.count_orders_today(orders)
         open_statuses = {
             "new",
             "accepted",
@@ -107,22 +107,13 @@ async def evaluate_and_submit_cycle_trade(
             "held",
             "pending_replace",
         }
-        open_order_symbols: set[str] = set()
-        for order in orders:
-            if order.status.lower() in open_statuses:
-                open_order_symbols.add(order.symbol)
-            if not order.submitted_at:
-                continue
-            submitted_text = order.submitted_at.replace("Z", "+00:00")
-            submitted_at = datetime.fromisoformat(submitted_text)
-            if submitted_at.tzinfo is None:
-                raise ValueError("An Alpaca order timestamp is missing its timezone")
-            if submitted_at.astimezone(UTC).date() == today:
-                orders_today += 1
+        open_order_symbols = {
+            order.symbol for order in orders if order.status.lower() in open_statuses
+        }
 
         clock = await fetch_market_clock_for(client)
         equity = account_state.equity
-        daily_pnl_pct = (equity - account_state.last_equity) / account_state.last_equity
+        daily_pnl_pct = daily_limits.daily_pnl_pct(equity, account_state.last_equity)
         input_data = PolicyInput(
             agent=AgentConfigRead(
                 id=agent.id,
@@ -157,6 +148,7 @@ async def evaluate_and_submit_cycle_trade(
             daily_pnl_pct=daily_pnl_pct,
             is_paper=account.is_paper,
             watchlist=set(agent.watchlist),
+            max_orders_per_day=settings.max_orders_per_day,
         )
         decision = evaluate_policies(policy_context)
         if decision.policy_token is None:
