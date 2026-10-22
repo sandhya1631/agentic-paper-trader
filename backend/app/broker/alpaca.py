@@ -13,6 +13,13 @@ from app.broker.schemas import (
 from app.core.paper_guard import ensure_alpaca_paper_url
 from app.market_data.indicators import calculate_indicators
 
+
+def _optional_decimal(value: Any) -> Decimal | None:
+    """Convert an indicator value to Decimal, preserving None for absent indicators."""
+    return Decimal(str(value)) if value is not None else None
+
+
+
 class AlpacaClient:
     """Asynchronous client interacting with Alpaca REST API."""
 
@@ -78,6 +85,7 @@ class AlpacaClient:
             maintenance_margin=Decimal(str(data.get("maintenance_margin", 0))),
             daytrading_buying_power=Decimal(str(data.get("daytrading_buying_power", 0))),
             regt_buying_power=Decimal(str(data.get("regt_buying_power", 0))),
+            last_equity=Decimal(str(data.get("last_equity", 0))),
             is_paper=True,
         )
 
@@ -126,7 +134,7 @@ class AlpacaClient:
         return symbol_bars
 
     async def get_market_snapshot(self, symbol: str) -> MarketSnapshotRead:
-        """Fetch latest price snapshot and compute 14-period RSI, 20-period SMA, and 50-period SMA."""
+        """Fetch latest price snapshot and compute 14-period RSI, 20- and 50-period SMA."""
         bars = await self.get_bars(symbol, timeframe="5Min", limit=75)
         if not bars:
             raise ValueError(f"No price bar data available for symbol '{symbol}'")
@@ -141,9 +149,9 @@ class AlpacaClient:
         return MarketSnapshotRead(
             symbol=symbol.upper(),
             latest_close=latest_close,
-            rsi_14=Decimal(str(indicators["rsi_14"])) if indicators.get("rsi_14") is not None else None,
-            sma_20=Decimal(str(indicators["sma_20"])) if indicators.get("sma_20") is not None else None,
-            sma_50=Decimal(str(indicators["sma_50"])) if indicators.get("sma_50") is not None else None,
+            rsi_14=_optional_decimal(indicators.get("rsi_14")),
+            sma_20=_optional_decimal(indicators.get("sma_20")),
+            sma_50=_optional_decimal(indicators.get("sma_50")),
             bars_count=len(bars),
             timestamp=latest_timestamp,
         )
@@ -174,6 +182,11 @@ class AlpacaClient:
             symbol=data["symbol"],
             qty=Decimal(str(data["qty"])),
             filled_qty=Decimal(str(data.get("filled_qty", 0))),
+            average_fill_price=(
+                Decimal(str(data["filled_avg_price"]))
+                if data.get("filled_avg_price") is not None
+                else None
+            ),
             side=data["side"],
             type=data["type"],
             time_in_force=data["time_in_force"],

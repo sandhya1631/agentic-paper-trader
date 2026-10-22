@@ -7,13 +7,17 @@ orders are retrieved and parsed correctly, empty results are handled without
 error, and the protected endpoints require authentication.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
 
 from app.broker.alpaca import AlpacaClient
+from app.broker.router import place_paper_order
+from app.broker.schemas import OrderCreate
 
 
 def _mock_http_get(json_body):
@@ -154,3 +158,28 @@ async def test_get_positions_requires_auth(client: AsyncClient) -> None:
 async def test_get_orders_requires_auth(client: AsyncClient) -> None:
     response = await client.get("/api/v1/broker/orders")
     assert response.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_place_order_is_blocked_by_global_kill_switch(monkeypatch):
+    submit_order = AsyncMock()
+    monkeypatch.setattr(
+        "app.broker.router.is_kill_switch_enabled",
+        AsyncMock(return_value=True),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await place_paper_order(
+            order=OrderCreate(
+                symbol="AAPL",
+                qty=1,
+                side="BUY",
+                client_order_id="blocked-order",
+            ),
+            current_user=object(),
+            client=SimpleNamespace(submit_order=submit_order),
+            db=object(),
+        )
+
+    assert error.value.status_code == 423
+    submit_order.assert_not_awaited()

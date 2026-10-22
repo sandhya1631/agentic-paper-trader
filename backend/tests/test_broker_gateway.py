@@ -1,5 +1,6 @@
 """Tests for the broker gateway: submit an approved paper order (Story 1.3.1 / Issue #62)."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -8,7 +9,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.broker.alpaca import AlpacaClient
-from app.broker.gateway import ApprovedOrderRequiredError, submit_approved_order
+from app.broker.gateway import (
+    ApprovedOrderRequiredError,
+    TradingDisabledError,
+    submit_approved_order,
+)
 from app.broker.schemas import OrderCreate
 from app.db.enums import (
     ApprovalMode,
@@ -193,5 +198,21 @@ async def test_gateway_rejects_missing_policy_token(db_session: AsyncSession):
 
     with pytest.raises(ApprovedOrderRequiredError):
         await submit_approved_order(approved, client, db_session)
+
+    http.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_gateway_enforces_global_kill_switch(monkeypatch):
+    http = _mock_http_post()
+    client = AlpacaClient(api_key="k", api_secret="s", client=http)
+    db = SimpleNamespace()
+    monkeypatch.setattr(
+        "app.broker.gateway.is_kill_switch_enabled",
+        AsyncMock(return_value=True),
+    )
+
+    with pytest.raises(TradingDisabledError, match="kill switch"):
+        await submit_approved_order(_approved_order(uuid4()), client, db)
 
     http.post.assert_not_called()

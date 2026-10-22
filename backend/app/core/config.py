@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.paper_guard import ensure_alpaca_paper_url
@@ -13,6 +13,9 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     app_name: str = "Agentic Paper Trader API"
+    scheduler_enabled: bool = False
+    scheduler_interval_minutes: int = Field(default=15, ge=1)
+    kill_switch_enabled: bool = False
 
     # Async SQLAlchemy connection string, e.g.:
     # postgresql+asyncpg://user:password@localhost:5432/agentic_paper_trader

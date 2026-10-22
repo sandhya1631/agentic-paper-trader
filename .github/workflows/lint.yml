@@ -24,8 +24,29 @@ jobs:
       - name: Install Ruff
         run: pip install "ruff>=0.12"
 
-      # Scoped to the auth + tests code owned by this workstream. Other packages
-      # (e.g. app/db, app/schemas) are excluded until their owners adopt the linter,
-      # so this gate never forces changes to code it doesn't own.
+      # Lint the whole backend (all app/ packages + tests). Intentional
+      # exceptions are expressed in backend/pyproject.toml via per-file-ignores,
+      # not by narrowing this scope.
       - name: Ruff check
-        run: ruff check app/auth tests
+        run: ruff check app tests
+
+  mypy:
+    name: mypy (Python type check)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install backend (with dev deps)
+        run: pip install -e ".[dev]"
+
+      - name: mypy check
+        run: mypy

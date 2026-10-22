@@ -19,6 +19,36 @@ Create the database (once, using `psql` or any Postgres client):
 CREATE DATABASE agentic_paper_trader;
 ```
 
+## Code quality: lint, types & pre-commit
+
+Ruff (lint), mypy (static types), and pre-commit are installed with the `[dev]` extra.
+
+```bash
+ruff check app tests        # lint (E, F, I; line-length 100)
+mypy                        # static type check (config in pyproject.toml)
+```
+
+mypy starts from a **lenient baseline** (`[tool.mypy]` in `pyproject.toml`) and is
+tightened over time; a handful of modules with pre-existing type gaps are exempted via
+`overrides` until they're annotated.
+
+Install the git pre-commit hooks once so Ruff and mypy run automatically before each commit.
+Normal commits only touch the files you changed:
+
+```bash
+pre-commit install              # from the repo root (or anywhere in the repo)
+```
+
+The hook config lives at `.pre-commit-config.yaml` (repo root) and wires Ruff lint + format
+and mypy. CI enforces the same Ruff and mypy checks in `.github/workflows/lint.yml`.
+
+> **Heads-up on `pre-commit run --all-files`:** the codebase has not yet been
+> formatted with `ruff format`, so running the hooks across the whole repo will
+> reformat a number of backend files in one pass (the `ruff-format` hook reports
+> "Failed" when it rewrites files — re-running it then passes). That's expected;
+> review and commit the formatting diff deliberately (ideally as its own commit)
+> rather than mixing it into an unrelated change.
+
 ## Run
 
 ```bash
@@ -37,6 +67,18 @@ On startup, the API creates missing tables and adds the `prompt_version` and
   from Alpaca's Data API. Requires `ALPACA_API_KEY`/`ALPACA_API_SECRET` in `.env` (free paper-trading keys from
   https://app.alpaca.markets/); retries automatically on rate limiting (HTTP 429).
 - `GET /llm/health` — reports the configured LLM provider/model (no API call, no cost).
+
+### Scheduled Agent Cycles
+
+Set `SCHEDULER_ENABLED=true` to start the in-process APScheduler worker with the API.
+It checks enabled agents every 15 minutes by default (`SCHEDULER_INTERVAL_MINUTES`),
+and only runs scheduled cycles when the Alpaca market clock reports the market open.
+The global `KILL_SWITCH_ENABLED=true` setting skips all scheduled cycles. Both settings
+default to safe/off values, so tests and normal local runs do not start a scheduler.
+Scheduled cycles require `ALPACA_API_KEY` and `ALPACA_API_SECRET` to verify market
+hours; clock errors fail closed. This single-process scheduler is intended for the
+single-host MVP; use a distributed worker and scheduler before running multiple API
+instances with scheduling enabled.
 
 ### LLM Client Factory
 

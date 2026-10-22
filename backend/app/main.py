@@ -3,18 +3,23 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.router import router as accounts_router
 from app.agent.router import router as agent_router
+from app.agent.scheduler import add_agent_schedule_job, create_scheduler
 from app.auth.router import router as auth_router
 from app.broker.router import router as broker_router
 from app.core.config import get_settings
 from app.db import models  # noqa: F401  (registers ORM models on Base.metadata)
 from app.db.base import Base
-from app.db.schema import ensure_agent_cycle_prompt_columns
-from app.db.session import engine, get_db
+from app.db.models import AgentConfig, AgentSchedule, TradingAccount, User
+from app.db.schema import (
+    ensure_agent_cycle_prompt_columns,
+    ensure_user_scheduler_column,
+)
+from app.db.session import AsyncSessionLocal, engine, get_db
 from app.llm.router import router as llm_router
 from app.market_data.router import router as market_data_router
 
@@ -55,7 +60,36 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await ensure_agent_cycle_prompt_columns(conn)
-    yield
+        await ensure_user_scheduler_column(conn)
+    scheduler = create_scheduler(
+        settings,
+        include_global_job=settings.scheduler_enabled,
+    )
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(AgentSchedule)
+            .join(AgentConfig, AgentSchedule.agent_id == AgentConfig.id)
+            .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+            .join(User, TradingAccount.user_id == User.id)
+            .where(
+                AgentSchedule.enabled.is_(True),
+                AgentConfig.enabled.is_(True),
+                User.scheduler_enabled.is_(True),
+            )
+        )
+        for schedule in result.scalars().all():
+            add_agent_schedule_job(
+                scheduler,
+                schedule.id,
+                schedule.interval_minutes,
+            )
+    scheduler.start()
+    app.state.scheduler = scheduler
+    try:
+        yield
+    finally:
+        scheduler.shutdown(wait=False)
+        app.state.scheduler = None
 
 
 app = FastAPI(

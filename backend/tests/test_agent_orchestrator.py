@@ -6,19 +6,31 @@ Stories 2.1.1, 2.1.2, 2.3.1, 2.3.2.
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from conftest import TestSessionLocal
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.approval import reconcile_uncertain_cycle
 from app.agent.context import build_agent_context
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.agent.prompt import get_prompt_definition, get_system_prompt
-from app.db.enums import ApprovalMode, CycleStatus, CycleTrigger, UserRole
-from app.db.models import AgentConfig, AgentCycle, PolicySet, TradingAccount, User
+from app.db.enums import ApprovalMode, ApprovalStatus, CycleStatus, CycleTrigger, UserRole
+from app.db.models import (
+    AgentConfig,
+    AgentCycle,
+    CycleApproval,
+    PolicySet,
+    TradingAccount,
+    User,
+)
 from app.market_data.alpaca_client import OHLCVBar
+from app.risk.policies import POLICY_VERSION
 
 
 def _make_bar(price: float) -> OHLCVBar:
@@ -78,6 +90,18 @@ def test_prompt_instructs_hold_on_uncertainty():
 def test_get_system_prompt_unknown_raises():
     with pytest.raises(ValueError):
         get_system_prompt("INVALID_VERSION")
+
+
+def test_agent_config_rejects_unknown_strategy_version():
+    agent = AgentConfig(strategy_version="S-001")
+
+    with pytest.raises(ValueError, match="Unknown strategy version"):
+        agent.strategy_version = "INVALID_VERSION"
+
+
+def test_agent_config_rejects_unknown_strategy_version_on_creation():
+    with pytest.raises(ValueError, match="Unknown strategy version"):
+        AgentConfig(strategy_version="INVALID_VERSION")
 
 
 def test_get_prompt_definition_records_revision_separately():
@@ -170,13 +194,225 @@ async def test_run_agent_cycle_success(db_session: AsyncSession):
         collector=mock_collector,
     )
 
-    assert cycle.status == CycleStatus.COMPLETED
+    assert cycle.status == CycleStatus.PENDING_APPROVAL
     assert cycle.proposal_json["action"] == "BUY"
     assert cycle.proposal_json["symbol"] == "AAPL"
     assert cycle.snapshot_json["watchlist"] == ["AAPL", "NVDA"]
+    assert cycle.snapshot_json["strategy_version"] == "S-001"
+    assert cycle.snapshot_json["versions"] == {
+        "strategy": "S-001",
+        "policy": POLICY_VERSION,
+    }
+    assert cycle.snapshot_json["execution_status"] == "PENDING_APPROVAL"
     assert cycle.prompt_version == agent.strategy_version
     assert cycle.prompt_revision == "1.0.0"
     assert "S-001" in cycle.prompt_text
+    assert mock_llm.generate.await_args.kwargs["system"] == get_system_prompt("S-001")
+    assert cycle.approval.status == ApprovalStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_run_agent_cycle_records_version_metadata_without_database():
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        watchlist=["AAPL"],
+        strategy_version="S-001",
+    )
+    agent_result = MagicMock()
+    agent_result.scalar_one_or_none.return_value = agent
+    no_active_cycle_result = MagicMock()
+    no_active_cycle_result.scalars.return_value.first.return_value = None
+    no_expired_approvals_result = MagicMock()
+    no_expired_approvals_result.all.return_value = []
+
+    db = MagicMock()
+    db.execute = AsyncMock(
+        side_effect=[agent_result, no_expired_approvals_result, no_active_cycle_result]
+    )
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+
+    mock_llm = MagicMock()
+    mock_llm.generate = AsyncMock(
+        return_value=json.dumps(
+            {
+                "symbol": "AAPL",
+                "action": "HOLD",
+                "quantity": 0,
+                "reasoning": "No signal.",
+            }
+        )
+    )
+    mock_collector = MagicMock()
+    mock_collector.fetch_latest_bars = AsyncMock(return_value={"AAPL": []})
+
+    cycle = await run_agent_cycle(
+        agent.id,
+        db,
+        llm_client=mock_llm,
+        collector=mock_collector,
+    )
+
+    assert cycle.snapshot_json["strategy_version"] == "S-001"
+    assert cycle.snapshot_json["versions"] == {
+        "strategy": "S-001",
+        "policy": POLICY_VERSION,
+    }
+    assert mock_llm.generate.await_args.kwargs["system"] == get_system_prompt("S-001")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trigger",
+    [CycleTrigger.MANUAL, CycleTrigger.SCHEDULED],
+)
+async def test_required_buy_creates_pending_approval_without_database(trigger):
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        watchlist=["AAPL"],
+        strategy_version="S-001",
+        approval_mode=ApprovalMode.REQUIRED,
+    )
+    agent_result = MagicMock()
+    agent_result.scalar_one_or_none.return_value = agent
+    no_active_cycle_result = MagicMock()
+    no_active_cycle_result.scalars.return_value.first.return_value = None
+    no_expired_approvals_result = MagicMock()
+    no_expired_approvals_result.all.return_value = []
+    added = []
+
+    def refresh(model):
+        if isinstance(model, AgentCycle) and model.id is None:
+            model.id = uuid.uuid4()
+
+    db = MagicMock()
+    db.execute = AsyncMock(
+        side_effect=[agent_result, no_expired_approvals_result, no_active_cycle_result]
+    )
+    db.add = MagicMock(side_effect=added.append)
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock(side_effect=refresh)
+
+    mock_llm = MagicMock()
+    mock_llm.generate = AsyncMock(
+        return_value=json.dumps(
+            {
+                "symbol": "AAPL",
+                "action": "BUY",
+                "quantity": 1,
+                "reasoning": "Test proposal",
+            }
+        )
+    )
+    collector = MagicMock()
+    collector.fetch_latest_bars = AsyncMock(return_value={"AAPL": []})
+
+    cycle = await run_agent_cycle(
+        agent.id,
+        db,
+        trigger=trigger,
+        llm_client=mock_llm,
+        collector=collector,
+    )
+
+    approval = next(item for item in added if isinstance(item, CycleApproval))
+    assert cycle.status == CycleStatus.PENDING_APPROVAL
+    assert approval.status == ApprovalStatus.PENDING
+    assert approval.cycle_id == cycle.id
+    assert len(approval.proposal_hash) == 64
+    assert cycle.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_scheduled_auto_buy_executes_without_human_approval(monkeypatch):
+    agent = SimpleNamespace(
+        id=uuid.uuid4(),
+        watchlist=["AAPL"],
+        strategy_version="S-001",
+        approval_mode=ApprovalMode.AUTO,
+    )
+    agent_result = MagicMock()
+    agent_result.scalar_one_or_none.return_value = agent
+    no_active_cycle_result = MagicMock()
+    no_active_cycle_result.scalars.return_value.first.return_value = None
+    no_expired_approvals_result = MagicMock()
+    no_expired_approvals_result.all.return_value = []
+    added = []
+
+    def refresh(model):
+        if isinstance(model, AgentCycle) and model.id is None:
+            model.id = uuid.uuid4()
+
+    db = MagicMock()
+    db.execute = AsyncMock(
+        side_effect=[agent_result, no_expired_approvals_result, no_active_cycle_result]
+    )
+    db.add = MagicMock(side_effect=added.append)
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock(side_effect=refresh)
+
+    mock_llm = MagicMock()
+    mock_llm.generate = AsyncMock(
+        return_value=json.dumps(
+            {
+                "symbol": "AAPL",
+                "action": "BUY",
+                "quantity": 1,
+                "reasoning": "Scheduled proposal",
+            }
+        )
+    )
+    collector = MagicMock()
+    collector.fetch_latest_bars = AsyncMock(return_value={"AAPL": []})
+    policy_decision = SimpleNamespace(
+        model_dump=lambda mode: {"decision": "ALLOW"}
+    )
+    broker_order = SimpleNamespace(status=SimpleNamespace(value="SUBMITTED"))
+    execute_trade = AsyncMock(return_value=(policy_decision, broker_order))
+    monkeypatch.setattr(
+        "app.agent.orchestrator.evaluate_and_submit_cycle_trade",
+        execute_trade,
+    )
+
+    cycle = await run_agent_cycle(
+        agent.id,
+        db,
+        trigger=CycleTrigger.SCHEDULED,
+        llm_client=mock_llm,
+        collector=collector,
+    )
+
+    execute_trade.assert_awaited_once_with(db, agent, cycle)
+    assert not any(isinstance(item, CycleApproval) for item in added)
+    assert cycle.status == CycleStatus.COMPLETED
+    assert cycle.snapshot_json["execution_status"] == "ORDER_SUBMITTED"
+    assert cycle.approval is None
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_clears_cycle_when_submission_never_started():
+    cycle = SimpleNamespace(
+        id=uuid.uuid4(),
+        status=CycleStatus.RECONCILING,
+        failure_code="ORDER_EXECUTION_UNCERTAIN",
+        failure_message="temporary failure",
+        completed_at=None,
+        snapshot_json={"execution_status": "RECONCILIATION_REQUIRED"},
+    )
+    db = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=SimpleNamespace(scalar_one_or_none=lambda: None)
+        ),
+        commit=AsyncMock(),
+    )
+
+    resolved = await reconcile_uncertain_cycle(db, SimpleNamespace(), cycle)
+
+    assert resolved is True
+    assert cycle.status == CycleStatus.FAILED
+    assert cycle.failure_code == "ORDER_SUBMISSION_NOT_STARTED"
+    assert cycle.completed_at is not None
+    db.commit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -239,7 +475,7 @@ async def test_run_agent_cycle_self_repair_on_invalid_json(db_session: AsyncSess
     )
 
     assert mock_llm.generate.call_count == 2
-    assert cycle.status == CycleStatus.COMPLETED
+    assert cycle.status == CycleStatus.PENDING_APPROVAL
     assert cycle.proposal_json["action"] == "BUY"
     assert cycle.proposal_json["symbol"] == "SPY"
 
@@ -306,6 +542,51 @@ async def test_run_agent_cycle_rejects_when_active_cycle_exists(db_session: Asyn
 
 
 @pytest.mark.asyncio
+async def test_manual_trigger_expires_stale_approval_instead_of_blocking(
+    db_session: AsyncSession,
+):
+    """A forgotten PENDING_APPROVAL cycle past its expiry must not block forever (#106)."""
+    agent = await _make_agent(db_session, "expired-approval@example.com")
+
+    stuck_cycle = AgentCycle(
+        agent_id=agent.id,
+        trigger=CycleTrigger.MANUAL,
+        status=CycleStatus.PENDING_APPROVAL,
+    )
+    db_session.add(stuck_cycle)
+    await db_session.flush()
+
+    stale_approval = CycleApproval(
+        cycle_id=stuck_cycle.id,
+        status=ApprovalStatus.PENDING,
+        proposal_hash="x" * 64,
+        expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    db_session.add(stale_approval)
+    await db_session.commit()
+
+    mock_llm = MagicMock()
+    mock_llm.generate = AsyncMock(
+        return_value=json.dumps({"symbol": "AAPL", "action": "HOLD", "reasoning": "no signal"})
+    )
+    mock_collector = MagicMock()
+    mock_collector.fetch_latest_bars = AsyncMock(return_value={"AAPL": []})
+
+    cycle = await run_agent_cycle(
+        agent.id, db_session, llm_client=mock_llm, collector=mock_collector
+    )
+
+    assert cycle.id != stuck_cycle.id
+    assert cycle.status == CycleStatus.HOLD
+
+    await db_session.refresh(stuck_cycle)
+    await db_session.refresh(stale_approval)
+    assert stuck_cycle.status == CycleStatus.REJECTED
+    assert stuck_cycle.failure_code == "APPROVAL_EXPIRED"
+    assert stale_approval.status == ApprovalStatus.EXPIRED
+
+
+@pytest.mark.asyncio
 async def test_run_agent_cycle_allowed_after_previous_cycle_completed(
     db_session: AsyncSession,
 ):
@@ -332,7 +613,7 @@ async def test_run_agent_cycle_allowed_after_previous_cycle_completed(
         agent.id, db_session, llm_client=mock_llm, collector=mock_collector
     )
 
-    assert cycle.status == CycleStatus.COMPLETED
+    assert cycle.status == CycleStatus.HOLD
     assert cycle.id != finished.id
 
 
@@ -344,7 +625,40 @@ async def test_trigger_cycle_endpoint_returns_409_on_overlap(client: AsyncClient
     login = await client.post("/auth/login", json={"email": email, "password": password})
     token = login.json()["access_token"]
 
-    some_agent_id = uuid.uuid4()
+    async with TestSessionLocal() as db:
+        user_result = await db.execute(select(User).where(User.email == email))
+        user = user_result.scalar_one()
+        account = TradingAccount(
+            user_id=user.id,
+            provider="ALPACA",
+            encrypted_api_key="enc_key",
+            encrypted_api_secret="enc_secret",
+            is_paper=True,
+        )
+        db.add(account)
+        await db.flush()
+        policy_set = PolicySet(
+            version=f"P-{uuid.uuid4()}",
+            limits_json={},
+            is_active=True,
+        )
+        db.add(policy_set)
+        await db.flush()
+        agent = AgentConfig(
+            account_id=account.id,
+            policy_set_id=policy_set.id,
+            name="HTTP Overlap Agent",
+            watchlist=["AAPL"],
+            strategy_version="S-001",
+            approval_mode=ApprovalMode.REQUIRED,
+            enabled=True,
+            model_provider="ollama",
+            model_name="llama3.1",
+        )
+        db.add(agent)
+        await db.commit()
+        some_agent_id = agent.id
+
     with patch(
         "app.agent.router.run_agent_cycle",
         side_effect=CycleOverlapError(f"Agent '{some_agent_id}' already has an active cycle"),
