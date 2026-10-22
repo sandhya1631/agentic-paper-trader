@@ -73,12 +73,27 @@ On startup, the API creates missing tables and adds the `prompt_version` and
 Set `SCHEDULER_ENABLED=true` to start the in-process APScheduler worker with the API.
 It checks enabled agents every 15 minutes by default (`SCHEDULER_INTERVAL_MINUTES`),
 and only runs scheduled cycles when the Alpaca market clock reports the market open.
-The global `KILL_SWITCH_ENABLED=true` setting skips all scheduled cycles. Both settings
-default to safe/off values, so tests and normal local runs do not start a scheduler.
-Scheduled cycles require `ALPACA_API_KEY` and `ALPACA_API_SECRET` to verify market
-hours; clock errors fail closed. This single-process scheduler is intended for the
-single-host MVP; use a distributed worker and scheduler before running multiple API
-instances with scheduling enabled.
+Each API scheduler enqueues scheduled work to Celery; workers execute the cycles using
+Redis as both broker and result backend. Redis-backed interval deduplication prevents
+multiple API instances from queueing the same schedule tick. The global
+`KILL_SWITCH_ENABLED=true` setting skips all scheduled cycles. Both scheduler settings
+default to safe/off values. Scheduled cycles require `ALPACA_API_KEY` and
+`ALPACA_API_SECRET` to verify market hours; clock errors fail closed.
+The existing manual `POST /agent/cycles/run` endpoint remains synchronous in this
+initial increment; Celery currently handles recurring scheduled cycles.
+
+For local development, start Redis and run a worker:
+
+```powershell
+docker compose up -d redis
+cd backend
+.venv\Scripts\celery.exe -A app.celery_app:celery_app worker --loglevel=info --pool=solo
+```
+
+Set `REDIS_URL` to the Redis URL accessible from the API and worker. In Docker Compose,
+the API and worker use `redis://redis:6379/0`; outside Compose the default is
+`redis://localhost:6379/0`. `docker compose up` starts Redis and a Celery worker along
+with the rest of the stack. Cycle, approval, and broker-order records remain in PostgreSQL.
 
 ### LLM Client Factory
 

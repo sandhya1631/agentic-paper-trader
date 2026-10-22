@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     app_name: str = "Agentic Paper Trader API"
     scheduler_enabled: bool = False
     scheduler_interval_minutes: int = Field(default=15, ge=1)
+    redis_url: str = "redis://localhost:6379/0"
     kill_switch_enabled: bool = False
     # Hard cap on orders per US/Eastern trading day (policy P-012).
     max_orders_per_day: int = Field(default=10, ge=1)

@@ -79,12 +79,12 @@ There are two ways to schedule cycles:
 
 Both jobs check the kill switch and Alpaca market clock before running a cycle. Poll the
 authenticated `GET /agent/scheduler/status` endpoint to see active schedules, next run times,
-the last in-process tick summary, and recent scheduled cycles. Tick summaries reset on restart;
-cycle, approval, and broker-order records remain in the database.
+the latest shared tick summary, and recent scheduled cycles. Tick summaries are shared through
+Redis; cycle, approval, and broker-order records remain in PostgreSQL.
 Use authenticated `GET /agent/scheduler/logs` to inspect up to 50 recent interval results
 (including `SKIPPED` results such as `market_closed`); pass `schedule_id` to filter to one
-schedule or `limit` to choose 1–100 entries. Scheduler logs are kept in memory (last 100 ticks
-per scheduler/schedule) and reset on backend restart.
+schedule or `limit` to choose 1–100 entries. Redis retains the last 100 tick results per
+scheduler/schedule for up to 30 days.
 
 The global kill switch is available at `GET /agent/kill-switch` and `PUT /agent/kill-switch`
 with `{"enabled":true}` or `{"enabled":false}`. Both endpoints require the `ADMIN` role.
@@ -92,7 +92,8 @@ Its API-managed state is stored in PostgreSQL and applies to all scheduled cycle
 policy checks. The execution gateway and direct `POST /api/v1/broker/orders` endpoint both
 enforce the switch immediately before order submission.
 `KILL_SWITCH_ENABLED=true` in the environment remains a force-on override for everyone and
-cannot be disabled through the API. Scheduler tick history itself is not stored in the database.
+cannot be disabled through the API. Scheduler tick history is stored in Redis, while cycle and
+trade history remains in PostgreSQL.
 
 Scheduled cycles respect the agent's approval mode:
 
@@ -120,9 +121,10 @@ Alpaca keys are used for scheduler market-hours checks; order execution uses the
 connected, encrypted paper-account credentials.
 
 Run one-off cycles immediately with `POST /agent/cycles/run`; that is separate from starting
-a recurring schedule. Keep the backend to one worker/instance while schedules are enabled:
-schedule definitions persist, but APScheduler runs in-process and multiple workers would each
-restore and execute the same schedules.
+a recurring schedule. Scheduled ticks are dispatched through Celery to workers using Redis.
+When running multiple API instances, Redis-based interval deduplication prevents each instance
+from enqueueing the same scheduled tick. Cycle, approval, and broker-order outcomes remain
+persisted in PostgreSQL.
 
 Run the scheduler tests from the repository root:
 
