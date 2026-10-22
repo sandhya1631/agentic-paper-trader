@@ -18,3 +18,14 @@ async def ensure_agent_cycle_prompt_columns(conn: AsyncConnection) -> None:
             "NOT NULL DEFAULT '1.0.0'"
         )
     )
+
+
+async def ensure_user_scheduler_column(conn: AsyncConnection) -> None:
+    """Add the per-user scheduler control to databases created before it existed."""
+    await conn.execute(
+        text(
+            "ALTER TABLE users "
+            "ADD COLUMN IF NOT EXISTS scheduler_enabled BOOLEAN "
+            "NOT NULL DEFAULT TRUE"
+        )
+    )

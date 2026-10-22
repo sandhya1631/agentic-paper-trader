@@ -82,7 +82,7 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -e ".[dev]"
 copy .env.example .env        # then edit DATABASE_URL / JWT_SECRET if needed
-uvicorn app.main:app --reload --port 8000
+.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
 
 With Postgres up you should see `Application startup complete` (not a traceback).
@@ -119,6 +119,23 @@ cd backend;  pytest            # backend tests (venv activated)
 
 ## Troubleshooting
 
+- **`ModuleNotFoundError: No module named 'apscheduler'` while importing `app.agent.scheduler`**
+  — The traceback shows Uvicorn running from a Python environment that does not have the
+  backend dependencies. The PowerShell `( .venv )` prompt and current directory don't prove
+  that the `uvicorn` command resolves to the backend environment: a different `uvicorn.exe`
+  earlier on `PATH` can still launch the wrong interpreter. Stop the reloader with Ctrl+C,
+  then, from the `backend` directory, install and launch through the backend interpreter:
+
+  ```powershell
+  .venv\Scripts\python.exe -m pip install -e ".[dev]"
+  .venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+  ```
+
+  The scheduler dependency is declared in `backend/pyproject.toml`. Installing it in a
+  different environment (for example, the repository-root `.venv`) will not make it available
+  to the backend `.venv`, or vice versa. To confirm which interpreter a bare command will use,
+  run `Get-Command python,uvicorn | Select-Object Name,Source`; the explicit module command
+  above bypasses an incorrectly resolved `uvicorn.exe`.
 - **Backend traceback ending in `[Errno 10061] Connect call failed ('127.0.0.1', 5432)`**
   — nothing is listening on port 5432. PostgreSQL isn't running. This is a config
   issue, not a code bug: start the container in step 2, then re-run uvicorn.

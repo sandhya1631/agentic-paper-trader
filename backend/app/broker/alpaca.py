@@ -19,6 +19,7 @@ def _optional_decimal(value: Any) -> Decimal | None:
     return Decimal(str(value)) if value is not None else None
 
 
+
 class AlpacaClient:
     """Asynchronous client interacting with Alpaca REST API."""
 
@@ -84,6 +85,7 @@ class AlpacaClient:
             maintenance_margin=Decimal(str(data.get("maintenance_margin", 0))),
             daytrading_buying_power=Decimal(str(data.get("daytrading_buying_power", 0))),
             regt_buying_power=Decimal(str(data.get("regt_buying_power", 0))),
+            last_equity=Decimal(str(data.get("last_equity", 0))),
             is_paper=True,
         )
 
@@ -180,6 +182,11 @@ class AlpacaClient:
             symbol=data["symbol"],
             qty=Decimal(str(data["qty"])),
             filled_qty=Decimal(str(data.get("filled_qty", 0))),
+            average_fill_price=(
+                Decimal(str(data["filled_avg_price"]))
+                if data.get("filled_avg_price") is not None
+                else None
+            ),
             side=data["side"],
             type=data["type"],
             time_in_force=data["time_in_force"],

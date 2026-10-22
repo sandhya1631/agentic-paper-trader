@@ -1,7 +1,10 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.schema import ensure_agent_cycle_prompt_columns
+from app.db.schema import (
+    ensure_agent_cycle_prompt_columns,
+    ensure_user_scheduler_column,
+)
 
 
 async def test_existing_agent_cycles_table_gets_prompt_columns(db_session: AsyncSession):
@@ -31,3 +34,25 @@ async def test_existing_agent_cycles_table_gets_prompt_columns(db_session: Async
     assert "S-001" in columns["prompt_version"].column_default
     assert columns["prompt_revision"].is_nullable == "NO"
     assert "1.0.0" in columns["prompt_revision"].column_default
+
+
+async def test_existing_users_table_gets_scheduler_column(db_session: AsyncSession):
+    await db_session.execute(text("ALTER TABLE users DROP COLUMN scheduler_enabled"))
+
+    connection = await db_session.connection()
+    await ensure_user_scheduler_column(connection)
+    await ensure_user_scheduler_column(connection)
+
+    result = await db_session.execute(
+        text(
+            "SELECT column_name, is_nullable, column_default "
+            "FROM information_schema.columns "
+            "WHERE table_name = 'users' "
+            "AND column_name = 'scheduler_enabled'"
+        )
+    )
+    column = result.one()
+
+    assert column.column_name == "scheduler_enabled"
+    assert column.is_nullable == "NO"
+    assert "true" in column.column_default
