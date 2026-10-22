@@ -20,6 +20,7 @@ dependencies = [
     "alpaca-py>=0.30",
     "cryptography>=43.0",
     "apscheduler>=3.10,<4",
+    "celery[redis]>=5.4,<6",
 ]
 
 [project.optional-dependencies]
