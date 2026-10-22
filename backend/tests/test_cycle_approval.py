@@ -127,6 +127,78 @@ async def test_approved_cycle_trade_uses_live_risk_data_before_submission(monkey
     assert approved_order.quantity == 1
 
 
+def _open_order(symbol: str, status: str = "accepted"):
+    return SimpleNamespace(symbol=symbol, status=status, submitted_at=None)
+
+
+@pytest.mark.asyncio
+async def test_open_order_conflict_denies_real_open_order_for_same_symbol(monkeypatch):
+    """P-010 wired with real Alpaca order data (Story 3.2.2 / Issue #73)."""
+    db, agent, cycle, client = _trade_fixtures(monkeypatch, market_open=True)
+    client.get_orders = AsyncMock(return_value=[_open_order("AAPL")])
+    submit_order = AsyncMock()
+    monkeypatch.setattr(approval, "submit_approved_order", submit_order)
+
+    decision, submitted = await approval.evaluate_and_submit_cycle_trade(db, agent, cycle)
+
+    assert decision.decision == "DENY"
+    assert submitted is None
+    submit_order.assert_not_awaited()
+    failed_ids = {e.policy_id for e in decision.evaluations if e.outcome == "FAIL"}
+    assert "P-010" in failed_ids
+
+
+@pytest.mark.asyncio
+async def test_open_order_for_a_different_symbol_does_not_block(monkeypatch):
+    db, agent, cycle, client = _trade_fixtures(monkeypatch, market_open=True)
+    client.get_orders = AsyncMock(return_value=[_open_order("NVDA")])
+    order = SimpleNamespace(status=BrokerOrderStatus.SUBMITTED)
+    submit_order = AsyncMock(return_value=order)
+    monkeypatch.setattr(approval, "submit_approved_order", submit_order)
+
+    decision, submitted = await approval.evaluate_and_submit_cycle_trade(db, agent, cycle)
+
+    assert decision.decision == "ALLOW"
+    assert submitted is order
+    submit_order.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_filled_order_for_same_symbol_does_not_block(monkeypatch):
+    """A terminal-status order must not be treated as still open."""
+    db, agent, cycle, client = _trade_fixtures(monkeypatch, market_open=True)
+    client.get_orders = AsyncMock(return_value=[_open_order("AAPL", status="filled")])
+    order = SimpleNamespace(status=BrokerOrderStatus.SUBMITTED)
+    submit_order = AsyncMock(return_value=order)
+    monkeypatch.setattr(approval, "submit_approved_order", submit_order)
+
+    decision, submitted = await approval.evaluate_and_submit_cycle_trade(db, agent, cycle)
+
+    assert decision.decision == "ALLOW"
+    assert submitted is order
+    submit_order.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_client_order_id_is_deterministic_per_cycle(monkeypatch):
+    """A retried/raced call for the SAME cycle must reuse one client_order_id (#73).
+
+    Otherwise each call gets its own random id and the gateway's existing
+    dedup-by-client_order_id (#63) never sees a collision to catch.
+    """
+    db, agent, cycle, client = _trade_fixtures(monkeypatch, market_open=True)
+    submit_order = AsyncMock(return_value=SimpleNamespace(status=BrokerOrderStatus.SUBMITTED))
+    monkeypatch.setattr(approval, "submit_approved_order", submit_order)
+
+    await approval.evaluate_and_submit_cycle_trade(db, agent, cycle)
+    await approval.evaluate_and_submit_cycle_trade(db, agent, cycle)
+
+    first_call, second_call = submit_order.await_args_list
+    first_id = first_call.args[0].client_order_id
+    second_id = second_call.args[0].client_order_id
+    assert first_id == second_id == str(cycle.id)
+
+
 @pytest.mark.asyncio
 async def test_approved_cycle_trade_does_not_submit_when_market_is_closed(monkeypatch):
     db, agent, cycle, _ = _trade_fixtures(monkeypatch, market_open=False)
