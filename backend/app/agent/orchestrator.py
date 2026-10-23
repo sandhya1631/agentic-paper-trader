@@ -10,7 +10,7 @@ Orchestrates automated and manual agent cycles:
   6. Queries the configured LLM client (Ollama / OpenAI via `get_llm_client`).
   7. Validates the decision output via `validate_decision_proposal`.
   8. On JSON/schema validation error, attempts 1 self-repair prompt retry.
-  9. If self-repair also fails, defaults safely to a `HOLD` proposal.
+  9. If self-repair also fails, the cycle ends as FAILED (LLM_OUTPUT_INVALID); nothing is guessed.
   10. Persists complete cycle state (`snapshot_json`, prompt version/revision/text,
       `llm_raw_response`, `proposal_json`) to PostgreSQL and marks status `SUCCESS` or `FAILED`.
 """
@@ -41,7 +41,6 @@ from app.db.enums import (
     CycleStatus,
     CycleTrigger,
     DecisionAction,
-    Symbol,
 )
 from app.db.models import AgentConfig, AgentCycle, CycleApproval, utcnow
 from app.llm.base import LLMClient
@@ -186,25 +185,33 @@ async def run_agent_cycle(
                 f"Please return ONLY a single valid JSON object matching the required schema.\n"
                 f"Previous Context:\n{prompt_input}"
             )
+            first_response = raw_response
             try:
                 repaired_response = await llm_client.generate(repair_prompt, system=system_prompt)
                 raw_response = repaired_response
                 proposal = validate_decision_proposal(repaired_response)
             except ToolValidationError as repair_err:
+                # Exactly one repair attempt is allowed. If it also fails, the cycle ENDS:
+                # no proposal, no guessed symbol or quantity, and the broker is never reached.
                 logger.error(
-                    "Self-repair retry also failed schema validation: %s. Defaulting to HOLD.",
+                    "Self-repair retry also failed schema validation: %s. Ending cycle.",
                     repair_err,
                 )
-                default_symbol = Symbol(agent.watchlist[0]) if agent.watchlist else Symbol.AAPL
-                proposal = DecisionProposal(
-                    symbol=default_symbol,
-                    action=DecisionAction.HOLD,
-                    quantity=0,
-                    reasoning=(
-                        f"LLM output validation failed twice; defaulted to HOLD. "
-                        f"Error: {repair_err}"
-                    ),
+                cycle.status = CycleStatus.FAILED
+                cycle.failure_code = "LLM_OUTPUT_INVALID"
+                cycle.failure_message = str(repair_err)
+                cycle.snapshot_json = context
+                cycle.prompt_version = agent.strategy_version
+                cycle.prompt_revision = prompt_definition.revision
+                cycle.prompt_text = system_prompt
+                cycle.llm_raw_response = (
+                    f"FIRST RESPONSE:\n{first_response}\n\nREPAIR RESPONSE:\n{repaired_response}"
                 )
+                cycle.completed_at = utcnow()
+                await db.commit()
+                await db.refresh(cycle)
+                set_committed_value(cycle, "approval", None)
+                return cycle
 
         # 8. Persist Cycle Success & Snapshot State
         cycle.snapshot_json = context
