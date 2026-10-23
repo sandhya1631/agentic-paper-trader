@@ -1,6 +1,8 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.core.constants import DEFAULT_PROMPT_REVISION, DEFAULT_STRATEGY_VERSION
+
 
 async def ensure_agent_cycle_prompt_columns(conn: AsyncConnection) -> None:
     """Add prompt metadata columns to databases created before they were introduced."""
@@ -8,14 +10,14 @@ async def ensure_agent_cycle_prompt_columns(conn: AsyncConnection) -> None:
         text(
             "ALTER TABLE agent_cycles "
             "ADD COLUMN IF NOT EXISTS prompt_version VARCHAR(30) "
-            "NOT NULL DEFAULT 'S-001'"
+            f"NOT NULL DEFAULT '{DEFAULT_STRATEGY_VERSION}'"
         )
     )
     await conn.execute(
         text(
             "ALTER TABLE agent_cycles "
             "ADD COLUMN IF NOT EXISTS prompt_revision VARCHAR(30) "
-            "NOT NULL DEFAULT '1.0.0'"
+            f"NOT NULL DEFAULT '{DEFAULT_PROMPT_REVISION}'"
         )
     )
 

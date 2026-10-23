@@ -7,7 +7,9 @@ loudly, both when the settings load at startup and when an AlpacaClient is built
 
 from urllib.parse import urlparse
 
-ALPACA_PAPER_HOST = "paper-api.alpaca.markets"
+from app.core.constants import ALPACA_PAPER_BASE_URL
+
+ALPACA_PAPER_HOST = urlparse(ALPACA_PAPER_BASE_URL).hostname
 
 
 def ensure_alpaca_paper_url(url: str) -> str:

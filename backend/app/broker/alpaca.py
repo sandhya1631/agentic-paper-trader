@@ -10,6 +10,7 @@ from app.broker.schemas import (
     MarketSnapshotRead,
     OrderCreate,
 )
+from app.core.constants import ALPACA_DATA_BASE_URL, ALPACA_DATA_FEED, ALPACA_PAPER_BASE_URL
 from app.core.paper_guard import ensure_alpaca_paper_url
 from app.market_data.indicators import calculate_indicators
 
@@ -27,8 +28,8 @@ class AlpacaClient:
         self,
         api_key: str,
         api_secret: str,
-        base_url: str = "https://paper-api.alpaca.markets",
-        data_base_url: str = "https://data.alpaca.markets",
+        base_url: str = ALPACA_PAPER_BASE_URL,
+        data_base_url: str = ALPACA_DATA_BASE_URL,
         client: httpx.AsyncClient | None = None,
     ):
         # Normalize base URL (strip trailing /v2 if passed by user)
@@ -123,7 +124,7 @@ class AlpacaClient:
             "symbols": symbol.upper(),
             "timeframe": timeframe,
             "limit": limit,
-            "feed": "iex",
+            "feed": ALPACA_DATA_FEED,
         }
         client = self._get_client()
         resp = await client.get(url, headers=self.headers, params=params, timeout=10.0)

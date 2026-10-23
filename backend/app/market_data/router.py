@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.auth.dependencies import get_current_user
+from app.core.config import get_settings
+from app.core.constants import DEFAULT_WATCHLIST
 from app.db.models import User
 from app.market_data.alpaca_client import (
-    DEFAULT_BAR_LIMIT,
-    DEFAULT_WATCHLIST,
     MarketDataCollector,
     OHLCVBar,
     create_market_data_collector,
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/market-data", tags=["market-data"])
 @router.get("/bars", response_model=dict[str, list[OHLCVBar]])
 async def get_bars(
     symbols: list[str] = Query(default=DEFAULT_WATCHLIST),
-    limit: int = Query(default=DEFAULT_BAR_LIMIT, ge=1, le=1000),
+    limit: int = Query(default=get_settings().default_bar_limit, ge=1, le=1000),
     lookback_days: int = Query(
         default=30, ge=1, le=90, description="Historical lookback window in days (default: 30 days)"
     ),

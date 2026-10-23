@@ -1,11 +1,10 @@
 from functools import lru_cache
 
 from app.core.config import Settings, get_settings
+from app.core.constants import SUPPORTED_PROVIDERS
 from app.llm.base import LLMClient
 from app.llm.ollama_client import OllamaClient
 from app.llm.openai_client import OpenAIClient
-
-SUPPORTED_PROVIDERS = ("openai", "ollama")
 
 
 def create_llm_client(settings: Settings | None = None) -> LLMClient:

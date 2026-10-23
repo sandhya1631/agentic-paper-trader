@@ -7,6 +7,7 @@ dictionary for the LLM. Strips all API keys, secrets, and credential tokens.
 
 from typing import Any
 
+from app.core.constants import DEFAULT_STRATEGY_VERSION
 from app.market_data.indicators import calculate_indicators
 
 
@@ -16,7 +17,7 @@ def build_agent_context(
     account_info: dict[str, Any] | None = None,
     positions: list[dict[str, Any]] | None = None,
     open_orders: list[dict[str, Any]] | None = None,
-    strategy_version: str = "S-001",
+    strategy_version: str = DEFAULT_STRATEGY_VERSION,
 ) -> dict[str, Any]:
     """Assemble sanitized market and account context for LLM prompt generation."""
     market_context: dict[str, Any] = {}

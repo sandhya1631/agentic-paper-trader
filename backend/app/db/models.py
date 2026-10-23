@@ -22,6 +22,11 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from app.agent.prompt import get_system_prompt
+from app.core.constants import (
+    ALPACA_PROVIDER,
+    DEFAULT_PROMPT_REVISION,
+    DEFAULT_STRATEGY_VERSION,
+)
 from app.db.base import Base
 from app.db.enums import (
     ApprovalMode,
@@ -76,7 +81,7 @@ class User(Base, UUIDPrimaryKey, Timestamped):
 class TradingAccount(Base, UUIDPrimaryKey, Timestamped):
     __tablename__ = "trading_accounts"
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
-    provider: Mapped[str] = mapped_column(String(30), default="ALPACA")
+    provider: Mapped[str] = mapped_column(String(30), default=ALPACA_PROVIDER)
     encrypted_api_key: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_api_secret: Mapped[str] = mapped_column(Text, nullable=False)
     is_paper: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -106,7 +111,7 @@ class AgentConfig(Base, UUIDPrimaryKey, Timestamped):
     policy_set_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("policy_sets.id", ondelete="RESTRICT"))
     name: Mapped[str] = mapped_column(String(80))
     watchlist: Mapped[list[str]] = mapped_column(JSON)
-    strategy_version: Mapped[str] = mapped_column(String(30), default="S-001")
+    strategy_version: Mapped[str] = mapped_column(String(30), default=DEFAULT_STRATEGY_VERSION)
     cadence_minutes: Mapped[int] = mapped_column(Integer, default=15)
     target_allocation: Mapped[Decimal] = mapped_column(Numeric(6, 5), default=Decimal("0.05"))
     max_symbol_allocation: Mapped[Decimal] = mapped_column(Numeric(6, 5), default=Decimal("0.10"))
@@ -144,10 +149,14 @@ class AgentCycle(Base, UUIDPrimaryKey):
     failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     snapshot_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     prompt_version: Mapped[str] = mapped_column(
-        String(30), default="S-001", server_default=text("'S-001'")
+        String(30),
+        default=DEFAULT_STRATEGY_VERSION,
+        server_default=text(f"'{DEFAULT_STRATEGY_VERSION}'"),
     )
     prompt_revision: Mapped[str] = mapped_column(
-        String(30), default="1.0.0", server_default=text("'1.0.0'")
+        String(30),
+        default=DEFAULT_PROMPT_REVISION,
+        server_default=text(f"'{DEFAULT_PROMPT_REVISION}'"),
     )
     prompt_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     llm_raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)

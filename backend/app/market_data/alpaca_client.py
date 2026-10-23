@@ -17,16 +17,9 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from pydantic import BaseModel
 
 from app.core.config import Settings, get_settings
+from app.core.constants import DEFAULT_WATCHLIST, RATE_LIMIT_STATUS
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_WATCHLIST = ["AAPL", "NVDA", "SPY"]
-DEFAULT_BAR_LIMIT = 50
-DEFAULT_TIMEFRAME_MINUTES = 5
-MAX_RETRY_ATTEMPTS = 3
-RETRY_BACKOFF_SECONDS = 1.0
-
-RATE_LIMIT_STATUS = 429
 
 
 class OHLCVBar(BaseModel):
@@ -47,25 +40,40 @@ def _is_rate_limited(error: APIError) -> bool:
 class MarketDataCollector:
     """Fetches the latest OHLCV bars for a symbol watchlist via Alpaca's Data API."""
 
-    def __init__(self, api_key: str | None, api_secret: str | None) -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        api_secret: str | None,
+        *,
+        settings: Settings | None = None,
+    ) -> None:
         if not api_key or not api_secret:
             raise ValueError(
                 "ALPACA_API_KEY and ALPACA_API_SECRET are required to fetch market data"
             )
         self._client = StockHistoricalDataClient(api_key=api_key, secret_key=api_secret)
+        settings = settings or get_settings()
+        self._default_bar_limit = settings.default_bar_limit
+        self._default_timeframe_minutes = settings.default_timeframe_minutes
+        self._max_retry_attempts = settings.max_retry_attempts
+        self._retry_backoff_seconds = settings.retry_backoff_seconds
 
     async def fetch_latest_bars(
         self,
         symbols: list[str] | None = None,
         *,
-        limit: int = DEFAULT_BAR_LIMIT,
-        timeframe_minutes: int = DEFAULT_TIMEFRAME_MINUTES,
+        limit: int | None = None,
+        timeframe_minutes: int | None = None,
         lookback_days: int = 30,
         validate: bool = False,
         min_bars: int | None = None,
     ) -> dict[str, list[OHLCVBar]]:
         """Return the latest `limit` bars per symbol (default watchlist: AAPL, NVDA, SPY)."""
         symbols = symbols or DEFAULT_WATCHLIST
+        limit = limit if limit is not None else self._default_bar_limit
+        timeframe_minutes = (
+            timeframe_minutes if timeframe_minutes is not None else self._default_timeframe_minutes
+        )
         # A 30-day lookback window ensures enough 5-minute bars are returned across weekends,
         # holidays, and non-trading hours to fulfill the requested `limit`.
         start_time = datetime.now(timezone.utc) - timedelta(days=lookback_days)
@@ -121,12 +129,12 @@ class MarketDataCollector:
             try:
                 return await asyncio.to_thread(self._client.get_stock_bars, request)
             except APIError as exc:
-                if _is_rate_limited(exc) and attempt < MAX_RETRY_ATTEMPTS:
-                    backoff = RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                if _is_rate_limited(exc) and attempt < self._max_retry_attempts:
+                    backoff = self._retry_backoff_seconds * (2 ** (attempt - 1))
                     logger.warning(
                         "Alpaca rate limit hit (attempt %s/%s); retrying in %.1fs",
                         attempt,
-                        MAX_RETRY_ATTEMPTS,
+                        self._max_retry_attempts,
                         backoff,
                     )
                     await asyncio.sleep(backoff)
@@ -137,4 +145,6 @@ class MarketDataCollector:
 def create_market_data_collector(settings: Settings | None = None) -> MarketDataCollector:
     """Market Data Collector factory, reading Alpaca credentials from settings."""
     settings = settings or get_settings()
-    return MarketDataCollector(settings.alpaca_api_key, settings.alpaca_api_secret)
+    return MarketDataCollector(
+        settings.alpaca_api_key, settings.alpaca_api_secret, settings=settings
+    )
