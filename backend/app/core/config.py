@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     scheduler_interval_minutes: int = Field(default=15, ge=1)
     redis_url: str = "redis://localhost:6379/0"
     kill_switch_enabled: bool = False
+    # Hard cap on orders per US/Eastern trading day (policy P-012).
+    max_orders_per_day: int = Field(default=10, ge=1)
 
     # Async SQLAlchemy connection string, e.g.:
     # postgresql+asyncpg://user:password@localhost:5432/agentic_paper_trader
