@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.constants import DEFAULT_STRATEGY_VERSION
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -31,7 +32,7 @@ class APIModel(BaseModel):
 class AgentConfigRead(APIModel):
     id: UUID
     name: str
-    strategy_version: str = "S-001"
+    strategy_version: str = DEFAULT_STRATEGY_VERSION
     cadence_minutes: int = 15
     target_allocation: Decimal = Decimal("0.05")
     max_symbol_allocation: Decimal = Decimal("0.10")

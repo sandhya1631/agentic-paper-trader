@@ -2,9 +2,10 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+from app.core.constants import BCRYPT_MAX_PASSWORD_BYTES
+
 # bcrypt hashes at most 72 bytes of input and raises ValueError beyond that.
 # Enforce the limit here so an over-long password is a clean 422, not a 500.
-BCRYPT_MAX_PASSWORD_BYTES = 72
 
 
 def _ensure_within_bcrypt_limit(value: str) -> str:

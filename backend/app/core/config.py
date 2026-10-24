@@ -3,6 +3,7 @@ from functools import lru_cache
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.constants import ALPACA_PAPER_BASE_URL
 from app.core.paper_guard import ensure_alpaca_paper_url
 
 
@@ -19,6 +20,12 @@ class Settings(BaseSettings):
     kill_switch_enabled: bool = False
     # Hard cap on orders per US/Eastern trading day (policy P-012).
     max_orders_per_day: int = Field(default=10, ge=1)
+
+    # Market data collector (app/market_data/alpaca_client.py)
+    default_bar_limit: int = Field(default=50, ge=1)
+    default_timeframe_minutes: int = Field(default=5, ge=1)
+    max_retry_attempts: int = Field(default=3, ge=1)
+    retry_backoff_seconds: float = Field(default=1.0, gt=0)
 
     # Async SQLAlchemy connection string, e.g.:
     # postgresql+asyncpg://user:password@localhost:5432/agentic_paper_trader
@@ -40,7 +47,7 @@ class Settings(BaseSettings):
     # Alpaca Trading API Credentials
     alpaca_api_key: str | None = None
     alpaca_api_secret: str | None = None
-    alpaca_paper_base_url: str = "https://paper-api.alpaca.markets"
+    alpaca_paper_base_url: str = ALPACA_PAPER_BASE_URL
 
     # LLM API Credentials
     openai_api_key: str | None = None

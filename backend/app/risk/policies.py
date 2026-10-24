@@ -19,11 +19,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from app.core.config import get_settings
+from app.core.constants import POLICY_VERSION
 from app.db.enums import DecisionAction, PolicyDecisionType, PolicyOutcome
 from app.risk.allocation import check_maximum_allocation
 from app.schemas import PolicyDecision, PolicyEvaluation, PolicyInput
-
-POLICY_VERSION = "POLICY-1.0"
 
 
 @dataclass

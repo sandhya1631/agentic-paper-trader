@@ -10,6 +10,8 @@ validation and policy enforcement remain authoritative.
 
 from dataclasses import dataclass
 
+from app.core.constants import DEFAULT_PROMPT_REVISION, DEFAULT_STRATEGY_VERSION
+
 
 @dataclass(frozen=True)
 class PromptDefinition:
@@ -73,11 +75,13 @@ You MUST respond with a single valid JSON object matching this schema ONLY. Do N
 """
 
 STRATEGY_REGISTRY: dict[str, PromptDefinition] = {
-    "S-001": PromptDefinition(revision="1.0.0", text=SYSTEM_PROMPT_S001),
+    DEFAULT_STRATEGY_VERSION: PromptDefinition(
+        revision=DEFAULT_PROMPT_REVISION, text=SYSTEM_PROMPT_S001
+    ),
 }
 
 
-def get_prompt_definition(strategy_version: str = "S-001") -> PromptDefinition:
+def get_prompt_definition(strategy_version: str = DEFAULT_STRATEGY_VERSION) -> PromptDefinition:
     """Retrieve a strategy's revision and fully rendered system prompt."""
     if strategy_version not in STRATEGY_REGISTRY:
         raise ValueError(
@@ -97,6 +101,6 @@ def get_prompt_definition(strategy_version: str = "S-001") -> PromptDefinition:
     )
 
 
-def get_system_prompt(strategy_version: str = "S-001") -> str:
+def get_system_prompt(strategy_version: str = DEFAULT_STRATEGY_VERSION) -> str:
     """Retrieve the versioned system prompt text for a specified strategy version."""
     return get_prompt_definition(strategy_version).text
