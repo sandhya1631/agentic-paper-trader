@@ -17,9 +17,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.constants import ALPACA_PROVIDER
 from app.db.models import TradingAccount
-
-ALPACA_PROVIDER = "ALPACA"
 
 
 class CredentialVaultError(Exception):

@@ -36,6 +36,7 @@ from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
+from app.core.constants import ACTIVE_CYCLE_STATUSES, POLICY_VERSION
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -47,22 +48,9 @@ from app.db.models import AgentConfig, AgentCycle, CycleApproval, utcnow
 from app.llm.base import LLMClient
 from app.llm.factory import get_llm_client
 from app.market_data.alpaca_client import MarketDataCollector, create_market_data_collector
-from app.risk.policies import POLICY_VERSION
 from app.schemas import DecisionProposal
 
 logger = logging.getLogger(__name__)
-
-# Non-terminal statuses: a cycle in any of these is still "in progress" and
-# blocks a new cycle from starting for the same agent (story 2.3.2 / issue #68).
-ACTIVE_CYCLE_STATUSES = (
-    CycleStatus.PENDING,
-    CycleStatus.COLLECTING,
-    CycleStatus.REASONING,
-    CycleStatus.VALIDATING,
-    CycleStatus.PENDING_APPROVAL,
-    CycleStatus.EXECUTING,
-    CycleStatus.RECONCILING,
-)
 
 
 class CycleOverlapError(Exception):

@@ -24,6 +24,7 @@ from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.auth.dependencies import get_current_user
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
+from app.core.constants import ALPACA_PROVIDER, DEFAULT_STRATEGY_VERSION, DEFAULT_WATCHLIST
 from app.db.enums import (
     ApprovalStatus,
     BrokerOrderStatus,
@@ -148,7 +149,7 @@ async def trigger_manual_cycle(
             if not account:
                 account = TradingAccount(
                     user_id=current_user.id,
-                    provider="ALPACA",
+                    provider=ALPACA_PROVIDER,
                     encrypted_api_key="demo_encrypted_key",
                     encrypted_api_secret="demo_encrypted_secret",
                     is_paper=True,
@@ -170,8 +171,8 @@ async def trigger_manual_cycle(
                 account_id=account.id,
                 policy_set_id=policy_set.id,
                 name="Default Momentum Agent",
-                watchlist=["AAPL", "NVDA", "SPY"],
-                strategy_version="S-001",
+                watchlist=list(DEFAULT_WATCHLIST),
+                strategy_version=DEFAULT_STRATEGY_VERSION,
                 cadence_minutes=15,
                 approval_mode=ApprovalMode.REQUIRED,
                 enabled=True,
