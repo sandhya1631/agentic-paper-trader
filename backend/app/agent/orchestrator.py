@@ -35,6 +35,7 @@ from app.agent.context import build_agent_context
 from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.broker.gateway import TradingDisabledError
+from app.core.config import get_settings
 from app.core.constants import ACTIVE_CYCLE_STATUSES, POLICY_VERSION
 from app.db.enums import (
     ApprovalMode,
@@ -222,11 +223,33 @@ async def run_agent_cycle(
             proposal_hash = hashlib.sha256(
                 json.dumps(cycle.proposal_json, sort_keys=True).encode()
             ).hexdigest()
+            # Dry-run the policies so the operator can SEE the evidence next to the
+            # proposal (Issue #76). Nothing is submitted, the signed policy token is not
+            # stored, and the binding re-check still runs again on approval (Issue #77).
+            policy_preview = None
+            try:
+                # Read-only: no autoflush, so the half-built cycle is not saved early.
+                with db.no_autoflush:
+                    policy_preview, _ = await evaluate_and_submit_cycle_trade(
+                        db, agent, cycle, submit=False
+                    )
+            except Exception:
+                logger.warning(
+                    "Could not preview policies for cycle %s; parking without them",
+                    cycle.id,
+                    exc_info=True,
+                )
             approval = CycleApproval(
                 cycle_id=cycle.id,
                 status=ApprovalStatus.PENDING,
                 proposal_hash=proposal_hash,
-                expires_at=utcnow() + timedelta(hours=24),
+                expires_at=utcnow() + timedelta(minutes=get_settings().approval_expiry_minutes),
+                policy_version=policy_preview.policy_version if policy_preview else None,
+                policy_result_json=(
+                    policy_preview.model_dump(mode="json", exclude={"policy_token"})
+                    if policy_preview
+                    else None
+                ),
             )
             db.add(approval)
             pending_approval = approval
