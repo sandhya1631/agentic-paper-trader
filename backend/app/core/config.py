@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     kill_switch_enabled: bool = False
     # Hard cap on orders per US/Eastern trading day (policy P-012).
     max_orders_per_day: int = Field(default=10, ge=1)
+    # How long a proposal can wait for a human decision before it expires (Issue #76).
+    approval_expiry_minutes: int = Field(default=1440, ge=1)
 
     # Market data collector (app/market_data/alpaca_client.py)
     default_bar_limit: int = Field(default=50, ge=1)
