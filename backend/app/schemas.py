@@ -180,6 +180,16 @@ class CycleRead(APIModel):
     approval: ApprovalRead | None = None
 
 
+class CycleListRead(APIModel):
+    """Paginated envelope for a user's agent cycles (Story: GET /agent/cycles, #119)."""
+
+    items: list[CycleRead] = Field(default_factory=list)
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+    next_offset: int | None = Field(default=None, ge=0)
+
+
 class ScheduleStartRequest(APIModel):
     agent_id: UUID
     interval_minutes: int = Field(ge=1, le=1440)
