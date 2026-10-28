@@ -365,7 +365,8 @@ async def test_scheduled_auto_buy_executes_without_human_approval(monkeypatch):
     collector = MagicMock()
     collector.fetch_latest_bars = AsyncMock(return_value={"AAPL": []})
     policy_decision = SimpleNamespace(
-        model_dump=lambda mode: {"decision": "ALLOW"}
+        decision="ALLOW",
+        model_dump=lambda **kwargs: {"decision": "ALLOW"},
     )
     broker_order = SimpleNamespace(status=SimpleNamespace(value="SUBMITTED"))
     execute_trade = AsyncMock(return_value=(policy_decision, broker_order))

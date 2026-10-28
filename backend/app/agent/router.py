@@ -412,6 +412,10 @@ async def approve_cycle_trade(
     cycle.completed_at = now
     snapshot = dict(cycle.snapshot_json or {})
     snapshot["policy_evaluation"] = policy_decision.model_dump(mode="json")
+    # Record the fresh binding decision as the cycle's queryable policy result (#121),
+    # overwriting the earlier pending-approval preview. The signed token is excluded.
+    cycle.policy_decision = policy_decision.decision
+    cycle.policy_result_json = policy_decision.model_dump(mode="json", exclude={"policy_token"})
     if broker_order is None:
         approval.status = ApprovalStatus.REJECTED
         approval.comment = (
