@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -52,6 +52,7 @@ from app.schemas import (
     AgentScheduleRead,
     ApprovalAction,
     ApprovalRead,
+    CycleListRead,
     CycleRead,
     KillSwitchRead,
     KillSwitchUpdate,
@@ -216,6 +217,59 @@ async def trigger_manual_cycle(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Agent cycle failed: {exc}",
         ) from exc
+
+
+@router.get(
+    "/cycles",
+    response_model=CycleListRead,
+    summary="List agent cycles for the current user (paginated, newest first)",
+)
+async def list_agent_cycles(
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> CycleListRead:
+    """Return the authenticated user's agent cycles, newest first, paginated.
+
+    Shared read surface for the dashboard cycle-history (#79), decision timeline
+    (#81), and audit history (#82). Covers both MANUAL and SCHEDULED cycles and is
+    ownership-scoped: a user only ever sees cycles belonging to their own agents.
+    """
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must be >= 0")
+
+    owned_cycles = (
+        select(AgentCycle)
+        .join(AgentConfig, AgentCycle.agent_id == AgentConfig.id)
+        .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+        .where(TradingAccount.user_id == current_user.id)
+    )
+
+    total = await db.scalar(
+        select(func.count()).select_from(owned_cycles.subquery())
+    ) or 0
+
+    result = await db.execute(
+        owned_cycles.options(selectinload(AgentCycle.approval))
+        # Secondary sort by id keeps pagination deterministic when two cycles
+        # share a started_at, so pages never overlap or skip a row.
+        .order_by(AgentCycle.started_at.desc(), AgentCycle.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    cycles = result.scalars().all()
+
+    next_offset = offset + limit if offset + limit < total else None
+    return CycleListRead(
+        items=[CycleRead.model_validate(cycle) for cycle in cycles],
+        total=total,
+        limit=limit,
+        offset=offset,
+        next_offset=next_offset,
+    )
 
 
 @router.get("/cycles/{cycle_id}", response_model=CycleRead, summary="Retrieve agent cycle status")
