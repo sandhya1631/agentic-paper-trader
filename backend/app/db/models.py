@@ -161,6 +161,12 @@ class AgentCycle(Base, UUIDPrimaryKey):
     prompt_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     llm_raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     proposal_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Queryable, first-class policy audit record for every cycle (#121). Holds a
+    # PolicyDecisionType value (ALLOW/DENY/RESIZE, or NOT_EVALUATED for HOLD/observe);
+    # policy_result_json keeps the full per-policy evidence (minus the signed token).
+    # Stored as plain text so the no-Alembic ensure_* patch is a simple ADD COLUMN.
+    policy_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    policy_result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     correlation_id: Mapped[uuid.UUID] = mapped_column(Uuid, default=uuid.uuid4, index=True)
     agent: Mapped[AgentConfig] = relationship(back_populates="cycles")
     approval: Mapped[CycleApproval | None] = relationship(

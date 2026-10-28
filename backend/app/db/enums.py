@@ -78,6 +78,10 @@ class PolicyDecisionType(StrEnum):
     ALLOW = "ALLOW"
     DENY = "DENY"
     RESIZE = "RESIZE"
+    # Audit marker for cycles that intentionally never run policy evaluation
+    # (e.g. a pure HOLD proposal, OBSERVE_ONLY). Never produced by evaluate_policies;
+    # only persisted on AgentCycle so every cycle has a queryable policy state (#121).
+    NOT_EVALUATED = "NOT_EVALUATED"
 
 
 class BrokerOrderStatus(StrEnum):
