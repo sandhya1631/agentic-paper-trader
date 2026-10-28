@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -116,15 +117,28 @@ class AlpacaClient:
         return positions
 
     async def get_bars(
-        self, symbol: str, timeframe: str = "5Min", limit: int = 50
+        self,
+        symbol: str,
+        timeframe: str = "5Min",
+        limit: int = 50,
+        *,
+        lookback_days: int = 30,
     ) -> list[dict[str, Any]]:
-        """Fetch stock price bars from Alpaca Market Data API."""
+        """Fetch stock price bars from Alpaca Market Data API.
+
+        A 30-day lookback window (not just "today") ensures enough bars are
+        returned early in the trading session, and across weekends/holidays,
+        to fulfill `limit` - without a `start`, Alpaca only returns bars from
+        the current session so far, which can be far short of `limit`.
+        """
         url = f"{self.data_base_url}/v2/stocks/bars"
+        start = datetime.now(timezone.utc) - timedelta(days=lookback_days)
         params = {
             "symbols": symbol.upper(),
             "timeframe": timeframe,
             "limit": limit,
             "feed": ALPACA_DATA_FEED,
+            "start": start.isoformat(),
         }
         client = self._get_client()
         resp = await client.get(url, headers=self.headers, params=params, timeout=10.0)
