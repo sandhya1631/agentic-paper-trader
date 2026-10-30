@@ -17,10 +17,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import uuid4
 
 import pytest
-from test_cycle_approval import _trade_fixtures, _open_order
+from test_cycle_approval import _open_order, _trade_fixtures
 from test_policies import failed_ids
 
 from app.agent import approval
@@ -29,7 +28,9 @@ from app.core.config import Settings
 from app.db.enums import PolicyDecisionType
 
 
-def _real_gateway_fixtures(monkeypatch, *, market_open: bool = True, kill_switch_at_gateway: bool = False):
+def _real_gateway_fixtures(
+    monkeypatch, *, market_open: bool = True, kill_switch_at_gateway: bool = False
+):
     """Like test_cycle_approval._trade_fixtures, but leaves the REAL
     submit_approved_order in place (never monkeypatched away) and gives it a
     db double capable enough to survive its own query + add/commit/refresh
