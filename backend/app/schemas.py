@@ -176,6 +176,8 @@ class CycleRead(APIModel):
     prompt_text: str | None = None
     llm_raw_response: str | None = None
     proposal_json: dict[str, Any] | None = None
+    policy_decision: PolicyDecisionType | None = None
+    policy_result_json: dict[str, Any] | None = None
     correlation_id: UUID | None = None
     approval: ApprovalRead | None = None
 
