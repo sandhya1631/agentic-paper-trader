@@ -24,6 +24,8 @@ class AlpacaAccountRead(APIModel):
     daytrading_buying_power: Decimal = Decimal("0")
     regt_buying_power: Decimal = Decimal("0")
     last_equity: Decimal = Decimal("0")
+    daily_pnl: Decimal = Decimal("0")
+    daily_pnl_percent: Decimal | None = None
     is_paper: bool = True
 
 

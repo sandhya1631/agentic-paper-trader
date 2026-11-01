@@ -1,20 +1,82 @@
-const stats = [
-  { label: "Portfolio value", value: "—", hint: "Awaiting broker data", tone: "muted" },
-  { label: "Cash", value: "—", hint: "Awaiting broker data", tone: "muted" },
-  { label: "Open positions", value: "—", hint: "Awaiting broker data", tone: "muted" },
-  { label: "Day P&L", value: "—", hint: "Awaiting broker data", tone: "muted" },
-] as const;
+"use client";
+
+import { useEffect, useState } from "react";
+import { api } from "@/lib/api/client";
+
+interface AccountSummary {
+  currency: string;
+  cash: string;
+  portfolio_value: string;
+  equity: string;
+  daily_pnl: string;
+  daily_pnl_percent: string | null;
+}
+
+function formatMoney(value: string, currency: string): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency,
+  }).format(Number(value));
+}
 
 export default function DashboardPage() {
+  const [account, setAccount] = useState<AccountSummary | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .get<AccountSummary>("/api/v1/broker/account")
+      .then(setAccount)
+      .catch(() => setError("Connect an Alpaca paper account to load your summary."));
+  }, []);
+
+  const stats = account
+    ? [
+        {
+          label: "Portfolio value",
+          value: formatMoney(account.portfolio_value, account.currency),
+          hint: "Current account value",
+        },
+        {
+          label: "Cash",
+          value: formatMoney(account.cash, account.currency),
+          hint: "Available cash",
+        },
+        {
+          label: "Equity",
+          value: formatMoney(account.equity, account.currency),
+          hint: "Current equity",
+        },
+        {
+          label: "Day P&L",
+          value: formatMoney(account.daily_pnl, account.currency),
+          hint: account.daily_pnl_percent
+            ? `${Number(account.daily_pnl_percent).toFixed(2)}% today`
+            : "No prior-day baseline",
+        },
+      ]
+    : [
+        { label: "Portfolio value", value: "—", hint: "Awaiting broker data" },
+        { label: "Cash", value: "—", hint: "Awaiting broker data" },
+        { label: "Equity", value: "—", hint: "Awaiting broker data" },
+        { label: "Day P&L", value: "—", hint: "Awaiting broker data" },
+      ];
+
   return (
     <div className="space-y-6">
       <section>
         <h2 className="text-lg font-semibold">Dashboard</h2>
         <p className="text-sm text-muted">
-          Portfolio overview and agent activity. This is the UI scaffold — live
-          data and charts are wired up in later Epic&nbsp;4 stories.
+          Portfolio overview and agent activity. Live paper-account metrics are
+          refreshed from Alpaca and persisted for account history.
         </p>
       </section>
+
+      {error && (
+        <p className="rounded-lg border border-border bg-surface-muted p-3 text-sm text-muted">
+          {error}
+        </p>
+      )}
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {stats.map((stat) => (

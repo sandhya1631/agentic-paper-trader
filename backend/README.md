@@ -19,6 +19,11 @@ Create the database (once, using `psql` or any Postgres client):
 CREATE DATABASE agentic_paper_trader;
 ```
 
+Supabase can be used without a separate Supabase SDK: set `DATABASE_URL` to
+the Supabase PostgreSQL connection string, using the `postgresql+asyncpg://`
+scheme. The application creates the `account_snapshots` table on startup when
+using a new database.
+
 ## Code quality: lint, types & pre-commit
 
 Ruff (lint), mypy (static types), and pre-commit are installed with the `[dev]` extra.
@@ -67,6 +72,10 @@ On startup, the API creates missing tables and adds the `prompt_version` and
   from Alpaca's Data API. Requires `ALPACA_API_KEY`/`ALPACA_API_SECRET` in `.env` (free paper-trading keys from
   https://app.alpaca.markets/); retries automatically on rate limiting (HTTP 429).
 - `GET /llm/health` — reports the configured LLM provider/model (no API call, no cost).
+- `GET /api/v1/broker/account` — fetches the authenticated user's paper-account
+  metrics and stores a non-sensitive snapshot in `account_snapshots`. The
+  response includes signed `daily_pnl` and `daily_pnl_percent`, calculated from
+  Alpaca equity and last equity. API credentials are never included in snapshots.
 
 ### Scheduled Agent Cycles
 

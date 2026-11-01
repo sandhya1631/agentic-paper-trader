@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.credential_vault import (
@@ -9,6 +10,7 @@ from app.accounts.credential_vault import (
     get_decrypted_alpaca_credentials,
 )
 from app.auth.dependencies import get_current_user
+from app.broker.account_snapshots import save_account_snapshot
 from app.broker.alpaca import AlpacaClient
 from app.broker.schemas import (
     AlpacaAccountRead,
@@ -102,14 +104,25 @@ async def get_alpaca_client(
 async def get_account_summary(
     current_user: Annotated[User, Depends(get_current_user)],
     client: Annotated[AlpacaClient, Depends(get_alpaca_client)],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ):
     try:
-        return await client.get_account()
+        account_summary = await client.get_account()
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Alpaca API error: {exc}",
         )
+    account = await get_alpaca_account(db, current_user.id)
+    if account is not None:
+        try:
+            await save_account_snapshot(db, account.id, account_summary)
+        except SQLAlchemyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Account summary was fetched but could not be persisted.",
+            ) from exc
+    return account_summary
 
 
 @router.get(

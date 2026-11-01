@@ -87,6 +87,16 @@ class AlpacaClient:
             daytrading_buying_power=Decimal(str(data.get("daytrading_buying_power", 0))),
             regt_buying_power=Decimal(str(data.get("regt_buying_power", 0))),
             last_equity=Decimal(str(data.get("last_equity", 0))),
+            daily_pnl=Decimal(str(data["equity"])) - Decimal(str(data.get("last_equity", 0))),
+            daily_pnl_percent=(
+                (
+                    Decimal(str(data["equity"])) - Decimal(str(data.get("last_equity", 0)))
+                )
+                / Decimal(str(data["last_equity"]))
+                * Decimal("100")
+                if data.get("last_equity") not in (None, "0", 0)
+                else None
+            ),
             is_paper=True,
         )
 
