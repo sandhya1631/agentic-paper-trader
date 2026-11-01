@@ -22,6 +22,22 @@ async def ensure_agent_cycle_prompt_columns(conn: AsyncConnection) -> None:
     )
 
 
+async def ensure_agent_cycle_policy_columns(conn: AsyncConnection) -> None:
+    """Add the per-cycle policy audit columns (#121) to pre-existing databases."""
+    await conn.execute(
+        text(
+            "ALTER TABLE agent_cycles "
+            "ADD COLUMN IF NOT EXISTS policy_decision VARCHAR(20)"
+        )
+    )
+    await conn.execute(
+        text(
+            "ALTER TABLE agent_cycles "
+            "ADD COLUMN IF NOT EXISTS policy_result_json JSON"
+        )
+    )
+
+
 async def ensure_user_scheduler_column(conn: AsyncConnection) -> None:
     """Add the per-user scheduler control to databases created before it existed."""
     await conn.execute(
