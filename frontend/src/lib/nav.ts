@@ -13,6 +13,7 @@ export type NavItem = {
  */
 export const navItems: NavItem[] = [
   { href: "/", label: "Dashboard", icon: "dashboard", description: "Portfolio overview" },
+  { href: "/approvals", label: "Approvals", icon: "approvals", description: "Review pending trades" },
   { href: "/positions", label: "Positions", icon: "positions", description: "Open positions & P&L" },
   { href: "/audit", label: "Audit Trail", icon: "audit", description: "Agent reasoning timeline" },
   { href: "/settings", label: "Settings", icon: "settings", description: "Agent & account config" },
