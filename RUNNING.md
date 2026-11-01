@@ -1,9 +1,9 @@
 # Running the app locally
 
 A quickstart for bringing up the full stack on a dev machine: the **Next.js
-frontend**, the **FastAPI backend**, and a **PostgreSQL** database. These are three
-independent services — there is no `docker-compose` wrapper yet, so you start each
-one yourself.
+frontend**, the **FastAPI backend**, PostgreSQL, Redis, a local Ollama server,
+and the Celery worker. Docker Compose starts the backend infrastructure and
+workers; Ollama runs on the host.
 
 This guide records a known-good run on **Windows 11 / PowerShell**. The commands
 work from Git Bash or the VS Code terminal too; only the Postgres container and
@@ -48,29 +48,39 @@ Open **http://localhost:3000**. The dev server hot-reloads on save.
 The `(app)` routes share the sidebar + header shell; `/login` and `/register`
 use a separate bare `(auth)` layout.
 
-## 2. PostgreSQL (via Docker)
+## 2. Infrastructure (via Docker Compose)
 
-The backend opens a DB connection on startup and **refuses to start** if Postgres
-isn't reachable, so bring the database up first. This one-shot container matches
-the defaults in `backend/.env.example` exactly (user/password `postgres`, database
-`agentic_paper_trader`), so `CREATE DATABASE` is handled automatically on first
-boot.
+The backend opens a DB connection on startup. Scheduled processing also requires
+Redis and a Celery worker. Start the Compose stack from the repository root:
 
 ```powershell
-docker run -d --name apt-postgres `
-  -e POSTGRES_USER=postgres `
-  -e POSTGRES_PASSWORD=postgres `
-  -e POSTGRES_DB=agentic_paper_trader `
-  -p 5432:5432 `
-  postgres:16
+docker compose up -d --build
+docker compose ps
 ```
 
 Verify the daemon is reachable first with `docker info` (if it errors with
 `npipe:////./pipe/dockerDesktopLinuxEngine ... cannot find the file`, Docker
 Desktop isn't started yet).
 
-Manage it later with `docker stop apt-postgres` / `docker start apt-postgres`.
-Data lives inside the container unless you add a volume.
+Pull the configured local model once:
+
+```powershell
+docker compose exec ollama ollama pull llama3.1
+```
+
+The Compose stack persists PostgreSQL and Redis data in `postgres_data` and
+`redis_data`. Ollama uses the models already installed in your local Ollama
+installation.
+
+To run only infrastructure containers while running the API from the host:
+
+```powershell
+docker compose up -d postgres redis
+```
+
+Host processes use `localhost` URLs. Containers use Compose service names such
+as `redis` and `postgres`; the containerized backend and worker reach your host
+Ollama through `host.docker.internal:11434`.
 
 ## 3. Backend (FastAPI)
 
@@ -89,6 +99,37 @@ With Postgres up you should see `Application startup complete` (not a traceback)
 
 - Interactive API docs (Swagger): **http://localhost:8000/docs**
 - Health/readiness check: **http://localhost:8000/health/db** (runs `SELECT 1`)
+
+### Scheduler prerequisites and Swagger flow
+
+When running the API from the host, start a Celery worker in a second terminal:
+
+```powershell
+backend\.venv\Scripts\celery.exe -A app.celery_app:celery_app worker --loglevel=info --pool=solo
+```
+
+In Swagger, use this order:
+
+1. Register and log in.
+2. Click **Authorize** with `Bearer <access_token>`.
+3. Connect an Alpaca paper account or configure the development fallback.
+4. Run `POST /agent/cycles/run` once and copy the returned `agent_id`.
+5. Run `POST /agent/scheduler/start` with:
+   `{"agent_id":"<agent-id>","interval_minutes":1}`.
+6. Wait one minute; the first scheduled run is interval-based, not immediate.
+7. Check `GET /agent/scheduler/status` and
+   `GET /agent/scheduler/logs?schedule_id=<schedule_id>`.
+8. Stop it with `POST /agent/scheduler/{schedule_id}/stop`.
+
+The schedule endpoint only registers APScheduler. APScheduler uses Redis to
+deduplicate and enqueue the Celery task; the worker then loads the schedule
+from PostgreSQL and runs the cycle. All three layers must be available.
+
+If the API log shows
+`redis.exceptions.TimeoutError: Timeout connecting to server`, Redis is not
+reachable at `REDIS_URL`. Use `redis://localhost:6379/0` for a host API or
+`redis://redis:6379/0` inside Compose, then restart the API if its environment
+changed.
 
 ### Endpoints
 
