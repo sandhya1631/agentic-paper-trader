@@ -95,12 +95,12 @@ supporting services:
 |---|---|---|
 | `postgres` | PostgreSQL database for application records | `postgres_data` mounted at `/var/lib/postgresql/data` |
 | `redis` | Celery broker/result backend, scheduler history, and dispatch locks | `redis_data` mounted at `/data`; Redis AOF is enabled |
-| `ollama` | Local LLM server when `LLM_PROVIDER=ollama` | `ollama_data` mounted at `/root/.ollama` for downloaded models |
+| Ollama | Local LLM server when `LLM_PROVIDER=ollama` | Either a host installation at `localhost:11434`/`host.docker.internal:11434`, or an optional separate Ollama container |
 | `backend` | FastAPI API and APScheduler process | No application-data volume; durable state is written to PostgreSQL/Redis |
 | `celery-worker` | Executes scheduled Celery tasks | No application-data volume; uses the same PostgreSQL, Redis, Ollama, and credential settings |
 
 The backend and Celery worker use the Compose service name `redis` for Redis
-and `ollama` for Ollama. From a host development environment, the equivalent
+and `host.docker.internal` for host-installed Ollama. From a host development environment, the equivalent
 defaults are typically `localhost:6379` and `localhost:11434`.
 
 ---
@@ -783,6 +783,129 @@ the same job. Celery workers call:
 
 Each task creates an async execution context and disposes the SQLAlchemy
 engine afterward.
+
+### Swagger scheduler test sequence
+
+The scheduler is not a single-process feature. A successful Swagger test
+requires the API process, PostgreSQL, Redis, a Celery worker, Alpaca
+credentials, and an available LLM provider.
+
+#### Option A: Docker Compose
+
+From the repository root, create or update the root `.env` with at least:
+
+```dotenv
+POSTGRES_USER=
+POSTGRES_PASSWORD=
+POSTGRES_DB=agentic_paper_trader
+DATABASE_URL=
+JWT_SECRET=replace-with-a-long-random-secret
+CREDENTIAL_ENCRYPTION_KEY=replace-with-a-valid-fernet-key
+ALPACA_API_KEY=your-paper-key
+ALPACA_API_SECRET=your-paper-secret
+LLM_PROVIDER=ollama
+OLLAMA_MODEL=llama3.1
+SCHEDULER_ENABLED=false
+```
+
+Then start the services:
+
+```powershell
+docker compose up -d --build
+docker compose ps
+```
+
+The `backend`, `celery-worker`, `postgres`, and `redis` services should be
+running/healthy. Ensure the local Ollama server is running and has the
+configured model. Open `http://localhost:8000/docs`.
+
+#### Option B: Run API locally
+
+Start infrastructure first:
+
+```powershell
+docker compose up -d postgres redis
+```
+
+Run the API from the `backend` directory with the backend interpreter:
+
+```powershell
+backend\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+```
+
+Run a Celery worker in a second terminal:
+
+```powershell
+backend\.venv\Scripts\celery.exe -A app.celery_app:celery_app worker --loglevel=info --pool=solo
+```
+
+For this local mode, use `REDIS_URL=redis://localhost:6379/0`,
+`OLLAMA_BASE_URL=http://localhost:11434`, and a local PostgreSQL URL. Do not
+use the Compose hostname `redis` or `postgres` from a host process.
+
+When the API and worker run inside Compose, the Compose default is
+`OLLAMA_BASE_URL=http://host.docker.internal:11434`, which reaches Ollama
+running on the Windows host. Confirm that the local Ollama server is running
+and that `ollama list` includes the configured model.
+
+#### Swagger request order
+
+1. `GET /health` — confirms the API process is alive.
+2. `GET /health/db` — confirms PostgreSQL.
+3. `POST /auth/register` — create a user.
+4. `POST /auth/login` — copy `access_token`.
+5. Click **Authorize** in Swagger and enter `Bearer <access_token>`.
+6. `POST /accounts/alpaca` — connect valid Alpaca paper credentials, unless
+   using the development-only server credential fallback.
+7. `POST /agent/cycles/run` — creates or uses the default agent. This is a
+   useful non-scheduled smoke test for database, Alpaca, and LLM connectivity.
+8. Use the returned `agent_id` from the cycle response.
+9. `POST /agent/scheduler/start` with:
+
+   ```json
+   {
+     "agent_id": "<agent-id>",
+     "interval_minutes": 1
+   }
+   ```
+
+10. Wait at least one minute. The first scheduled run occurs after the
+    interval; starting the schedule does not immediately execute a cycle.
+11. `GET /agent/scheduler/status` — inspect `running`, `next_run_time`,
+    `schedules`, and `recent_cycles`.
+12. `GET /agent/scheduler/logs?schedule_id=<schedule-id>` — inspect tick
+    results. `COMPLETED` means the worker ran the tick; `SKIPPED` includes
+    reasons such as `market_closed`, `kill_switch_enabled`, or
+    `no_enabled_agents`.
+13. If the cycle produces a BUY/SELL proposal under `REQUIRED` approval mode,
+    call `GET /agent/approvals/pending`, then approve or reject it.
+14. Stop the schedule with
+    `POST /agent/scheduler/{schedule_id}/stop`.
+
+The schedule-start endpoint only registers the APScheduler job. APScheduler
+then uses Redis to acquire an interval deduplication key and enqueue a Celery
+task. The Celery worker executes `run_agent_schedule_task`, which loads the
+schedule again from PostgreSQL before running `run_scheduled_cycles`. Therefore
+all three layers must be available: scheduler process, Redis, and worker.
+
+#### Interpreting common failures
+
+| Symptom | Meaning | Fix |
+|---|---|---|
+| `503 Scheduler service is not running` from schedule start | API lifespan did not start APScheduler or the API is shutting down | Restart API and inspect startup logs. |
+| `Timeout connecting to server` from `redis.connection` | Redis is not reachable at the configured `REDIS_URL` | Start Redis, check port 6379, and ensure host mode uses `localhost` while Compose uses `redis`. |
+| Schedule response is `201`, but no cycle appears | APScheduler registered the job, but Redis dispatch or Celery worker execution failed | Check Redis first, then confirm `celery-worker`/Celery worker is running. |
+| `scheduler/logs` is empty | No Celery tick has completed; Redis history is written only when a worker finishes a tick | Check the API dispatch log and worker log. |
+| Tick is `SKIPPED / market_closed` | Alpaca clock reports the US market is closed | Test during market hours or inspect the reason; this is intentional fail-closed behavior. |
+| Tick is `FAILED / market_clock_check_failed` | Server-level `ALPACA_API_KEY` or `ALPACA_API_SECRET` is missing/invalid, or Alpaca clock is unreachable | Configure valid paper keys in the API/worker environment. |
+| Cycle is absent but tick is `COMPLETED` | There were no enabled agents eligible for that tick, or the per-agent schedule was excluded from the global tick | Confirm the agent and user scheduler are enabled and inspect `recent_cycles`. |
+| Cycle is `FAILED / LLM_OUTPUT_INVALID` | Both the original and one repair LLM response failed schema validation | Inspect the cycle's `llm_raw_response`; no order is submitted. |
+
+The pasted failure with `Job "dispatch_agent_schedule"` and
+`redis.exceptions.TimeoutError: Timeout connecting to server` occurs at step 10,
+before Celery enqueueing and before any agent cycle starts. The schedule row
+may already exist in PostgreSQL, but no scheduled cycle can run until the API
+can reach Redis.
 
 ---
 
