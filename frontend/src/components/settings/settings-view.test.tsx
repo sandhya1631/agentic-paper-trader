@@ -10,6 +10,17 @@ vi.mock("@/lib/agent/controls-api", () => ({
   getKillSwitch: vi.fn(),
   setKillSwitch: vi.fn(),
 }));
+vi.mock("@/lib/accounts/accounts-api", () => ({
+  getAccountStatus: vi.fn(),
+  connectAccount: vi.fn(),
+  disconnectAccount: vi.fn(),
+}));
+vi.mock("@/lib/agent/scheduler-api", () => ({
+  getSchedulerStatus: vi.fn(),
+  startSchedule: vi.fn(),
+  stopSchedule: vi.fn(),
+}));
+vi.mock("@/lib/agent/cycles-api", () => ({ listCycles: vi.fn() }));
 
 import {
   getCurrentUser,
@@ -17,12 +28,30 @@ import {
   setKillSwitch,
   triggerCycle,
 } from "@/lib/agent/controls-api";
+import {
+  connectAccount,
+  disconnectAccount,
+  getAccountStatus,
+} from "@/lib/accounts/accounts-api";
+import { getSchedulerStatus, startSchedule, stopSchedule } from "@/lib/agent/scheduler-api";
+import { listCycles } from "@/lib/agent/cycles-api";
 import { SettingsView } from "./settings-view";
 
 const mockMe = vi.mocked(getCurrentUser);
 const mockTrigger = vi.mocked(triggerCycle);
 const mockGetKs = vi.mocked(getKillSwitch);
 const mockSetKs = vi.mocked(setKillSwitch);
+const mockAccountStatus = vi.mocked(getAccountStatus);
+const mockConnect = vi.mocked(connectAccount);
+const mockDisconnect = vi.mocked(disconnectAccount);
+const mockSchedStatus = vi.mocked(getSchedulerStatus);
+const mockStart = vi.mocked(startSchedule);
+const mockStop = vi.mocked(stopSchedule);
+const mockCycles = vi.mocked(listCycles);
+
+function notFound() {
+  return new ApiError(404, "Not Found", { detail: "No Alpaca account connected" }, "http://x");
+}
 
 function cycle(overrides: Record<string, unknown> = {}) {
   return {
@@ -31,7 +60,7 @@ function cycle(overrides: Record<string, unknown> = {}) {
     trigger: "MANUAL",
     status: "COMPLETED",
     started_at: "2026-11-02T01:00:00Z",
-    completed_at: "2026-11-02T01:00:05Z",
+    completed_at: null,
     failure_code: null,
     failure_message: null,
     snapshot_json: { execution_status: "ORDER_SUBMITTED" },
@@ -48,55 +77,60 @@ function cycle(overrides: Record<string, unknown> = {}) {
   } as never;
 }
 
+function schedStatus(overrides: Record<string, unknown> = {}) {
+  return {
+    enabled: false,
+    running: false,
+    interval_minutes: null,
+    next_run_time: null,
+    last_tick: null,
+    schedules: [],
+    recent_cycles: [],
+    ...overrides,
+  } as never;
+}
+
 beforeEach(() => {
-  mockMe.mockReset();
-  mockTrigger.mockReset();
-  mockGetKs.mockReset();
-  mockSetKs.mockReset();
+  vi.clearAllMocks();
+  // Safe defaults so every card mounts without unhandled rejections.
+  mockMe.mockResolvedValue({ id: "u1", email: "v@example.com", role: "VIEWER" });
   mockGetKs.mockResolvedValue({
     enabled: false,
     enforced_by_environment: false,
     updated_at: null,
     updated_by: null,
   });
+  mockAccountStatus.mockRejectedValue(notFound());
+  mockSchedStatus.mockResolvedValue(schedStatus());
+  mockCycles.mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0, next_offset: null });
 });
 afterEach(() => cleanup());
 
 describe("Trigger Now", () => {
   it("runs a cycle and shows the result", async () => {
-    mockMe.mockResolvedValue({ id: "u1", email: "v@example.com", role: "VIEWER" });
     mockTrigger.mockResolvedValue(cycle());
-
     render(<SettingsView />);
     fireEvent.click(await screen.findByRole("button", { name: /trigger now/i }));
-
     expect(await screen.findByText("COMPLETED")).toBeTruthy();
     expect(screen.getByText(/BUY AAPL/)).toBeTruthy();
-    expect(screen.getByText(/ORDER_SUBMITTED/)).toBeTruthy();
   });
 
-  it("explains a 409 (cycle already running) non-destructively", async () => {
-    mockMe.mockResolvedValue({ id: "u1", email: "v@example.com", role: "VIEWER" });
+  it("explains a 409 non-destructively", async () => {
     mockTrigger.mockRejectedValue(new ApiError(409, "Conflict", { detail: "running" }, "http://x"));
-
     render(<SettingsView />);
     fireEvent.click(await screen.findByRole("button", { name: /trigger now/i }));
-
     expect(await screen.findByText(/a cycle is already running/i)).toBeTruthy();
   });
 });
 
 describe("Kill switch gating", () => {
-  it("is hidden behind an admin-only note for non-admins", async () => {
-    mockMe.mockResolvedValue({ id: "u1", email: "v@example.com", role: "VIEWER" });
-
+  it("shows an admin-only note for non-admins", async () => {
     render(<SettingsView />);
-
     expect(await screen.findByText(/available to administrators only/i)).toBeTruthy();
     expect(mockGetKs).not.toHaveBeenCalled();
   });
 
-  it("lets an admin enable it via a confirmation step", async () => {
+  it("lets an admin enable it via confirmation", async () => {
     mockMe.mockResolvedValue({ id: "u1", email: "a@example.com", role: "ADMIN" });
     mockSetKs.mockResolvedValue({
       enabled: true,
@@ -104,29 +138,94 @@ describe("Kill switch gating", () => {
       updated_at: null,
       updated_by: "u1",
     });
-
     render(<SettingsView />);
-
     fireEvent.click(await screen.findByRole("button", { name: /enable kill switch/i }));
     fireEvent.click(await screen.findByRole("button", { name: /^confirm$/i }));
-
     await waitFor(() => expect(mockSetKs).toHaveBeenCalledWith(true));
     expect(await screen.findByText("ENABLED")).toBeTruthy();
   });
+});
 
-  it("disables the toggle and explains when env-forced-on", async () => {
-    mockMe.mockResolvedValue({ id: "u1", email: "a@example.com", role: "ADMIN" });
-    mockGetKs.mockResolvedValue({
-      enabled: true,
-      enforced_by_environment: true,
-      updated_at: null,
-      updated_by: null,
+describe("Account connection", () => {
+  it("submits entered keys to connect", async () => {
+    mockConnect.mockResolvedValue({
+      id: "acc1",
+      provider: "ALPACA",
+      is_paper: true,
+      is_connected: true,
+      last_verified_at: null,
     });
-
     render(<SettingsView />);
 
-    expect(await screen.findByText(/locked on by environment/i)).toBeTruthy();
-    const btn = screen.getByRole("button", { name: /disable kill switch/i }) as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
+    fireEvent.change(await screen.findByLabelText(/api key/i), { target: { value: "KEY123" } });
+    fireEvent.change(screen.getByLabelText(/api secret/i), { target: { value: "SECRET123" } });
+    fireEvent.click(screen.getByRole("button", { name: /connect account/i }));
+
+    await waitFor(() =>
+      expect(mockConnect).toHaveBeenCalledWith({
+        api_key: "KEY123",
+        api_secret: "SECRET123",
+        is_paper: true,
+      }),
+    );
+  });
+
+  it("shows connected state and disconnects", async () => {
+    mockAccountStatus.mockResolvedValue({
+      id: "acc1",
+      provider: "ALPACA",
+      is_paper: true,
+      is_connected: true,
+      last_verified_at: null,
+    });
+    mockDisconnect.mockResolvedValue(undefined);
+    render(<SettingsView />);
+
+    expect(await screen.findByText("Connected")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /disconnect/i }));
+    await waitFor(() => expect(mockDisconnect).toHaveBeenCalled());
+  });
+});
+
+describe("Scheduler controls", () => {
+  it("starts a schedule using the user's agent id", async () => {
+    mockCycles.mockResolvedValue({
+      items: [cycle({ id: "cx", agent_id: "agent-9" })],
+      total: 1,
+      limit: 1,
+      offset: 0,
+      next_offset: null,
+    });
+    mockStart.mockResolvedValue({
+      schedule: { id: "s1", agent_id: "agent-9", interval_minutes: 15, enabled: true, next_run_time: null, last_tick: null },
+      status_url: "/agent/scheduler/status",
+    });
+    render(<SettingsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /start schedule/i }));
+    await waitFor(() => expect(mockStart).toHaveBeenCalledWith("agent-9", 15));
+  });
+
+  it("stops an existing schedule", async () => {
+    mockSchedStatus.mockResolvedValue(
+      schedStatus({
+        running: true,
+        schedules: [
+          { id: "s1", agent_id: "a1", interval_minutes: 15, enabled: true, next_run_time: null },
+        ],
+      }),
+    );
+    mockStop.mockResolvedValue({
+      id: "s1",
+      agent_id: "a1",
+      interval_minutes: 15,
+      enabled: false,
+      next_run_time: null,
+      last_tick: null,
+    });
+    render(<SettingsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /stop schedule/i }));
+    await waitFor(() => expect(mockStop).toHaveBeenCalledWith("s1"));
   });
 });

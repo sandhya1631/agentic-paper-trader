@@ -38,7 +38,9 @@ async def get_alpaca_account_status(
 ) -> TradingAccountRead:
     """Connection status only — never returns the encrypted or decrypted secrets."""
     account = await get_alpaca_account(db, current_user.id)
-    if account is None:
+    if account is None or not account.is_connected:
+        # A revoked account keeps its row (an agent may reference it) but reads as "not
+        # connected" so the client shows the connect form again.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="No Alpaca account connected"
         )

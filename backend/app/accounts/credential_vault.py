@@ -106,7 +106,7 @@ async def get_decrypted_alpaca_credentials(
 ) -> tuple[str, str]:
     """Runtime decryption for broker calls. Never log or return this tuple to a client."""
     account = await get_alpaca_account(db, user_id)
-    if account is None:
+    if account is None or not account.is_connected:
         raise CredentialVaultError("No Alpaca credentials are connected for this user")
     return (
         decrypt_credential(account.encrypted_api_key),
@@ -115,10 +115,20 @@ async def get_decrypted_alpaca_credentials(
 
 
 async def delete_alpaca_credentials(db: AsyncSession, user_id: uuid.UUID) -> bool:
-    """Revoke/remove a user's stored Alpaca credentials. Returns True if something was deleted."""
+    """Revoke a user's stored Alpaca credentials. Returns True if an account was revoked.
+
+    The TradingAccount row is NOT hard-deleted: an AgentConfig may reference it via a
+    NOT NULL foreign key (every user who has run a cycle has one), so deleting the row
+    raises an IntegrityError. Instead we revoke — clear the stored ciphertext and mark
+    the account disconnected — which keeps the agent and its audit history intact while
+    making the account unusable. A later POST /accounts/alpaca reconnects the same row.
+    """
     account = await get_alpaca_account(db, user_id)
-    if account is None:
+    if account is None or not account.is_connected:
         return False
-    await db.delete(account)
+    account.is_connected = False
+    # Clear the ciphertext so the secret is genuinely revoked (columns are NOT NULL).
+    account.encrypted_api_key = ""
+    account.encrypted_api_secret = ""
     await db.commit()
     return True
