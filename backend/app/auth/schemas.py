@@ -3,6 +3,7 @@ import uuid
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.core.constants import BCRYPT_MAX_PASSWORD_BYTES
+from app.db.enums import UserRole
 
 # bcrypt hashes at most 72 bytes of input and raises ValueError beyond that.
 # Enforce the limit here so an over-long password is a clean 422, not a 500.
@@ -43,6 +44,8 @@ class UserRead(BaseModel):
 
     id: uuid.UUID
     email: EmailStr
+    # Exposed so the frontend can gate admin-only controls (e.g. the kill switch).
+    role: UserRole
 
 
 class Token(BaseModel):
