@@ -29,6 +29,8 @@ async def test_register_login_and_protected_route(client: AsyncClient) -> None:
     )
     assert authenticated.status_code == 200
     assert authenticated.json()["email"] == email
+    # /auth/me exposes the role so the frontend can gate admin-only controls.
+    assert authenticated.json()["role"] == "VIEWER"
 
 
 @pytest.mark.asyncio
