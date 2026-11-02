@@ -3,6 +3,7 @@
 import { usePathname, useRouter } from "next/navigation";
 import { titleForPath } from "@/lib/nav";
 import { logout } from "@/lib/auth/auth-api";
+import { LlmHealthIndicator } from "@/components/observability/llm-health-indicator";
 
 /**
  * Top navigation header. Shows the active section title and a compact,
@@ -22,10 +23,7 @@ export function Header() {
       <h1 className="truncate text-base font-semibold">{titleForPath(pathname)}</h1>
 
       <div className="flex items-center gap-3">
-        <span className="inline-flex items-center gap-2 rounded-full border border-border bg-surface-muted px-3 py-1 text-xs font-medium text-muted">
-          <span className="h-2 w-2 rounded-full bg-positive" aria-hidden />
-          Agent idle
-        </span>
+        <LlmHealthIndicator />
         <span className="hidden rounded-full border border-border px-3 py-1 text-xs font-medium text-muted sm:inline">
           Paper account
         </span>

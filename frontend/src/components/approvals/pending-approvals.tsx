@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { getErrorMessage } from "@/lib/api/error-message";
+import { AutoRefreshToggle } from "@/components/ui/auto-refresh-toggle";
+import { usePolling } from "@/lib/hooks/use-polling";
 import {
   approveApproval,
   listPendingApprovals,
@@ -34,6 +36,7 @@ export function PendingApprovals() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [comments, setComments] = useState<Record<string, string>>({});
   const [now, setNow] = useState(() => Date.now());
+  const [live, setLive] = useState(true);
 
   const load = useCallback(async () => {
     try {
@@ -53,6 +56,9 @@ export function PendingApprovals() {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Auto-refresh the pending list so new proposals appear without a reload.
+  usePolling(() => void load(), 15000, live);
 
   async function act(kind: "approve" | "reject", id: string) {
     setBusyId(id);
@@ -82,13 +88,16 @@ export function PendingApprovals() {
             policy before any paper order is sent.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void load()}
-          className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-muted"
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <AutoRefreshToggle enabled={live} onChange={setLive} seconds={15} />
+          <button
+            type="button"
+            onClick={() => void load()}
+            className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-muted"
+          >
+            Refresh
+          </button>
+        </div>
       </section>
 
       {feedback && (
