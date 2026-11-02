@@ -29,6 +29,13 @@ export const icons = {
       <rect x="3" y="16" width="7" height="5" rx="1" />
     </svg>
   ),
+  market: (p: IconProps) => (
+    <svg {...base} {...p}>
+      <path d="M7 4v16M17 4v16" />
+      <rect x="4" y="8" width="6" height="7" rx="1" />
+      <rect x="14" y="6" width="6" height="9" rx="1" />
+    </svg>
+  ),
   approvals: (p: IconProps) => (
     <svg {...base} {...p}>
       <circle cx="12" cy="12" r="9" />
