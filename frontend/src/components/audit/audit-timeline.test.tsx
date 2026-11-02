@@ -98,6 +98,58 @@ describe("AuditTimeline", () => {
     expect(screen.getByText(/58\.9/)).toBeTruthy(); // RSI indicator
   });
 
+  it("falls back to the approval's policy results when the cycle field is empty", async () => {
+    mockList.mockResolvedValue({
+      items: [baseCycle({ id: "c4", status: "REJECTED" })],
+      total: 1,
+      limit: 20,
+      offset: 0,
+      next_offset: null,
+    });
+    mockGet.mockResolvedValue(
+      baseCycle({
+        id: "c4",
+        status: "REJECTED",
+        policy_result_json: null,
+        approval: {
+          id: "ap4",
+          cycle_id: "c4",
+          status: "REJECTED",
+          requested_at: "2026-11-02T01:00:00Z",
+          expires_at: "2026-11-02T02:00:00Z",
+          acted_at: "2026-11-02T01:05:00Z",
+          actor_id: "u1",
+          comment: "risk policies denied this proposal",
+          policy_version: "POLICY-1.0",
+          policy_result_json: {
+            decision: "DENY",
+            policy_version: "POLICY-1.0",
+            evaluations: [
+              { policy_id: "P-001", policy_name: "Paper-only", outcome: "PASS", reason: "ok", evidence: {} },
+              {
+                policy_id: "P-004",
+                policy_name: "Fresh data",
+                outcome: "FAIL",
+                reason: "Market data is stale",
+                evidence: { age_seconds: 2400000, max_seconds: 600 },
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    render(<AuditTimeline />);
+    fireEvent.click(await screen.findByRole("button", { name: /BUY AAPL/ }));
+
+    expect(await screen.findByText("P-004")).toBeTruthy();
+    expect(screen.getByText("PASS")).toBeTruthy();
+    expect(screen.getByText("FAIL")).toBeTruthy();
+    expect(screen.getByText("Market data is stale")).toBeTruthy();
+    expect(screen.getByText(/from the approval re-check/i)).toBeTruthy();
+    expect(screen.queryByText(/policies were not evaluated for this cycle/i)).toBeNull();
+  });
+
   it("renders 'not evaluated' for a HOLD cycle without policy results", async () => {
     mockList.mockResolvedValue({
       items: [baseCycle({ id: "c2", status: "HOLD", policy_decision: "NOT_EVALUATED" })],

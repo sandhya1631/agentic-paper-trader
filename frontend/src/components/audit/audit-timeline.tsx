@@ -170,7 +170,10 @@ function CycleRow({ summary }: { summary: AgentCycle }) {
 
 function CycleDetail({ cycle }: { cycle: AgentCycle }) {
   const { market, executionStatus } = readSnapshot(cycle);
-  const policy = parsePolicyResult(cycle.policy_result_json);
+  const policy =
+    parsePolicyResult(cycle.policy_result_json) ??
+    parsePolicyResult(cycle.approval?.policy_result_json ?? null);
+  const policyFromApproval = !parsePolicyResult(cycle.policy_result_json) && !!policy;
   const symbols = Object.keys(market);
 
   return (
@@ -240,7 +243,14 @@ function CycleDetail({ cycle }: { cycle: AgentCycle }) {
       )}
 
       <section>
-        <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Policy results</h4>
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">
+          Policy results
+          {policyFromApproval ? (
+            <span className="ml-2 font-normal normal-case tracking-normal text-muted">
+              (from the approval re-check)
+            </span>
+          ) : null}
+        </h4>
         {policy ? (
           <table className="mt-1 w-full text-left text-sm">
             <thead className="text-xs uppercase tracking-wide text-muted">
