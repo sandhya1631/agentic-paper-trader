@@ -27,3 +27,31 @@ export interface SchedulerStatus {
 export function getSchedulerStatus(): Promise<SchedulerStatus> {
   return api.get<SchedulerStatus>("/agent/scheduler/status");
 }
+
+export interface AgentScheduleRead {
+  id: string;
+  agent_id: string;
+  interval_minutes: number;
+  enabled: boolean;
+  next_run_time: string | null;
+  last_tick: Record<string, unknown> | null;
+}
+
+export interface ScheduleStartResult {
+  schedule: AgentScheduleRead;
+  status_url: string;
+}
+
+export function startSchedule(
+  agentId: string,
+  intervalMinutes: number,
+): Promise<ScheduleStartResult> {
+  return api.post<ScheduleStartResult>("/agent/scheduler/start", {
+    agent_id: agentId,
+    interval_minutes: intervalMinutes,
+  });
+}
+
+export function stopSchedule(scheduleId: string): Promise<AgentScheduleRead> {
+  return api.post<AgentScheduleRead>(`/agent/scheduler/${scheduleId}/stop`);
+}
