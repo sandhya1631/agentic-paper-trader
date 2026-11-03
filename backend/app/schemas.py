@@ -199,6 +199,16 @@ class ScheduleStartRequest(APIModel):
 
 class KillSwitchUpdate(APIModel):
     enabled: bool
+    # Required to turn the switch ON (Story #72); optional note when turning it off.
+    reason: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def _reason_required_to_activate(self) -> "KillSwitchUpdate":
+        cleaned = (self.reason or "").strip()
+        if self.enabled and not cleaned:
+            raise ValueError("A reason is required to activate the kill switch")
+        self.reason = cleaned or None
+        return self
 
 
 class KillSwitchRead(APIModel):
@@ -206,6 +216,18 @@ class KillSwitchRead(APIModel):
     enforced_by_environment: bool
     updated_at: datetime | None = None
     updated_by: UUID | None = None
+    # Why it was last turned on (only meaningful while it is on).
+    reason: str | None = None
+
+
+class KillSwitchEventRead(APIModel):
+    id: UUID
+    occurred_at: datetime
+    actor_id: UUID | None = None
+    previous_enabled: bool
+    new_enabled: bool
+    outcome: str
+    reason: str | None = None
 
 
 class SchedulerTickStatus(APIModel):

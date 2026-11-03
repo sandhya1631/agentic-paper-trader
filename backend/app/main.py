@@ -23,6 +23,7 @@ from app.db.schema import (
 from app.db.session import AsyncSessionLocal, engine, get_db
 from app.llm.router import router as llm_router
 from app.market_data.router import router as market_data_router
+from app.meta.router import router as meta_router
 
 settings = get_settings()
 
@@ -137,6 +138,7 @@ app.include_router(broker_router, prefix="/api/v1")
 app.include_router(llm_router)
 app.include_router(market_data_router)
 app.include_router(agent_router)
+app.include_router(meta_router)
 
 @app.get("/", include_in_schema=False)
 async def root():

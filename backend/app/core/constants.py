@@ -55,3 +55,8 @@ SUPPORTED_PROVIDERS = ("openai", "ollama")
 # --- Auth ---
 BCRYPT_MAX_PASSWORD_BYTES = 72
 
+# --- Display ---
+# Alpaca paper accounts are USD-only; exposed via /meta/constants (Issue #139)
+# so the frontend never hardcodes this.
+CURRENCY = "USD"
+
