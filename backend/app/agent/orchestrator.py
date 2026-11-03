@@ -35,6 +35,7 @@ from app.agent.context import build_agent_context
 from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.broker.gateway import TradingDisabledError
+from app.core.config import get_settings
 from app.core.constants import ACTIVE_CYCLE_STATUSES, POLICY_VERSION
 from app.db.enums import (
     ApprovalMode,
@@ -42,6 +43,7 @@ from app.db.enums import (
     CycleStatus,
     CycleTrigger,
     DecisionAction,
+    PolicyDecisionType,
 )
 from app.db.models import AgentConfig, AgentCycle, CycleApproval, utcnow
 from app.llm.base import LLMClient
@@ -213,20 +215,55 @@ async def run_agent_cycle(
         if proposal.action == DecisionAction.HOLD:
             cycle.status = CycleStatus.HOLD
             cycle.completed_at = utcnow()
+            # No order is ever proposed, so policies are intentionally not run (#121).
+            cycle.policy_decision = PolicyDecisionType.NOT_EVALUATED
             context["execution_status"] = "NO_TRADE_PROPOSED"
         elif agent.approval_mode == ApprovalMode.OBSERVE_ONLY:
             cycle.status = CycleStatus.COMPLETED
             cycle.completed_at = utcnow()
+            cycle.policy_decision = PolicyDecisionType.NOT_EVALUATED
             context["execution_status"] = "OBSERVE_ONLY"
         elif agent.approval_mode == ApprovalMode.REQUIRED:
             proposal_hash = hashlib.sha256(
                 json.dumps(cycle.proposal_json, sort_keys=True).encode()
             ).hexdigest()
+            # Dry-run the policies so the operator can SEE the evidence next to the
+            # proposal (Issue #76). Nothing is submitted, the signed policy token is not
+            # stored, and the binding re-check still runs again on approval (Issue #77).
+            policy_preview = None
+            try:
+                # Read-only: no autoflush, so the half-built cycle is not saved early.
+                with db.no_autoflush:
+                    policy_preview, _ = await evaluate_and_submit_cycle_trade(
+                        db, agent, cycle, submit=False
+                    )
+            except Exception:
+                logger.warning(
+                    "Could not preview policies for cycle %s; parking without them",
+                    cycle.id,
+                    exc_info=True,
+                )
+            # Persist the preview as the cycle's queryable policy record (#121). This is
+            # the same read-only dry run shown on the approval; the binding re-check still
+            # runs again at approval time, so this never weakens the execution gate.
+            if policy_preview is not None:
+                cycle.policy_decision = policy_preview.decision
+                cycle.policy_result_json = policy_preview.model_dump(
+                    mode="json", exclude={"policy_token"}
+                )
+            else:
+                cycle.policy_decision = PolicyDecisionType.NOT_EVALUATED
             approval = CycleApproval(
                 cycle_id=cycle.id,
                 status=ApprovalStatus.PENDING,
                 proposal_hash=proposal_hash,
-                expires_at=utcnow() + timedelta(hours=24),
+                expires_at=utcnow() + timedelta(minutes=get_settings().approval_expiry_minutes),
+                policy_version=policy_preview.policy_version if policy_preview else None,
+                policy_result_json=(
+                    policy_preview.model_dump(mode="json", exclude={"policy_token"})
+                    if policy_preview
+                    else None
+                ),
             )
             db.add(approval)
             pending_approval = approval
@@ -248,6 +285,7 @@ async def run_agent_cycle(
                 cycle.failure_code = "KILL_SWITCH_ENABLED"
                 cycle.failure_message = str(exc)
                 cycle.completed_at = utcnow()
+                cycle.policy_decision = PolicyDecisionType.NOT_EVALUATED
                 context["execution_status"] = "KILL_SWITCH_ENABLED"
                 cycle.snapshot_json = context
                 await db.commit()
@@ -260,6 +298,7 @@ async def run_agent_cycle(
                 cycle.failure_code = "ORDER_EXECUTION_UNCERTAIN"
                 cycle.failure_message = str(exc)
                 cycle.completed_at = utcnow()
+                cycle.policy_decision = PolicyDecisionType.NOT_EVALUATED
                 context["execution_status"] = "RECONCILIATION_REQUIRED"
                 cycle.snapshot_json = context
                 await db.commit()
@@ -267,6 +306,12 @@ async def run_agent_cycle(
                 set_committed_value(cycle, "approval", None)
                 return cycle
             context["policy_evaluation"] = policy_decision.model_dump(mode="json")
+            # Persist the same decision the execution gate just produced (#121) - this is
+            # a read-only copy for audit/query, not a second evaluation.
+            cycle.policy_decision = policy_decision.decision
+            cycle.policy_result_json = policy_decision.model_dump(
+                mode="json", exclude={"policy_token"}
+            )
             if broker_order is None:
                 cycle.status = CycleStatus.REJECTED
                 cycle.failure_code = "POLICY_DENIED"

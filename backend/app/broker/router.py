@@ -53,7 +53,7 @@ async def get_alpaca_client(
     settings = get_settings()
 
     account = await get_alpaca_account(db, current_user.id)
-    if account is not None:
+    if account is not None and account.is_connected:
         try:
             api_key, api_secret = await get_decrypted_alpaca_credentials(db, current_user.id)
         except CredentialVaultError as exc:

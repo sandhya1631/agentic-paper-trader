@@ -85,6 +85,11 @@ async def test_lifespan_starts_scheduler_before_yield_and_stops_it(monkeypatch):
     )
     monkeypatch.setattr(
         main_module,
+        "ensure_agent_cycle_policy_columns",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        main_module,
         "ensure_user_scheduler_column",
         AsyncMock(),
     )

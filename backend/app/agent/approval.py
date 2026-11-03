@@ -48,8 +48,14 @@ async def evaluate_and_submit_cycle_trade(
     db: AsyncSession,
     agent: AgentConfig,
     cycle: AgentCycle,
+    *,
+    submit: bool = True,
 ) -> tuple[PolicyDecision, BrokerOrder | None]:
-    """Re-evaluate current paper-account risk and submit only policy-approved orders."""
+    """Re-evaluate current paper-account risk and submit only policy-approved orders.
+
+    With ``submit=False`` this is a dry run: the policies are evaluated against live data
+    and the decision is returned, but nothing is ever sent to the broker.
+    """
     if not cycle.proposal_json:
         raise ValueError("Cycle has no proposal to execute")
 
@@ -151,7 +157,7 @@ async def evaluate_and_submit_cycle_trade(
             max_orders_per_day=settings.max_orders_per_day,
         )
         decision = evaluate_policies(policy_context)
-        if decision.policy_token is None:
+        if decision.policy_token is None or not submit:
             return decision, None
 
         approved_order = ApprovedOrder(

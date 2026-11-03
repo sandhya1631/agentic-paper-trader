@@ -16,6 +16,7 @@ from app.db import models  # noqa: F401  (registers ORM models on Base.metadata)
 from app.db.base import Base
 from app.db.models import AgentConfig, AgentSchedule, TradingAccount, User
 from app.db.schema import (
+    ensure_agent_cycle_policy_columns,
     ensure_agent_cycle_prompt_columns,
     ensure_user_scheduler_column,
 )
@@ -60,6 +61,7 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await ensure_agent_cycle_prompt_columns(conn)
+        await ensure_agent_cycle_policy_columns(conn)
         await ensure_user_scheduler_column(conn)
     scheduler = create_scheduler(
         settings,

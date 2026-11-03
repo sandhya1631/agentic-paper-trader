@@ -176,8 +176,20 @@ class CycleRead(APIModel):
     prompt_text: str | None = None
     llm_raw_response: str | None = None
     proposal_json: dict[str, Any] | None = None
+    policy_decision: PolicyDecisionType | None = None
+    policy_result_json: dict[str, Any] | None = None
     correlation_id: UUID | None = None
     approval: ApprovalRead | None = None
+
+
+class CycleListRead(APIModel):
+    """Paginated envelope for a user's agent cycles (Story: GET /agent/cycles, #119)."""
+
+    items: list[CycleRead] = Field(default_factory=list)
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0)
+    next_offset: int | None = Field(default=None, ge=0)
 
 
 class ScheduleStartRequest(APIModel):

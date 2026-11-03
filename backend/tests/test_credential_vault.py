@@ -14,7 +14,8 @@ from app.accounts.credential_vault import (
     get_decrypted_alpaca_credentials,
 )
 from app.core.config import Settings
-from app.db.models import TradingAccount
+from app.core.constants import DEFAULT_STRATEGY_VERSION
+from app.db.models import AgentConfig, PolicySet, TradingAccount
 
 API_KEY = "AKFAKE1234567890"
 API_SECRET = "s3cr3t-fake-alpaca-secret-value"
@@ -188,6 +189,65 @@ async def test_disconnect_404_when_nothing_connected(client: AsyncClient) -> Non
         "/accounts/alpaca", headers={"Authorization": f"Bearer {token}"}
     )
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_disconnect_succeeds_when_account_has_an_agent(client: AsyncClient) -> None:
+    """Regression: disconnecting an account that an AgentConfig references must not 500.
+
+    agent_configs.account_id is a NOT NULL FK, so hard-deleting the account row raised an
+    IntegrityError (every user who ran a cycle has an agent). Disconnect now revokes the
+    account instead: 204, the account reads as not-connected, the agent + history survive,
+    and reconnecting reuses the same row.
+    """
+    token = await _register_and_login(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    await client.post(
+        "/accounts/alpaca",
+        json={"api_key": API_KEY, "api_secret": API_SECRET},
+        headers=headers,
+    )
+
+    # Attach an agent to the connected account (as POST /agent/cycles/run would).
+    async with TestSessionLocal() as session:
+        account = (await session.execute(select(TradingAccount))).scalar_one()
+        policy = PolicySet(version="P-TEST", limits_json={}, is_active=True)
+        session.add(policy)
+        await session.flush()
+        agent = AgentConfig(
+            account_id=account.id,
+            policy_set_id=policy.id,
+            name="Test Agent",
+            watchlist=["AAPL"],
+            strategy_version=DEFAULT_STRATEGY_VERSION,
+            model_provider="ollama",
+            model_name="llama3.1",
+        )
+        session.add(agent)
+        await session.commit()
+        agent_id = agent.id
+
+    # Disconnect must succeed, not raise a 500 FK violation.
+    delete_response = await client.delete("/accounts/alpaca", headers=headers)
+    assert delete_response.status_code == 204
+
+    # Reads as not connected, but the agent (and its audit history) survive.
+    status_response = await client.get("/accounts/alpaca", headers=headers)
+    assert status_response.status_code == 404
+    async with TestSessionLocal() as session:
+        assert (await session.get(AgentConfig, agent_id)) is not None
+        account = (await session.execute(select(TradingAccount))).scalar_one()
+        assert account.is_connected is False
+
+    # Reconnecting reuses the same row (no unique-constraint violation).
+    reconnect = await client.post(
+        "/accounts/alpaca",
+        json={"api_key": API_KEY, "api_secret": API_SECRET},
+        headers=headers,
+    )
+    assert reconnect.status_code == 201
+    status_after = await client.get("/accounts/alpaca", headers=headers)
+    assert status_after.status_code == 200
 
 
 # --- Runtime decryption helper (what a future broker integration would call) ---
