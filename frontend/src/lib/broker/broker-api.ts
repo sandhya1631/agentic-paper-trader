@@ -53,6 +53,29 @@ export interface AlpacaOrder {
 
 export type OrderStatusFilter = "open" | "closed" | "all";
 
+// --- Manual order submission (#143) ---
+// NOTE: POST /api/v1/broker/orders is the MANUAL OVERRIDE path. It only checks the
+// global kill switch and BYPASSES the risk guardrails (P-001…P-012) that the agent
+// path enforces. The enums are UPPERCASE; lowercase values return 422.
+export type OrderSide = "BUY" | "SELL";
+export type OrderType = "MARKET" | "LIMIT";
+export type TimeInForce = "DAY";
+
+export interface OrderCreate {
+  symbol: string;
+  qty: number; // integer > 0
+  side: OrderSide;
+  type?: OrderType;
+  time_in_force?: TimeInForce;
+  limit_price?: number | string | null;
+  client_order_id?: string | null;
+}
+
+/** Submit a manual paper order (bypasses the agent's risk policies). */
+export function createOrder(order: OrderCreate): Promise<AlpacaOrder> {
+  return api.post<AlpacaOrder>("/api/v1/broker/orders", order);
+}
+
 export function getAccount(): Promise<AlpacaAccount> {
   return api.get<AlpacaAccount>("/api/v1/broker/account");
 }

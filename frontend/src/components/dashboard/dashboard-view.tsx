@@ -23,6 +23,10 @@ import {
 import { StatCard } from "@/components/ui/stat-card";
 import { Badge } from "@/components/ui/badge";
 import { ConnectAccountNotice } from "@/components/ui/connect-account-notice";
+import { AutoRefreshToggle } from "@/components/ui/auto-refresh-toggle";
+import { usePolling } from "@/lib/hooks/use-polling";
+
+const REFRESH_SECONDS = 15;
 
 interface DashboardState {
   loading: boolean;
@@ -46,6 +50,7 @@ const INITIAL: DashboardState = {
 
 export function DashboardView() {
   const [state, setState] = useState<DashboardState>(INITIAL);
+  const [live, setLive] = useState(true);
 
   const load = useCallback(async () => {
     setState((prev) => ({ ...prev, loading: true }));
@@ -80,6 +85,8 @@ export function DashboardView() {
     void load();
   }, [load]);
 
+  usePolling(() => void load(), REFRESH_SECONDS * 1000, live);
+
   if (state.loading) {
     return <p className="text-sm text-muted">Loading dashboard...</p>;
   }
@@ -101,7 +108,10 @@ export function DashboardView() {
 
   return (
     <div className="space-y-6">
-      <DashboardHeader />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <DashboardHeader />
+        <AutoRefreshToggle enabled={live} onChange={setLive} seconds={REFRESH_SECONDS} />
+      </div>
 
       {state.accountError ? (
         <div
