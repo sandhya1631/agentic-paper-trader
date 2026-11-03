@@ -21,7 +21,7 @@ from sqlalchemy.orm import selectinload
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, require_operator
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
 from app.core.constants import ALPACA_PROVIDER, DEFAULT_STRATEGY_VERSION, DEFAULT_WATCHLIST
@@ -378,7 +378,7 @@ async def approve_cycle_trade(
     approval_id: uuid.UUID,
     body: ApprovalAction,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator),
 ) -> CycleRead:
     row = await _load_owned_approval(db, current_user.id, approval_id)
     if row is None:
@@ -506,7 +506,7 @@ async def reject_cycle_trade(
     approval_id: uuid.UUID,
     body: ApprovalAction,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator),
 ) -> CycleRead:
     row = await _load_owned_approval(db, current_user.id, approval_id)
     if row is None:

@@ -1,7 +1,11 @@
 import uuid
 
 import pytest
+from conftest import TestSessionLocal
 from httpx import AsyncClient
+from sqlalchemy import select
+
+from app.db.models import User
 
 
 @pytest.mark.asyncio
@@ -52,6 +56,52 @@ async def test_invalid_token_is_rejected(client: AsyncClient) -> None:
         "/auth/me", headers={"Authorization": "Bearer not-a-real-token"}
     )
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_inactive_user_cannot_use_an_existing_token(client: AsyncClient) -> None:
+    email = f"inactive-{uuid.uuid4()}@example.com"
+    password = "S3cure-Password!"
+    await client.post("/auth/register", json={"email": email, "password": password})
+    token = (
+        await client.post(
+            "/auth/login", json={"email": email, "password": password}
+        )
+    ).json()["access_token"]
+
+    async with TestSessionLocal() as db:
+        user = (await db.execute(select(User).where(User.email == email))).scalar_one()
+        user.is_active = False
+        await db.commit()
+
+    response = await client.get(
+        "/auth/me", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_viewer_cannot_submit_direct_orders(client: AsyncClient) -> None:
+    email = f"viewer-{uuid.uuid4()}@example.com"
+    password = "S3cure-Password!"
+    await client.post("/auth/register", json={"email": email, "password": password})
+    token = (
+        await client.post(
+            "/auth/login", json={"email": email, "password": password}
+        )
+    ).json()["access_token"]
+
+    response = await client.post(
+        "/api/v1/broker/orders",
+        json={
+            "symbol": "AAPL",
+            "qty": 1,
+            "side": "BUY",
+            "client_order_id": "viewer-order",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
 
 
 @pytest.mark.asyncio
@@ -115,4 +165,3 @@ async def test_oauth2_token_rejects_overlong_password(client: AsyncClient) -> No
         "/auth/token", data={"username": email, "password": "a" * 73}
     )
     assert response.status_code == 422
-

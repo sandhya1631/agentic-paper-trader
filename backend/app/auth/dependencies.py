@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Callable
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, OAuth2PasswordBearer
@@ -7,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import validate_token
+from app.db.enums import UserRole
 from app.db.models import User
 from app.db.session import get_db
 
@@ -43,7 +45,25 @@ async def get_current_user(
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
-    if user is None:
+    if user is None or not user.is_active:
         raise _CREDENTIALS_ERROR
     return user
 
+
+def require_roles(*allowed_roles: UserRole) -> Callable:
+    """Create a dependency that requires an authenticated user with an allowed role."""
+
+    async def role_guard(
+        current_user: User = Depends(get_current_user),
+    ) -> User:
+        if current_user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient role for this operation",
+            )
+        return current_user
+
+    return role_guard
+
+
+require_operator = require_roles(UserRole.OPERATOR, UserRole.ADMIN)

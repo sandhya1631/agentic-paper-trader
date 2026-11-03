@@ -9,7 +9,7 @@ from app.accounts.credential_vault import (
     get_alpaca_account,
     get_decrypted_alpaca_credentials,
 )
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, require_operator
 from app.broker.account_snapshots import save_account_snapshot
 from app.broker.alpaca import AlpacaClient
 from app.broker.schemas import (
@@ -181,7 +181,7 @@ async def get_market_snapshot(
 )
 async def place_paper_order(
     order: OrderCreate,
-    current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(require_operator)],
     client: Annotated[AlpacaClient, Depends(get_alpaca_client)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
