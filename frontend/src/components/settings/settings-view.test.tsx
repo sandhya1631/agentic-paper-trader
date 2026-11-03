@@ -21,6 +21,7 @@ vi.mock("@/lib/agent/scheduler-api", () => ({
   stopSchedule: vi.fn(),
 }));
 vi.mock("@/lib/agent/cycles-api", () => ({ listCycles: vi.fn() }));
+vi.mock("@/lib/agent/observability-api", () => ({ getSchedulerLogs: vi.fn() }));
 
 import {
   getCurrentUser,
@@ -28,6 +29,7 @@ import {
   setKillSwitch,
   triggerCycle,
 } from "@/lib/agent/controls-api";
+import { getSchedulerLogs } from "@/lib/agent/observability-api";
 import {
   connectAccount,
   disconnectAccount,
@@ -48,6 +50,7 @@ const mockSchedStatus = vi.mocked(getSchedulerStatus);
 const mockStart = vi.mocked(startSchedule);
 const mockStop = vi.mocked(stopSchedule);
 const mockCycles = vi.mocked(listCycles);
+const mockLogs = vi.mocked(getSchedulerLogs);
 
 function notFound() {
   return new ApiError(404, "Not Found", { detail: "No Alpaca account connected" }, "http://x");
@@ -103,6 +106,7 @@ beforeEach(() => {
   mockAccountStatus.mockRejectedValue(notFound());
   mockSchedStatus.mockResolvedValue(schedStatus());
   mockCycles.mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0, next_offset: null });
+  mockLogs.mockResolvedValue([]);
 });
 afterEach(() => cleanup());
 

@@ -27,6 +27,7 @@ import { ApiError } from "@/lib/api/errors";
 import { getErrorMessage } from "@/lib/api/error-message";
 import { formatDateTime } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
+import { SchedulerActivity } from "@/components/observability/scheduler-activity";
 
 export function SettingsView() {
   const [user, setUser] = useState<CurrentUser | null>(null);
@@ -46,6 +47,7 @@ export function SettingsView() {
       <AccountCard />
       <TriggerNowCard />
       <SchedulerCard />
+      <SchedulerActivity />
       <KillSwitchCard isAdmin={user?.role === "ADMIN"} />
     </div>
   );

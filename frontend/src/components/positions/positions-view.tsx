@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  createOrder,
   getOrders,
   getPositions,
   isAccountNotConnected,
@@ -12,6 +13,11 @@ import { getErrorMessage } from "@/lib/api/error-message";
 import { formatDateTime, formatMoney, formatPercent, formatSignedMoney, signTone } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { ConnectAccountNotice } from "@/components/ui/connect-account-notice";
+import { AutoRefreshToggle } from "@/components/ui/auto-refresh-toggle";
+import { usePolling } from "@/lib/hooks/use-polling";
+import { ManualOrderTicket, describeOrderError } from "./manual-order-ticket";
+
+const REFRESH_SECONDS = 15;
 
 interface PositionsState {
   loading: boolean;
@@ -31,6 +37,7 @@ const INITIAL: PositionsState = {
 
 export function PositionsView() {
   const [state, setState] = useState<PositionsState>(INITIAL);
+  const [live, setLive] = useState(true);
 
   const load = useCallback(async () => {
     setState((prev) => ({ ...prev, loading: true }));
@@ -56,11 +63,21 @@ export function PositionsView() {
     void load();
   }, [load]);
 
+  usePolling(() => void load(), REFRESH_SECONDS * 1000, live);
+
   if (state.loading) return <p className="text-sm text-muted">Loading positions...</p>;
   if (state.notConnected) return <ConnectAccountNotice />;
 
   return (
     <div className="space-y-8">
+      <section className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Positions &amp; orders</h2>
+          <p className="text-sm text-muted">Open positions and orders, refreshing live.</p>
+        </div>
+        <AutoRefreshToggle enabled={live} onChange={setLive} seconds={REFRESH_SECONDS} />
+      </section>
+
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">Open positions</h2>
         {state.error ? (
@@ -81,6 +98,7 @@ export function PositionsView() {
                   <th className="px-4 py-3">Current</th>
                   <th className="px-4 py-3">Market value</th>
                   <th className="px-4 py-3">Unrealized P/L</th>
+                  <th className="px-4 py-3">Manual</th>
                 </tr>
               </thead>
               <tbody>
@@ -95,6 +113,9 @@ export function PositionsView() {
                       <Badge tone={signTone(p.unrealized_pl)}>
                         {formatSignedMoney(p.unrealized_pl)} ({formatPercent(p.unrealized_plpc)})
                       </Badge>
+                    </td>
+                    <td className="px-4 py-3">
+                      <ClosePositionButton position={p} onClosed={() => void load()} />
                     </td>
                   </tr>
                 ))}
@@ -143,6 +164,8 @@ export function PositionsView() {
           <EmptyRow>No open orders.</EmptyRow>
         )}
       </section>
+
+      <ManualOrderTicket onSubmitted={() => void load()} />
     </div>
   );
 }
@@ -152,5 +175,81 @@ function EmptyRow({ children }: { children: React.ReactNode }) {
     <div className="flex h-24 items-center justify-center rounded-xl border border-dashed border-border bg-surface text-sm text-muted">
       {children}
     </div>
+  );
+}
+
+/**
+ * Per-position manual close (#143). Submits a MARKET order on the opposite side
+ * for the full quantity — a manual override that bypasses the risk policies, so
+ * it is gated behind an inline confirm. Handles 423 (kill switch) / 502 (broker).
+ */
+function ClosePositionButton({
+  position,
+  onClosed,
+}: {
+  position: AlpacaPosition;
+  onClosed: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const qty = Math.floor(Math.abs(Number(position.qty)));
+  const side = position.side.toUpperCase() === "SHORT" ? "BUY" : "SELL";
+
+  async function close() {
+    setBusy(true);
+    setError(null);
+    const [res] = await Promise.allSettled([
+      createOrder({ symbol: position.symbol, qty, side, type: "MARKET", time_in_force: "DAY" }),
+    ]);
+    if (res.status === "fulfilled") {
+      setConfirming(false);
+      onClosed();
+    } else {
+      setError(describeOrderError(res.reason));
+    }
+    setBusy(false);
+  }
+
+  if (!Number.isInteger(qty) || qty <= 0) {
+    return <span className="text-xs text-muted">—</span>;
+  }
+
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        onClick={() => setConfirming(true)}
+        className="rounded-lg border border-border px-3 py-1 text-xs font-medium hover:bg-surface-muted"
+      >
+        Close
+      </button>
+    );
+  }
+
+  return (
+    <span className="flex flex-col gap-1">
+      <span className="flex items-center gap-2">
+        <span className="text-xs text-negative">{side} {qty} (override)?</span>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void close()}
+          className="rounded-lg bg-negative px-2 py-1 text-xs font-medium text-white disabled:opacity-50"
+        >
+          {busy ? "..." : "Confirm"}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => setConfirming(false)}
+          className="rounded-lg border border-border px-2 py-1 text-xs hover:bg-surface-muted"
+        >
+          Cancel
+        </button>
+      </span>
+      {error ? <span role="alert" className="text-xs text-negative">{error}</span> : null}
+    </span>
   );
 }
