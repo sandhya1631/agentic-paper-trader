@@ -89,12 +89,36 @@ class TradingAccount(Base, UUIDPrimaryKey, Timestamped):
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     user: Mapped[User] = relationship(back_populates="accounts")
     agents: Mapped[list[AgentConfig]] = relationship(back_populates="account")
+    snapshots: Mapped[list[AccountSnapshot]] = relationship(
+        back_populates="account", cascade="all, delete-orphan"
+    )
     __table_args__ = (
         CheckConstraint("is_paper = true", name="ck_account_paper_only"),
         # One connected account per (user, provider) — closes a race where concurrent
         # POST /accounts/alpaca requests could otherwise create duplicate rows.
         UniqueConstraint("user_id", "provider", name="uq_trading_account_user_provider"),
     )
+
+
+class AccountSnapshot(Base, UUIDPrimaryKey):
+    __tablename__ = "account_snapshots"
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("trading_accounts.id", ondelete="CASCADE"), index=True
+    )
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    currency: Mapped[str] = mapped_column(String(10), default="USD")
+    cash: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    portfolio_value: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    buying_power: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    equity: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    last_equity: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    daily_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    daily_pnl_percent: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 6), nullable=True
+    )
+    account: Mapped[TradingAccount] = relationship(back_populates="snapshots")
 
 
 class PolicySet(Base, UUIDPrimaryKey, Timestamped):

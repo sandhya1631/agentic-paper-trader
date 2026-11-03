@@ -174,7 +174,8 @@ Stores application users:
 - `created_at`, `updated_at`
 
 The current authentication dependency checks that the JWT subject is a real
-user. It does not currently reject an inactive user after lookup.
+user and rejects users whose `is_active` flag is false. Existing JWTs therefore
+stop working as soon as the account is deactivated.
 
 ### 4.2 `trading_accounts`
 
@@ -964,7 +965,22 @@ The direct order endpoint checks the kill switch, but it does not create the
 - `GET /agent/scheduler/logs`
 
 All protected routes use the current-user dependency. Kill-switch mutation and
-read endpoints require the `ADMIN` role.
+read endpoints require the `ADMIN` role. Direct broker order submission and
+cycle approval/rejection require the `OPERATOR` or `ADMIN` role; authenticated
+read endpoints remain available to every active user.
+
+### Role-based access policy
+
+| Role | Access |
+|---|---|
+| `VIEWER` | Read-only access to authenticated account, broker, market-data, agent-cycle, approval, and scheduler status endpoints. |
+| `AUDITOR` | Same read-only access as `VIEWER`, intended for audit and review workflows. |
+| `OPERATOR` | All authenticated read access plus direct paper-order submission and cycle approval/rejection. |
+| `ADMIN` | All `OPERATOR` access plus kill-switch read/update access. |
+
+Role checks are implemented as reusable FastAPI dependencies in
+`app/auth/dependencies.py`. A deactivated user receives `401 Unauthorized`
+before any role or ownership check is evaluated.
 
 ---
 

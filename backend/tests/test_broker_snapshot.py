@@ -76,6 +76,27 @@ async def test_get_market_snapshot_raises_when_no_bars():
         await client.get_market_snapshot("AAPL")
 
 
+@pytest.mark.asyncio
+async def test_get_account_calculates_daily_pnl():
+    http = _mock_http_get(
+        {
+            "id": "account-1",
+            "status": "ACTIVE",
+            "cash": "9000.00",
+            "portfolio_value": "10100.00",
+            "buying_power": "18000.00",
+            "equity": "10100.00",
+            "last_equity": "10000.00",
+        }
+    )
+    client = AlpacaClient(api_key="k", api_secret="s", client=http)
+
+    account = await client.get_account()
+
+    assert account.daily_pnl == Decimal("100.00")
+    assert account.daily_pnl_percent == Decimal("1.00")
+
+
 # --- AlpacaClient.get_bars (Issue #124) ---
 
 
