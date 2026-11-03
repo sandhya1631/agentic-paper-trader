@@ -383,6 +383,7 @@ function KillSwitchCard({ isAdmin }: { isAdmin: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [pendingTarget, setPendingTarget] = useState<boolean | null>(null);
+  const [reason, setReason] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -403,10 +404,13 @@ function KillSwitchCard({ isAdmin }: { isAdmin: boolean }) {
     setBusy(true);
     setError(null);
     try {
-      setState(await setKillSwitch(target));
+      setState(await setKillSwitch(target, reason));
+      setReason("");
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         setError("The kill switch is locked on by the environment and cannot be changed here.");
+      } else if (e instanceof ApiError && e.status === 422) {
+        setError("A reason is required to enable the kill switch.");
       } else {
         setError(getErrorMessage(e, "Could not update the kill switch."));
       }
@@ -429,6 +433,9 @@ function KillSwitchCard({ isAdmin }: { isAdmin: boolean }) {
 
   const enabled = state?.enabled ?? false;
   const envLocked = state?.enforced_by_environment ?? false;
+  // Turning the switch ON must come with a reason; turning it off does not need one.
+  const needsReason = pendingTarget === true;
+  const reasonMissing = needsReason && reason.trim().length === 0;
 
   return (
     <section className="rounded-xl border border-border bg-surface p-5">
@@ -440,6 +447,12 @@ function KillSwitchCard({ isAdmin }: { isAdmin: boolean }) {
         Immediately blocks all broker order dispatch. Enforcement is server-side; this only toggles it.
       </p>
 
+      {enabled && state?.reason ? (
+        <p className="mt-2 text-sm">
+          <span className="text-muted">Reason: </span>
+          {state.reason}
+        </p>
+      ) : null}
       {envLocked && (
         <p className="mt-2 text-sm text-muted">Locked ON by environment — cannot be changed here.</p>
       )}
@@ -453,7 +466,10 @@ function KillSwitchCard({ isAdmin }: { isAdmin: boolean }) {
         <button
           type="button"
           disabled={busy || envLocked}
-          onClick={() => setPendingTarget(!enabled)}
+          onClick={() => {
+            setReason("");
+            setPendingTarget(!enabled);
+          }}
           className="mt-3 rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-surface-muted disabled:opacity-50"
         >
           {enabled ? "Disable kill switch" : "Enable kill switch"}
@@ -465,9 +481,24 @@ function KillSwitchCard({ isAdmin }: { isAdmin: boolean }) {
               ? "Enable the kill switch and block all order dispatch?"
               : "Disable the kill switch and allow order dispatch again?"}
           </span>
+          {needsReason && (
+            <div className="w-full">
+              <label htmlFor="kill-switch-reason" className="text-xs font-medium text-muted">
+                Reason (required)
+              </label>
+              <input
+                id="kill-switch-reason"
+                type="text"
+                value={reason}
+                maxLength={500}
+                onChange={(event) => setReason(event.target.value)}
+                className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+              />
+            </div>
+          )}
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || reasonMissing}
             onClick={() => void confirmToggle()}
             className="rounded-lg bg-brand px-3 py-1.5 text-sm font-medium text-brand-foreground disabled:opacity-50"
           >
