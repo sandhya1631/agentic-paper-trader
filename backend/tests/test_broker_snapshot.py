@@ -52,7 +52,9 @@ def test_optional_decimal_keeps_zero():
 @pytest.mark.asyncio
 async def test_get_market_snapshot_computes_indicators():
     # 60 flat bars → neutral RSI (50) and SMAs equal to the price.
-    bars = [{"c": 100.0, "t": f"2024-01-01T00:{i:02d}:00Z"} for i in range(60)]
+    # Alpaca returns newest-first under sort=desc (Issue #151); get_bars reverses
+    # to chronological, so the snapshot's "latest" timestamp is 00:59.
+    bars = [{"c": 100.0, "t": f"2024-01-01T00:{i:02d}:00Z"} for i in range(59, -1, -1)]
     http = _mock_http_get({"bars": {"AAPL": bars}})
     client = AlpacaClient(api_key="k", api_secret="s", client=http)
 
@@ -65,6 +67,8 @@ async def test_get_market_snapshot_computes_indicators():
     assert snapshot.sma_50 == Decimal("100.0")
     assert snapshot.bars_count == 60
     assert snapshot.timestamp == "2024-01-01T00:59:00Z"
+    # The underlying bars request asked Alpaca for newest-first data.
+    assert http.get.await_args.kwargs["params"]["sort"] == "desc"
 
 
 @pytest.mark.asyncio
@@ -124,3 +128,29 @@ async def test_get_bars_default_lookback_is_30_days():
 
     start = datetime.fromisoformat(http.get.await_args.kwargs["params"]["start"])
     assert (datetime.now(timezone.utc) - start).days >= 29
+
+
+@pytest.mark.asyncio
+async def test_get_bars_requests_newest_first_and_returns_chronological():
+    """Issue #151: request sort=desc so Alpaca returns the window's *latest*
+    bars (not the oldest), then reverse back to chronological so bars[-1] is the
+    most recent — otherwise the snapshot timestamp is ~30 days stale and P-004 DENYs."""
+    # Alpaca returns newest-first under sort=desc.
+    bars_desc = [
+        {"c": 103.0, "t": "2024-01-01T00:03:00Z"},
+        {"c": 102.0, "t": "2024-01-01T00:02:00Z"},
+        {"c": 101.0, "t": "2024-01-01T00:01:00Z"},
+    ]
+    http = _mock_http_get({"bars": {"AAPL": bars_desc}})
+    client = AlpacaClient(api_key="k", api_secret="s", client=http)
+
+    bars = await client.get_bars("AAPL", timeframe="5Min", limit=3)
+
+    # Outbound request asks for newest-first.
+    assert http.get.await_args.kwargs["params"]["sort"] == "desc"
+    # Returned bars are restored to chronological order (latest bar last).
+    assert [b["t"] for b in bars] == [
+        "2024-01-01T00:01:00Z",
+        "2024-01-01T00:02:00Z",
+        "2024-01-01T00:03:00Z",
+    ]
