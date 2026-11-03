@@ -18,6 +18,8 @@ export interface KillSwitch {
   enforced_by_environment: boolean;
   updated_at: string | null;
   updated_by: string | null;
+  /** Why it was last turned on (shown while it is on). */
+  reason?: string | null;
 }
 
 export function getCurrentUser(): Promise<CurrentUser> {
@@ -33,6 +35,8 @@ export function getKillSwitch(): Promise<KillSwitch> {
   return api.get<KillSwitch>("/agent/kill-switch");
 }
 
-export function setKillSwitch(enabled: boolean): Promise<KillSwitch> {
-  return api.put<KillSwitch>("/agent/kill-switch", { enabled });
+/** Turning the switch ON needs a reason (the server rejects an empty one with 422). */
+export function setKillSwitch(enabled: boolean, reason?: string): Promise<KillSwitch> {
+  const trimmed = reason?.trim();
+  return api.put<KillSwitch>("/agent/kill-switch", trimmed ? { enabled, reason: trimmed } : { enabled });
 }

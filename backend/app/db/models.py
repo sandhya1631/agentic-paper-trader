@@ -216,6 +216,26 @@ class SystemRuntimeControl(Base, Timestamped):
     )
 
 
+class KillSwitchEvent(Base, UUIDPrimaryKey):
+    """Audit trail: one row for every kill-switch change request (Story #72).
+
+    Rows are only ever added. A request the server refused (an environment force-on
+    cannot be disabled by API) is recorded too, with outcome REJECTED_ENV_OVERRIDE.
+    """
+
+    __tablename__ = "kill_switch_events"
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, index=True
+    )
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    previous_enabled: Mapped[bool] = mapped_column(Boolean)
+    new_enabled: Mapped[bool] = mapped_column(Boolean)
+    outcome: Mapped[str] = mapped_column(String(30))
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
 class CycleApproval(Base, UUIDPrimaryKey):
     __tablename__ = "cycle_approvals"
     cycle_id: Mapped[uuid.UUID] = mapped_column(

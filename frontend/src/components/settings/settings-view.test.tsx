@@ -21,6 +21,7 @@ vi.mock("@/lib/agent/scheduler-api", () => ({
   stopSchedule: vi.fn(),
 }));
 vi.mock("@/lib/agent/cycles-api", () => ({ listCycles: vi.fn() }));
+vi.mock("@/lib/agent/observability-api", () => ({ getSchedulerLogs: vi.fn() }));
 
 import {
   getCurrentUser,
@@ -28,6 +29,7 @@ import {
   setKillSwitch,
   triggerCycle,
 } from "@/lib/agent/controls-api";
+import { getSchedulerLogs } from "@/lib/agent/observability-api";
 import {
   connectAccount,
   disconnectAccount,
@@ -48,6 +50,7 @@ const mockSchedStatus = vi.mocked(getSchedulerStatus);
 const mockStart = vi.mocked(startSchedule);
 const mockStop = vi.mocked(stopSchedule);
 const mockCycles = vi.mocked(listCycles);
+const mockLogs = vi.mocked(getSchedulerLogs);
 
 function notFound() {
   return new ApiError(404, "Not Found", { detail: "No Alpaca account connected" }, "http://x");
@@ -103,6 +106,7 @@ beforeEach(() => {
   mockAccountStatus.mockRejectedValue(notFound());
   mockSchedStatus.mockResolvedValue(schedStatus());
   mockCycles.mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0, next_offset: null });
+  mockLogs.mockResolvedValue([]);
 });
 afterEach(() => cleanup());
 
@@ -140,9 +144,50 @@ describe("Kill switch gating", () => {
     });
     render(<SettingsView />);
     fireEvent.click(await screen.findByRole("button", { name: /enable kill switch/i }));
+    fireEvent.change(await screen.findByLabelText(/reason/i), {
+      target: { value: "Unexpected trades" },
+    });
     fireEvent.click(await screen.findByRole("button", { name: /^confirm$/i }));
-    await waitFor(() => expect(mockSetKs).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(mockSetKs).toHaveBeenCalledWith(true, "Unexpected trades"));
     expect(await screen.findByText("ENABLED")).toBeTruthy();
+  });
+
+  it("will not enable without a reason", async () => {
+    mockMe.mockResolvedValue({ id: "u1", email: "a@example.com", role: "ADMIN" });
+    render(<SettingsView />);
+    fireEvent.click(await screen.findByRole("button", { name: /enable kill switch/i }));
+
+    const confirm = (await screen.findByRole("button", { name: /^confirm$/i })) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText(/reason/i), { target: { value: "   " } });
+    expect(confirm.disabled).toBe(true);
+    expect(mockSetKs).not.toHaveBeenCalled();
+  });
+
+  it("disables the kill switch without asking for a reason", async () => {
+    mockMe.mockResolvedValue({ id: "u1", email: "a@example.com", role: "ADMIN" });
+    mockGetKs.mockResolvedValue({
+      enabled: true,
+      enforced_by_environment: false,
+      updated_at: null,
+      updated_by: "u1",
+      reason: "Unexpected trades",
+    });
+    mockSetKs.mockResolvedValue({
+      enabled: false,
+      enforced_by_environment: false,
+      updated_at: null,
+      updated_by: "u1",
+    });
+    render(<SettingsView />);
+
+    expect(await screen.findByText("Unexpected trades")).toBeTruthy(); // current reason shown
+    fireEvent.click(await screen.findByRole("button", { name: /disable kill switch/i }));
+    expect(screen.queryByLabelText(/reason/i)).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: /^confirm$/i }));
+
+    await waitFor(() => expect(mockSetKs).toHaveBeenCalledWith(false, ""));
   });
 });
 

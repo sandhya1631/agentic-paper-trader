@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 
 import { ApiError } from "@/lib/api/errors";
 
@@ -96,6 +96,9 @@ describe("PositionsView", () => {
     render(<PositionsView />);
 
     expect(await screen.findByText("NVDA")).toBeTruthy();
-    expect(screen.getByText("BUY")).toBeTruthy();
+    // Scope to the orders table so the manual-order ticket's BUY option (added in
+    // #143) doesn't collide with the order row's side badge.
+    const ordersTable = screen.getByRole("table");
+    expect(within(ordersTable).getByText("BUY")).toBeTruthy();
   });
 });

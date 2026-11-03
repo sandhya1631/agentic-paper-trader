@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -46,6 +46,8 @@ from app.db.session import get_db
 from app.risk.kill_switch import (
     EnvironmentKillSwitchOverrideError,
     get_kill_switch_control,
+    get_latest_activation_reason,
+    list_kill_switch_events,
     set_kill_switch,
 )
 from app.schemas import (
@@ -54,6 +56,7 @@ from app.schemas import (
     ApprovalRead,
     CycleListRead,
     CycleRead,
+    KillSwitchEventRead,
     KillSwitchRead,
     KillSwitchUpdate,
     PendingApprovalRead,
@@ -82,13 +85,30 @@ async def get_kill_switch(
         raise HTTPException(status_code=403, detail="Admin role required")
     settings = get_settings()
     control = await get_kill_switch_control(db)
+    enabled = settings.kill_switch_enabled or bool(control and control.kill_switch_enabled)
     return KillSwitchRead(
-        enabled=settings.kill_switch_enabled
-        or bool(control and control.kill_switch_enabled),
+        enabled=enabled,
         enforced_by_environment=settings.kill_switch_enabled,
         updated_at=control.updated_at if control else None,
         updated_by=control.updated_by if control else None,
+        reason=await get_latest_activation_reason(db) if enabled else None,
     )
+
+
+@router.get(
+    "/kill-switch/events",
+    response_model=list[KillSwitchEventRead],
+    summary="Audit trail of kill-switch changes, newest first (admin only)",
+)
+async def list_kill_switch_audit(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[KillSwitchEventRead]:
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin role required")
+    events = await list_kill_switch_events(db, limit)
+    return [KillSwitchEventRead.model_validate(event) for event in events]
 
 
 @router.put(
@@ -108,6 +128,7 @@ async def update_kill_switch(
             db,
             enabled=body.enabled,
             actor_id=current_user.id,
+            reason=body.reason,
         )
     except EnvironmentKillSwitchOverrideError as exc:
         raise HTTPException(
@@ -120,6 +141,7 @@ async def update_kill_switch(
         enforced_by_environment=settings.kill_switch_enabled,
         updated_at=control.updated_at,
         updated_by=control.updated_by,
+        reason=body.reason if body.enabled else None,
     )
 
 
