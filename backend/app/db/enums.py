@@ -9,6 +9,9 @@ class UserRole(StrEnum):
 
 
 class Symbol(StrEnum):
+    # Legacy/test-only: proposals now use a validated Ticker string (app/schemas.py),
+    # and the real tradable allowlist is the per-agent watchlist enforced by P-005 -
+    # NOT this fixed set.
     AAPL = "AAPL"
     NVDA = "NVDA"
     SPY = "SPY"

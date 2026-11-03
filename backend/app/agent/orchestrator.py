@@ -405,7 +405,9 @@ async def run_watchlist_cycles(
     if agent is None:
         raise ValueError(f"AgentConfig with id '{agent_id}' not found")
 
-    symbols = list(agent.watchlist or [])
+    # Normalize to the canonical upper-case form the Ticker type produces, so the
+    # per-symbol scope guard and P-005 compare against one consistent form.
+    symbols = [str(s).strip().upper() for s in (agent.watchlist or [])]
     if not symbols:
         return []
 
@@ -427,17 +429,26 @@ async def run_watchlist_cycles(
 
     cycles: list[AgentCycle] = []
     for index, symbol in enumerate(symbols):
-        cycle = await run_agent_cycle(
-            agent_id,
-            db,
-            trigger=trigger,
-            llm_client=llm_client,
-            collector=collector,
-            target_symbol=symbol,
-            bars_per_symbol=bars_per_symbol,
-            # Gate once on the first symbol; the rest are sequential and must not
-            # block on an approval/execution the first symbol may have left active.
-            enforce_no_overlap=(index == 0),
-        )
-        cycles.append(cycle)
+        try:
+            cycle = await run_agent_cycle(
+                agent_id,
+                db,
+                trigger=trigger,
+                llm_client=llm_client,
+                collector=collector,
+                target_symbol=symbol,
+                bars_per_symbol=bars_per_symbol,
+                # Gate once on the first symbol; the rest are sequential and must not
+                # block on an approval/execution the first symbol may have left active.
+                enforce_no_overlap=(index == 0),
+            )
+            cycles.append(cycle)
+        except CycleOverlapError:
+            # Only the first symbol runs the gate, so this means the agent is already
+            # busy: skip the whole tick, matching the previous per-agent behaviour.
+            raise
+        except Exception:
+            # One symbol's transient failure (e.g. LLM timeout) must not drop the
+            # rest of the watchlist for this tick.
+            logger.exception("Watchlist sweep: cycle failed for %s; continuing", symbol)
     return cycles

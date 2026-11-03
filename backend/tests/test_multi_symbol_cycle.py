@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.orchestrator import run_watchlist_cycles
@@ -26,6 +27,7 @@ from app.db.enums import (
 )
 from app.db.models import (
     AgentConfig,
+    AgentCycle,
     PolicySet,
     TradingAccount,
     User,
@@ -152,6 +154,14 @@ async def test_sweep_creates_one_cycle_per_symbol(db_session: AsyncSession):
     assert all(c.status == CycleStatus.PENDING_APPROVAL for c in cycles)
     assert all(c.trigger == CycleTrigger.SCHEDULED for c in cycles)
 
+    # Persisted audit trail: exactly one distinct AgentCycle row per symbol.
+    rows = (
+        await db_session.execute(select(AgentCycle).where(AgentCycle.agent_id == agent.id))
+    ).scalars().all()
+    assert len(rows) == len(watchlist)
+    assert len({r.id for r in rows}) == len(watchlist)
+    assert {r.proposal_json["symbol"] for r in rows} == set(watchlist)
+
 
 @pytest.mark.asyncio
 async def test_sweep_decisions_are_not_anchored_to_first_symbol(db_session: AsyncSession):
@@ -254,6 +264,62 @@ async def test_sweep_empty_watchlist_returns_no_cycles(db_session: AsyncSession)
     )
 
     assert cycles == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_continues_after_one_symbol_errors(db_session: AsyncSession):
+    """A transient failure on one symbol must not drop the rest of the watchlist."""
+    watchlist = ["AAPL", "NVDA", "MSFT"]
+    agent = await _seed_agent(db_session, watchlist=watchlist, approval_mode=ApprovalMode.REQUIRED)
+
+    def gen(prompt_input: str, system: str | None = None) -> str:
+        sym = json.loads(prompt_input).get("decision_target", "AAPL")
+        if sym == "NVDA":
+            raise RuntimeError("transient LLM failure")
+        return json.dumps(
+            {"symbol": sym, "action": "HOLD", "quantity": 0, "reasoning": "Citing RSI=50, SMA20=1."}
+        )
+
+    llm = MagicMock()
+    llm.generate = AsyncMock(side_effect=gen)
+
+    cycles = await run_watchlist_cycles(
+        agent.id, db_session, llm_client=llm, collector=_collector_for(watchlist)
+    )
+
+    # NVDA failed and is excluded from the returned list, but AAPL and MSFT still ran.
+    assert [c.proposal_json["symbol"] for c in cycles] == ["AAPL", "MSFT"]
+    # The failed symbol still left an audited FAILED cycle row.
+    rows = (
+        await db_session.execute(select(AgentCycle).where(AgentCycle.agent_id == agent.id))
+    ).scalars().all()
+    assert len(rows) == len(watchlist)
+    nvda = next(r for r in rows if r.status == CycleStatus.FAILED)
+    assert nvda.failure_code == "UNEXPECTED_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_sweep_executes_each_symbol_in_auto_mode(db_session: AsyncSession):
+    """AUTO mode: each per-symbol cycle runs the execution gate and, on approval,
+    reaches COMPLETED with a submitted broker order for that symbol."""
+    watchlist = ["AAPL", "NVDA", "MSFT"]
+    agent = await _seed_agent(db_session, watchlist=watchlist, approval_mode=ApprovalMode.AUTO)
+
+    allow = MagicMock()
+    allow.decision = PolicyDecisionType.ALLOW
+    allow.model_dump = MagicMock(return_value={"decision": "ALLOW", "evaluations": []})
+    order = MagicMock()
+    order.status.value = "SUBMITTED"
+    gate = AsyncMock(return_value=(allow, order))
+
+    with patch("app.agent.orchestrator.evaluate_and_submit_cycle_trade", gate):
+        cycles = await run_watchlist_cycles(
+            agent.id, db_session, llm_client=_echo_target_llm(), collector=_collector_for(watchlist)
+        )
+
+    assert gate.await_count == len(watchlist)
+    assert [c.proposal_json["symbol"] for c in cycles] == watchlist
+    assert all(c.status == CycleStatus.COMPLETED for c in cycles)
 
 
 def test_prompt_has_no_hardcoded_symbol():
