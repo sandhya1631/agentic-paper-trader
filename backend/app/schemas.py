@@ -1,9 +1,9 @@
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.core.constants import DEFAULT_STRATEGY_VERSION
 from app.db.enums import (
@@ -18,11 +18,21 @@ from app.db.enums import (
     OrderType,
     PolicyDecisionType,
     PolicyOutcome,
-    Symbol,
     TimeInForce,
 )
 
 Money = Decimal
+
+# A tradable ticker. Deliberately a validated string, not a fixed enum: the
+# watchlist is per-agent and user-editable (#138/#141), so proposals must be
+# able to name any symbol. Normalized to upper-case; the *real* allowlist is
+# enforced at policy time by P-005 (`symbol in watchlist`), not by this type.
+Ticker = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, to_upper=True, pattern=r"^[A-Za-z][A-Za-z0-9.]{0,9}$"
+    ),
+]
 
 
 class APIModel(BaseModel):
@@ -43,7 +53,7 @@ class AgentConfigRead(APIModel):
 
 
 class DecisionProposal(APIModel):
-    symbol: Symbol
+    symbol: Ticker
     action: DecisionAction
     quantity: int = Field(default=0, ge=0)
     reasoning: str
@@ -56,7 +66,7 @@ class DecisionProposal(APIModel):
 
 
 class MarketSnapshot(APIModel):
-    symbol: Symbol
+    symbol: Ticker
     current_price: Decimal = Field(gt=0)
     rsi_14: Decimal | None = None
     sma_20: Decimal | None = None
@@ -130,7 +140,7 @@ class ApprovedOrder(APIModel):
     decision_id: UUID
     policy_token: str
     client_order_id: str = Field(min_length=8, max_length=64)
-    symbol: Symbol
+    symbol: Ticker
     side: OrderSide
     quantity: int = Field(gt=0)
     order_type: OrderType
@@ -152,7 +162,7 @@ class BrokerOrderRead(APIModel):
     broker_order_id: str | None = None
     client_order_id: str
     status: BrokerOrderStatus
-    symbol: Symbol
+    symbol: Ticker
     side: OrderSide
     requested_quantity: int
     filled_quantity: int = Field(ge=0)

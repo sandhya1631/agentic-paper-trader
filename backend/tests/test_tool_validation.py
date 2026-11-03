@@ -71,10 +71,19 @@ def test_validate_rejects_invalid_action():
         validate_decision_proposal(bad)
 
 
-def test_validate_rejects_symbol_outside_watchlist():
-    bad = {**VALID_PROPOSAL, "symbol": "TSLA"}
-    with pytest.raises(ToolValidationError):
-        validate_decision_proposal(bad)
+def test_validate_accepts_ticker_beyond_the_legacy_enum():
+    """The proposal schema accepts any well-formed ticker now (#153) — the
+    watchlist is per-agent and user-editable, so symbols are not a fixed enum.
+    Off-watchlist rejection is enforced by policy P-005, not the schema."""
+    assert validate_decision_proposal({**VALID_PROPOSAL, "symbol": "MSFT"}).symbol == "MSFT"
+    # Case is normalised to upper-case.
+    assert validate_decision_proposal({**VALID_PROPOSAL, "symbol": "tsla"}).symbol == "TSLA"
+
+
+def test_validate_rejects_malformed_symbol():
+    for bad_symbol in ["not a ticker!", "", "123", "TOOLONGSYMBOL"]:
+        with pytest.raises(ToolValidationError):
+            validate_decision_proposal({**VALID_PROPOSAL, "symbol": bad_symbol})
 
 
 def test_validate_rejects_non_positive_quantity():
