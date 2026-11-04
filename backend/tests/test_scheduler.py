@@ -161,7 +161,9 @@ def scheduled_tick(monkeypatch):
     )
     monkeypatch.setattr(scheduler, "_fetch_market_clock", AsyncMock(return_value=_open_market()))
     run_cycle = AsyncMock()
-    monkeypatch.setattr(scheduler, "run_agent_cycle", run_cycle)
+    # The scheduled tick now evaluates the whole watchlist via run_watchlist_cycles
+    # (one cycle per symbol); it is still invoked once per agent with the same args.
+    monkeypatch.setattr(scheduler, "run_watchlist_cycles", run_cycle)
     return enabled_agent_ids, query_session, run_cycle
 
 

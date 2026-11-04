@@ -11,7 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from redis import Redis
 from sqlalchemy import select
 
-from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
+from app.agent.orchestrator import CycleOverlapError, run_watchlist_cycles
 from app.agent.tasks import run_agent_schedule_task, run_scheduled_cycles_task
 from app.broker.alpaca import AlpacaClient
 from app.core.config import Settings, get_settings
@@ -222,9 +222,10 @@ async def run_scheduled_cycles(
                 if enabled_result.scalar_one_or_none() is None:
                     continue
                 attempted_agents += 1
-                # run_agent_cycle expires stale approvals itself before the
-                # active-cycle gate, so scheduled ticks get it for free too.
-                await run_agent_cycle(
+                # Evaluate the whole watchlist this tick (one cycle per symbol).
+                # The sweep expires stale approvals and runs the active-cycle gate
+                # itself (on its first symbol), so scheduled ticks get it for free.
+                await run_watchlist_cycles(
                     agent_id,
                     db,
                     trigger=CycleTrigger.SCHEDULED,

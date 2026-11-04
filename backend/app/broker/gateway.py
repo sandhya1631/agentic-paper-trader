@@ -80,7 +80,7 @@ async def submit_approved_order(
             decision_id=approved.decision_id,
             client_order_id=approved.client_order_id,
             status=BrokerOrderStatus.PENDING_SUBMISSION,
-            symbol=approved.symbol.value,
+            symbol=approved.symbol,
             side=approved.side,
             requested_quantity=approved.quantity,
         )
@@ -89,7 +89,7 @@ async def submit_approved_order(
         await db.refresh(broker_order)
 
     order_create = OrderCreate(
-        symbol=approved.symbol.value,
+        symbol=approved.symbol,
         qty=approved.quantity,
         side=approved.side,
         type=approved.order_type,
