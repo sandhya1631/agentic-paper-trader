@@ -558,7 +558,9 @@ Insert an `AgentCycle` with:
 ### Step 3: Collect market context
 
 Set status to `COLLECTING`, fetch watchlist bars, calculate indicators where
-there are at least 50 closes, and build the sanitized context.
+there are at least 50 closes, and build the sanitized context. The watchlist is
+first normalized (trimmed, upper-cased, de-duplicated, blanks dropped), the same way
+for a manual cycle and a sweep, so each distinct symbol is collected exactly once.
 
 A collector construction or bar-fetch problem is logged and leaves the cycle
 with empty/missing market data, allowing the strategy's HOLD mandate to apply.

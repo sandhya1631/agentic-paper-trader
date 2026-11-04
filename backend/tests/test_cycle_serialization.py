@@ -232,6 +232,30 @@ async def test_sweep_evaluates_each_symbol_once(db_session: AsyncSession):
     )
 
     assert [c.proposal_json["symbol"] for c in cycles] == WATCHLIST
+    # Each per-symbol cycle's context lists every distinct symbol once, too.
+    assert all(c.snapshot_json["watchlist"] == WATCHLIST for c in cycles)
+
+
+@pytest.mark.asyncio
+async def test_manual_cycle_collects_each_normalized_symbol_once(db_session: AsyncSession):
+    """A manual (untargeted) cycle normalizes the watchlist the same way the sweep does:
+    market data is fetched, and the context built, for each distinct symbol exactly once."""
+    agent = await _seed_agent(
+        db_session,
+        watchlist=["AAPL", "aapl", "NVDA", " nvda ", "SPY", "  "],
+        approval_mode=ApprovalMode.OBSERVE_ONLY,
+    )
+    normalized = ["AAPL", "NVDA", "SPY"]
+    collector = _collector_for(normalized)
+
+    cycle = await run_agent_cycle(
+        agent.id, db_session, llm_client=_fixed_symbol_llm("AAPL"), collector=collector
+    )
+
+    collector.fetch_latest_bars.assert_awaited_once()
+    assert collector.fetch_latest_bars.await_args.args[0] == normalized
+    assert cycle.snapshot_json["watchlist"] == normalized
+    assert list(cycle.snapshot_json["market"]) == normalized
 
 
 @pytest.mark.asyncio

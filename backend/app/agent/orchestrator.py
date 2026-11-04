@@ -69,6 +69,18 @@ _AGENT_LOCK_SQL = text("SELECT pg_try_advisory_xact_lock(:key)").bindparams(
 )
 
 
+def _normalized_watchlist(watchlist: list[str] | None) -> list[str]:
+    """The watchlist in the canonical form the Ticker type produces: trimmed, upper-case,
+    de-duplicated (first occurrence kept) and without blanks.
+
+    Used by both entry points (a manual cycle and a scheduled sweep), so a cycle collects
+    market data and builds its context for each distinct symbol exactly once, and one
+    sweep never evaluates (or orders) the same symbol twice.
+    """
+    symbols = (str(s).strip().upper() for s in (watchlist or []))
+    return list(dict.fromkeys(s for s in symbols if s))
+
+
 def _agent_lock_key(agent_id: uuid.UUID) -> int:
     """A signed 64-bit advisory-lock key for the agent, identical in every process."""
     digest = hashlib.blake2b(b"agent-cycle:" + agent_id.bytes, digest_size=8).digest()
@@ -217,6 +229,7 @@ async def _run_agent_cycle(
         await db.commit()
 
         # 4. Collect Market Data (reuse caller-provided bars for a watchlist sweep)
+        symbols = _normalized_watchlist(agent.watchlist)
         if bars_per_symbol is None:
             if collector is None:
                 try:
@@ -228,14 +241,14 @@ async def _run_agent_cycle(
             if collector:
                 try:
                     bars_per_symbol = await collector.fetch_latest_bars(
-                        agent.watchlist, limit=50, lookback_days=30, validate=False
+                        symbols, limit=50, lookback_days=30, validate=False
                     )
                 except Exception as exc:
                     logger.warning("Failed to fetch market bars for cycle: %s", exc)
 
         # 5. Build Context & Get Versioned Prompt
         context = build_agent_context(
-            symbols=agent.watchlist,
+            symbols=symbols,
             bars_per_symbol=bars_per_symbol,
             strategy_version=agent.strategy_version,
         )
@@ -505,10 +518,10 @@ async def _run_watchlist_cycles(
     if agent is None:
         raise ValueError(f"AgentConfig with id '{agent_id}' not found")
 
-    # Normalize to the canonical upper-case form the Ticker type produces, so the
-    # per-symbol scope guard and P-005 compare against one consistent form, and drop
-    # duplicates so one sweep never evaluates (or orders) the same symbol twice.
-    symbols = list(dict.fromkeys(str(s).strip().upper() for s in (agent.watchlist or [])))
+    # Canonical, de-duplicated symbols (the same helper the per-symbol cycle uses), so
+    # the scope guard compares one consistent form and one sweep never evaluates (or
+    # orders) the same symbol twice.
+    symbols = _normalized_watchlist(agent.watchlist)
     if not symbols:
         return []
 
