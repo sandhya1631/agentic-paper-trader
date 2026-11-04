@@ -106,16 +106,19 @@ with the rest of the stack. Cycle, approval, and broker-order records remain in 
 
 ### LLM Client Factory
 
-`app/llm/` gives a single provider-neutral interface (`LLMClient.generate(...)`) over OpenAI and a
-local Ollama model. Switch providers with one `.env` variable — no orchestration code changes:
+`app/llm/` gives a single provider-neutral interface (`LLMClient.generate(...)`) over OpenAI,
+Anthropic (Claude) and a local Ollama model. Switch providers with one `.env` variable — no
+orchestration code changes:
 
 ```bash
-LLM_PROVIDER=ollama   # or "openai"
+LLM_PROVIDER=ollama   # or "openai" / "anthropic"
 ```
 
 - `ollama`: requires a local [Ollama](https://ollama.com) server running (`OLLAMA_BASE_URL`, default
   `http://localhost:11434`) with the model pulled (`OLLAMA_MODEL`, default `llama3.1`).
 - `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
+- `anthropic`: requires `ANTHROPIC_API_KEY` set; model via `ANTHROPIC_MODEL` (default
+  `claude-opus-5-5`). Replies are constrained to the decision JSON schema (structured output).
 
 #### Install & verify the local LLM
 

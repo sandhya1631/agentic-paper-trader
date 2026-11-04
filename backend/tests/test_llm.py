@@ -1,4 +1,8 @@
 import os
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -6,8 +10,9 @@ import pytest
 from httpx import AsyncClient
 
 from app.core.config import Settings, get_settings
+from app.core.constants import SUPPORTED_PROVIDERS
 from app.llm.base import LLMHealth
-from app.llm.factory import create_llm_client
+from app.llm.factory import configured_model, create_llm_client
 from app.llm.ollama_client import OllamaClient
 from app.llm.openai_client import OpenAIClient
 
@@ -20,7 +25,7 @@ async def test_llm_health_reports_configured_provider(client: AsyncClient) -> No
 
     assert response.status_code == 200
     body = response.json()
-    assert body["provider"] in ("openai", "ollama")
+    assert body["provider"] in SUPPORTED_PROVIDERS
     assert "model" in body
 
 
@@ -85,9 +90,67 @@ def test_factory_returns_openai_client_when_configured():
     assert isinstance(client, OpenAIClient)
 
 
-def test_factory_rejects_unsupported_provider():
-    settings = Settings(llm_provider="anthropic")
-    with pytest.raises(ValueError):
+def test_unsupported_provider_still_errors():
+    settings = Settings(_env_file=None, llm_provider="bogus", anthropic_api_key=None)
+    with pytest.raises(ValueError, match="Unsupported LLM_PROVIDER 'bogus'") as excinfo:
+        create_llm_client(settings)
+    assert "anthropic" in str(excinfo.value)  # the message lists every supported provider
+
+
+# --- No regression when the Anthropic SDK/key are absent (#154) ---
+# These tests deliberately do NOT import the anthropic SDK (see test_llm_anthropic.py).
+
+
+def _block_anthropic_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make any `import anthropic` raise ImportError and forget the client module."""
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    monkeypatch.delitem(sys.modules, "app.llm.anthropic_client", raising=False)
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected_cls", "expected_model"),
+    [("ollama", OllamaClient, "llama3.1"), ("openai", OpenAIClient, "gpt-4o-mini")],
+)
+def test_no_anthropic_credentials_does_not_affect_default_provider(
+    monkeypatch, provider, expected_cls, expected_model
+):
+    _block_anthropic_sdk(monkeypatch)
+    # Stand-in with no anthropic_* attributes: reading one would raise AttributeError.
+    settings = SimpleNamespace(
+        llm_provider=provider,
+        openai_api_key="fake-key",
+        openai_model="gpt-4o-mini",
+        ollama_base_url="http://localhost:11434",
+        ollama_model="llama3.1",
+    )
+
+    client = create_llm_client(settings)
+
+    assert isinstance(client, expected_cls)
+    assert configured_model(settings) == expected_model
+    assert "app.llm.anthropic_client" not in sys.modules
+
+
+def test_app_import_unaffected_without_anthropic_sdk():
+    code = (
+        "import sys; sys.modules['anthropic'] = None; import app.main; "
+        "assert 'app.llm.anthropic_client' not in sys.modules"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+
+
+def test_anthropic_selected_without_sdk_errors_clearly(monkeypatch):
+    _block_anthropic_sdk(monkeypatch)
+    settings = Settings(_env_file=None, llm_provider="anthropic", anthropic_api_key="fake-key")
+
+    with pytest.raises(ValueError, match="requires the 'anthropic' package"):
         create_llm_client(settings)
 
 
