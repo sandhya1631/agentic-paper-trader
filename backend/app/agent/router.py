@@ -21,6 +21,7 @@ from sqlalchemy.orm import selectinload
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
+from app.audit import record_audit_event
 from app.auth.dependencies import get_current_user, require_operator
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
@@ -51,6 +52,8 @@ from app.risk.kill_switch import (
     set_kill_switch,
 )
 from app.schemas import (
+    AgentConfigDetailRead,
+    AgentConfigUpdate,
     AgentScheduleRead,
     ApprovalAction,
     ApprovalRead,
@@ -145,6 +148,109 @@ async def update_kill_switch(
     )
 
 
+_NO_AGENT_DETAIL = "No agent configured yet. Trigger a cycle to create your default agent."
+
+
+def _agent_config_not_found(agent_id: uuid.UUID | None) -> HTTPException:
+    """404 for GET/PATCH /agent/config. A named agent_id that the caller doesn't own (or
+    that doesn't exist) is "Agent not found", which reveals nothing about other users'
+    agents; without an agent_id the caller simply has no agent yet."""
+    detail = "Agent not found" if agent_id is not None else _NO_AGENT_DETAIL
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+
+
+async def _get_owned_agent(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    agent_id: uuid.UUID | None = None,
+    *,
+    for_update: bool = False,
+) -> AgentConfig | None:
+    """Return the caller's agent (a specific one when agent_id is given), else None.
+
+    Ownership runs AgentConfig -> TradingAccount.user_id. The deterministic order means
+    the agent GET/PATCH /agent/config edits is the same agent POST /agent/cycles/run runs.
+    """
+    stmt = (
+        select(AgentConfig)
+        .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+        .where(TradingAccount.user_id == user_id)
+    )
+    if agent_id is not None:
+        stmt = stmt.where(AgentConfig.id == agent_id)
+    stmt = stmt.order_by(AgentConfig.created_at, AgentConfig.id).limit(1)
+    if for_update:
+        stmt = stmt.with_for_update(of=AgentConfig)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+@router.get(
+    "/config",
+    response_model=AgentConfigDetailRead,
+    summary="Get the caller's agent configuration",
+)
+async def get_agent_config(
+    agent_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AgentConfigDetailRead:
+    """Return the caller's agent config. Never provisions an agent (404 when none)."""
+    agent = await _get_owned_agent(db, current_user.id, agent_id)
+    if agent is None:
+        raise _agent_config_not_found(agent_id)
+    return AgentConfigDetailRead.model_validate(agent)
+
+
+@router.patch(
+    "/config",
+    response_model=AgentConfigDetailRead,
+    summary="Update the caller's agent watchlist / approval mode (operator)",
+)
+async def update_agent_config(
+    body: AgentConfigUpdate,
+    agent_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_operator),
+) -> AgentConfigDetailRead:
+    """Apply the changed fields and audit them in the same commit.
+
+    Only the watchlist and approval mode are editable (the body forbids every other
+    field). OPERATOR/ADMIN only: switching to AUTO removes human review, which a VIEWER
+    (who cannot approve trades) must not be able to do. The next cycle reads the new
+    values; risk policies still gate every order.
+    """
+    agent = await _get_owned_agent(db, current_user.id, agent_id, for_update=True)
+    if agent is None:
+        raise _agent_config_not_found(agent_id)
+
+    changes: dict[str, dict[str, Any]] = {}
+    current_watchlist = list(agent.watchlist or [])
+    if body.watchlist is not None and body.watchlist != current_watchlist:
+        changes["watchlist"] = {"from": current_watchlist, "to": list(body.watchlist)}
+        # Assign a NEW list: the JSON column is not mutation-tracked.
+        agent.watchlist = list(body.watchlist)
+    if body.approval_mode is not None and body.approval_mode != agent.approval_mode:
+        changes["approval_mode"] = {
+            "from": agent.approval_mode.value,
+            "to": body.approval_mode.value,
+        }
+        agent.approval_mode = body.approval_mode
+
+    if changes:
+        agent.version += 1
+        record_audit_event(
+            db,
+            event_type="AGENT_CONFIG_UPDATED",
+            entity_type="agent_config",
+            entity_id=agent.id,
+            actor_id=current_user.id,
+            details={"changes": changes},
+        )
+        await db.commit()
+        await db.refresh(agent)
+    return AgentConfigDetailRead.model_validate(agent)
+
+
 @router.post("/cycles/run", response_model=CycleRead, summary="Trigger manual agent cycle")
 async def trigger_manual_cycle(
     agent_id: uuid.UUID | None = None,
@@ -156,14 +262,7 @@ async def trigger_manual_cycle(
     Auto-creates a default agent if none exists.
     """
     if agent_id is None:
-        stmt = (
-            select(AgentConfig)
-            .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
-            .where(TradingAccount.user_id == current_user.id)
-            .limit(1)
-        )
-        res = await db.execute(stmt)
-        agent = res.scalar_one_or_none()
+        agent = await _get_owned_agent(db, current_user.id)
         if not agent:
             # Auto-provision default TradingAccount, PolicySet, and AgentConfig for instant testing
             acc_stmt = select(TradingAccount).where(TradingAccount.user_id == current_user.id)
@@ -208,15 +307,7 @@ async def trigger_manual_cycle(
 
         target_agent_id = agent.id
     else:
-        agent_result = await db.execute(
-            select(AgentConfig)
-            .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
-            .where(
-                AgentConfig.id == agent_id,
-                TradingAccount.user_id == current_user.id,
-            )
-        )
-        agent = agent_result.scalar_one_or_none()
+        agent = await _get_owned_agent(db, current_user.id, agent_id)
         if agent is None:
             raise HTTPException(status_code=404, detail="Agent not found")
         target_agent_id = agent.id

@@ -81,8 +81,14 @@ async def run_agent_cycle(
     gate; a sweep runs it once (first symbol) and skips it for the rest, so one
     tick can produce a cycle per symbol without each blocking the next.
     """
-    # 1. Fetch AgentConfig
-    stmt = select(AgentConfig).where(AgentConfig.id == agent_id)
+    # 1. Fetch AgentConfig. populate_existing re-reads the committed row even when the
+    # session already holds this agent (a sweep reuses one session), so a config change
+    # (PATCH /agent/config) applies to every later cycle, including the rest of a sweep.
+    stmt = (
+        select(AgentConfig)
+        .where(AgentConfig.id == agent_id)
+        .execution_options(populate_existing=True)
+    )
     res = await db.execute(stmt)
     agent = res.scalar_one_or_none()
     if not agent:
