@@ -83,16 +83,29 @@ async def agent_cycle_lock(db: AsyncSession, agent_id: uuid.UUID) -> AsyncIterat
     the same agent, so two concurrent cycles can never both submit an order. The
     Postgres advisory lock lives in its own transaction on a dedicated connection that
     stays open for the whole block: a lock taken on ``db`` itself would be released
-    by the cycle's first commit. Every exit path (return, exception, cancellation,
-    connection loss) ends that transaction, so the lock cannot leak.
+    by the cycle's first commit. Every exit path ends that transaction, so the lock
+    cannot leak. A release error (e.g. the connection dropped mid-run, which already
+    released the lock server-side) is logged, not raised, so a cycle that finished is
+    never reported as failed.
     """
     engine = db.bind
     if not isinstance(engine, AsyncEngine):
         raise RuntimeError("agent_cycle_lock requires a session bound to an AsyncEngine")
-    async with engine.connect() as conn, conn.begin():
-        if not await conn.scalar(_AGENT_LOCK_SQL, {"key": _agent_lock_key(agent_id)}):
-            raise CycleOverlapError(f"Agent '{agent_id}' already has a cycle in progress")
-        yield
+    async with engine.connect() as conn:
+        lock_txn = await conn.begin()
+        try:
+            if not await conn.scalar(_AGENT_LOCK_SQL, {"key": _agent_lock_key(agent_id)}):
+                raise CycleOverlapError(f"Agent '{agent_id}' already has a cycle in progress")
+            yield
+        finally:
+            try:
+                await lock_txn.rollback()  # ends the lock's transaction, releasing the lock
+            except Exception:
+                logger.warning(
+                    "Agent %s: cycle-lock connection was lost before release",
+                    agent_id,
+                    exc_info=True,
+                )
 
 
 async def run_agent_cycle(

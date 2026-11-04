@@ -9,13 +9,14 @@ see), so these tests fail without the lock.
 """
 
 import asyncio
+import logging
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from conftest import TestSessionLocal
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from test_multi_symbol_cycle import (
     _collector_for,
@@ -231,3 +232,28 @@ async def test_sweep_evaluates_each_symbol_once(db_session: AsyncSession):
     )
 
     assert [c.proposal_json["symbol"] for c in cycles] == WATCHLIST
+
+
+@pytest.mark.asyncio
+async def test_lost_lock_connection_does_not_fail_a_finished_run(caplog):
+    """If the lock's connection drops mid-run (e.g. a Postgres restart), the run that
+    already finished must not be reported as failed: Postgres has released the lock
+    with the connection, so the release error is only logged."""
+    agent_id = uuid.uuid4()
+    async with TestSessionLocal() as db:
+        with caplog.at_level(logging.WARNING, logger="app.agent.orchestrator"):
+            async with real_agent_cycle_lock(db, agent_id):
+                # Kill the backend holding the advisory lock, as a DB restart would.
+                killed = await db.scalar(
+                    text(
+                        "SELECT count(pg_terminate_backend(pid)) FROM pg_locks "
+                        "WHERE locktype = 'advisory' AND pid <> pg_backend_pid()"
+                    )
+                )
+                assert killed == 1
+        # Leaving the block did not raise; the lost connection was logged instead.
+        assert any("cycle-lock connection was lost" in r.message for r in caplog.records)
+
+        # The lock is free again for the next run.
+        async with real_agent_cycle_lock(db, agent_id):
+            pass
