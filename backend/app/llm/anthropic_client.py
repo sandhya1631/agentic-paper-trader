@@ -4,23 +4,9 @@ from typing import Any
 from anthropic import APIError, AsyncAnthropic, NotFoundError
 
 from app.llm.base import LLMClient, LLMHealth
+from app.llm.decision_schema import DECISION_JSON_SCHEMA
 
 logger = logging.getLogger(__name__)
-
-# Hand-written mirror of app.schemas.DecisionProposal (app.llm stays independent of
-# app.schemas); tests assert it cannot drift. Structured output makes Claude's text block
-# valid JSON of this shape, but validate_decision_proposal remains the authoritative check.
-DECISION_JSON_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "symbol": {"type": "string"},
-        "action": {"type": "string", "enum": ["BUY", "SELL", "HOLD"]},
-        "quantity": {"type": "integer"},
-        "reasoning": {"type": "string"},
-    },
-    "required": ["symbol", "action", "quantity", "reasoning"],
-    "additionalProperties": False,
-}
 
 # Thinking tokens count toward max_tokens, so leave generous headroom.
 _MAX_TOKENS = 16000

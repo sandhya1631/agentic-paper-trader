@@ -93,7 +93,6 @@ warn_redundant_casts = true
 # green. Remove these overrides as each module is cleaned up (tighten over time).
 [[tool.mypy.overrides]]
 module = [
-    "app.llm.openai_client",
     "app.broker.alpaca",
     "app.broker.router",
     "app.market_data.alpaca_client",

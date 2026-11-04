@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import os
 import subprocess
 import sys
@@ -6,15 +8,32 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import openai
 import pytest
 from httpx import AsyncClient
+from test_llm_output_failure import INVALID_1, VALID_HOLD, _run_inputs
 
+from app.agent.orchestrator import run_agent_cycle
+from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.core.config import Settings, get_settings
 from app.core.constants import SUPPORTED_PROVIDERS
+from app.db.enums import CycleStatus, DecisionAction
+from app.db.models import AgentCycle
 from app.llm.base import LLMHealth
+from app.llm.decision_schema import DECISION_JSON_SCHEMA
 from app.llm.factory import configured_model, create_llm_client
 from app.llm.ollama_client import OllamaClient
 from app.llm.openai_client import OpenAIClient
+from app.schemas import DecisionProposal
+
+OPENAI_SDK = "app.llm.openai_client.AsyncOpenAI"
+# Fake, key-shaped value used to prove a key never leaks; OpenAI quotes keys with the
+# middle masked, so the tests also look for its last 6 characters.
+CANARY_KEY = "sk-canary-test-K3Y9Q7"
+OPENAI_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {"name": "decision_proposal", "schema": DECISION_JSON_SCHEMA, "strict": True},
+}
 
 # --- /llm/health endpoint (no API call, no cost) ---
 
@@ -154,7 +173,58 @@ def test_anthropic_selected_without_sdk_errors_clearly(monkeypatch):
         create_llm_client(settings)
 
 
+# --- Shared decision schema (structured output for OpenAI and Claude) ---
+
+
+def test_decision_schema_matches_decision_proposal():
+    fields = set(DecisionProposal.model_fields)
+
+    assert set(DECISION_JSON_SCHEMA["properties"]) == fields
+    assert set(DECISION_JSON_SCHEMA["required"]) == fields
+    assert set(DECISION_JSON_SCHEMA["properties"]["action"]["enum"]) == {
+        action.value for action in DecisionAction
+    }
+    assert DECISION_JSON_SCHEMA["additionalProperties"] is False
+
+
+def test_decision_schema_module_is_provider_neutral():
+    """The shared schema imports no provider SDK and not app.schemas, so the OpenAI and
+    Ollama paths can never depend on the anthropic package."""
+    code = (
+        "import sys; sys.modules['anthropic'] = None; "
+        "import app.llm.decision_schema, app.llm.openai_client; "
+        "assert 'app.schemas' not in sys.modules; "
+        "assert 'app.llm.anthropic_client' not in sys.modules"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+
+
 # --- OpenAIClient ---
+
+
+def _mock_openai(sdk_cls: MagicMock) -> MagicMock:
+    """The patched AsyncOpenAI instance, usable as `async with AsyncOpenAI(...) as c`."""
+    sdk = sdk_cls.return_value
+    sdk.__aenter__.return_value = sdk
+    sdk.__aexit__.return_value = False
+    return sdk
+
+
+def _completion(content=None, *, refusal=None, finish_reason="stop") -> SimpleNamespace:
+    message = SimpleNamespace(content=content, refusal=refusal)
+    return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish_reason)])
+
+
+def _status_error(cls, status: int, message: str):
+    response = MagicMock(status_code=status, headers={"x-request-id": "req_OPENAI_SECRET_ID"})
+    return cls(message, response=response, body={"error": {"message": message}})
 
 
 def test_openai_client_requires_api_key():
@@ -164,25 +234,197 @@ def test_openai_client_requires_api_key():
 
 @pytest.mark.asyncio
 async def test_openai_client_generate_calls_chat_completions():
-    mock_message = MagicMock(content="hello from openai")
-    mock_completion = MagicMock(choices=[MagicMock(message=mock_message)])
-
-    with patch("app.llm.openai_client.AsyncOpenAI") as mock_openai_cls:
-        mock_instance = mock_openai_cls.return_value
-        mock_instance.chat.completions.create = AsyncMock(return_value=mock_completion)
+    with patch(OPENAI_SDK) as sdk_cls:
+        sdk = _mock_openai(sdk_cls)
+        sdk.chat.completions.create = AsyncMock(return_value=_completion("hello from openai"))
 
         client = OpenAIClient(api_key="fake-key", model="gpt-4o-mini")
         result = await client.generate("hi", system="be nice", temperature=0.5)
 
     assert result == "hello from openai"
-    mock_instance.chat.completions.create.assert_called_once_with(
+    # A fresh SDK client per call, with an explicit timeout and retry budget.
+    sdk_cls.assert_called_once_with(api_key="fake-key", timeout=120.0, max_retries=2)
+    sdk.chat.completions.create.assert_called_once_with(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "be nice"},
             {"role": "user", "content": "hi"},
         ],
         temperature=0.5,
+        response_format=OPENAI_RESPONSE_FORMAT,
     )
+    # Strict structured output uses the shared schema (the same object Claude is sent).
+    sent = sdk.chat.completions.create.await_args.kwargs["response_format"]
+    assert sent["json_schema"]["schema"] is DECISION_JSON_SCHEMA
+
+
+@pytest.mark.asyncio
+async def test_openai_generate_returns_refusals_and_bad_content_as_text(caplog):
+    """Content is never raised on: refusals, empty or malformed answers come back as text
+    so validation (and the orchestrator's single self-repair retry) decides."""
+    with patch(OPENAI_SDK) as sdk_cls:
+        sdk = _mock_openai(sdk_cls)
+        sdk.chat.completions.create = AsyncMock(
+            side_effect=[
+                _completion(refusal="I can't help with that."),
+                _completion(None),
+                _completion("not json"),
+                _completion('{"symbol": "AAPL"', finish_reason="length"),
+                SimpleNamespace(choices=[]),
+            ]
+        )
+        client = OpenAIClient(api_key=CANARY_KEY, model="gpt-4o-mini")
+
+        with caplog.at_level(logging.WARNING, logger="app.llm.openai_client"):
+            answers = [await client.generate("p") for _ in range(5)]
+
+    assert answers == ["", "", "not json", '{"symbol": "AAPL"', ""]
+    for raw in answers:
+        with pytest.raises(ToolValidationError):
+            validate_decision_proposal(raw)
+    assert "OpenAI refused the request" in caplog.text
+    assert "I can't help with that." not in caplog.text  # the refusal text is never logged
+    assert "finish_reason=length" in caplog.text
+    assert "had no choices" in caplog.text
+    assert CANARY_KEY not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_openai_malformed_output_triggers_cycle_self_repair():
+    agent, db, _, collector = _run_inputs()
+
+    with patch(OPENAI_SDK) as sdk_cls:
+        sdk = _mock_openai(sdk_cls)
+        sdk.chat.completions.create = AsyncMock(
+            side_effect=[_completion(INVALID_1), _completion(VALID_HOLD)]
+        )
+        llm_client = OpenAIClient(api_key="fake-key", model="gpt-4o-mini")
+
+        cycle = await run_agent_cycle(agent.id, db, llm_client=llm_client, collector=collector)
+
+    assert sdk.chat.completions.create.await_count == 2
+    assert cycle.status == CycleStatus.HOLD
+    assert cycle.failure_code is None
+    # The repair request is schema-constrained too.
+    for call in sdk.chat.completions.create.await_args_list:
+        assert call.kwargs["response_format"] == OPENAI_RESPONSE_FORMAT
+
+
+@pytest.mark.asyncio
+async def test_openai_api_errors_are_sanitized(caplog):
+    """An API failure surfaces only its type and HTTP status: the provider's response
+    body (which can quote part of the key), request id and the key never reach the
+    raised message (the cycle's failure_message, the API response and the UI)."""
+    body_text = f"Incorrect API key provided: {CANARY_KEY}. You can find your API key at ..."
+    auth_error = _status_error(openai.AuthenticationError, 401, f"Error code: 401 - {body_text}")
+    connection_error = openai.APIConnectionError(request=MagicMock())
+    timeout_error = openai.APITimeoutError(request=MagicMock())
+
+    with patch(OPENAI_SDK) as sdk_cls:
+        sdk = _mock_openai(sdk_cls)
+        sdk.chat.completions.create = AsyncMock(
+            side_effect=[auth_error, connection_error, timeout_error]
+        )
+        client = OpenAIClient(api_key=CANARY_KEY, model="gpt-4o-mini")
+
+        raised = []
+        with caplog.at_level(logging.WARNING, logger="app.llm.openai_client"):
+            for _ in range(3):
+                with pytest.raises(RuntimeError) as excinfo:
+                    await client.generate("p")
+                raised.append(excinfo.value)
+
+    assert [str(exc) for exc in raised] == [
+        "OpenAI API error: AuthenticationError (HTTP 401)",
+        "OpenAI API error: APIConnectionError",
+        "OpenAI API error: APITimeoutError",
+    ]
+    for exc in raised:
+        assert exc.__cause__ is None and exc.__suppress_context__
+        for leaked in (CANARY_KEY, CANARY_KEY[-6:], "Incorrect API key", "req_OPENAI_SECRET_ID"):
+            assert leaked not in str(exc)
+    # Server-side diagnostics keep the request id, never the key.
+    assert "req_OPENAI_SECRET_ID" in caplog.text
+    assert CANARY_KEY not in caplog.text and CANARY_KEY[-6:] not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_openai_api_error_never_reaches_the_cycle_record():
+    agent, db, _, collector = _run_inputs()
+    auth_error = _status_error(
+        openai.AuthenticationError, 401, f"Error code: 401 - Incorrect API key: {CANARY_KEY}"
+    )
+
+    with patch(OPENAI_SDK) as sdk_cls:
+        sdk = _mock_openai(sdk_cls)
+        sdk.chat.completions.create = AsyncMock(side_effect=auth_error)
+        llm_client = OpenAIClient(api_key=CANARY_KEY, model="gpt-4o-mini")
+
+        with pytest.raises(RuntimeError):
+            await run_agent_cycle(agent.id, db, llm_client=llm_client, collector=collector)
+
+    added = [call.args[0] for call in db.add.call_args_list]
+    cycle = next(row for row in added if isinstance(row, AgentCycle))
+    assert cycle.status == CycleStatus.FAILED
+    assert cycle.failure_code == "UNEXPECTED_ERROR"
+    assert cycle.failure_message == "OpenAI API error: AuthenticationError (HTTP 401)"
+    stored = " ".join(
+        str(value) for value in (cycle.failure_message, cycle.llm_raw_response, cycle.snapshot_json)
+    )
+    assert CANARY_KEY not in stored and CANARY_KEY[-6:] not in stored
+
+
+def test_openai_uses_a_fresh_sdk_client_per_call_across_event_loops():
+    """Celery runs each task under its own asyncio.run; the lru_cached client must not
+    reuse an SDK client (and its connection pool) from an event loop that has closed."""
+    instances: list[MagicMock] = []
+
+    def new_sdk(**kwargs):
+        sdk = MagicMock()
+        sdk.__aenter__.return_value = sdk
+        sdk.__aexit__.return_value = False
+        sdk.chat.completions.create = AsyncMock(return_value=_completion(VALID_HOLD))
+        instances.append(sdk)
+        return sdk
+
+    with patch(OPENAI_SDK, side_effect=new_sdk):
+        client = OpenAIClient(api_key="fake-key", model="gpt-4o-mini")
+        first = asyncio.run(client.generate("p"))
+        second = asyncio.run(client.generate("p"))
+
+    assert first == second == VALID_HOLD
+    assert len(instances) == 2
+    for sdk in instances:
+        sdk.chat.completions.create.assert_awaited_once()
+        sdk.__aexit__.assert_awaited_once()  # each client is closed inside its own loop
+
+
+@pytest.mark.asyncio
+async def test_openai_selected_without_key_errors_clearly(client: AsyncClient):
+    no_key = Settings(
+        _env_file=None, llm_provider="openai", openai_api_key=None, openai_model="gpt-4o-mini"
+    )
+
+    with pytest.raises(ValueError, match="OPENAI_API_KEY is required when LLM_PROVIDER=openai"):
+        create_llm_client(no_key)
+
+    with (
+        patch("app.llm.router.get_settings", return_value=no_key),
+        patch("app.llm.router.get_llm_client", side_effect=lambda: create_llm_client(no_key)),
+        patch(OPENAI_SDK) as sdk_cls,
+    ):
+        probe = await client.get("/llm/health?probe=true")
+
+    # Caught and reported unavailable (503), not an unhandled 500.
+    assert probe.status_code == 503
+    assert probe.json() == {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "reachable": False,
+        "model_available": False,
+        "detail": "LLM client unavailable: OPENAI_API_KEY is required when LLM_PROVIDER=openai",
+    }
+    sdk_cls.assert_not_called()  # no SDK client is ever built without a key
 
 
 # --- OllamaClient ---
@@ -272,29 +514,43 @@ async def test_ollama_health_check_unreachable_does_not_raise():
 @pytest.mark.asyncio
 async def test_openai_health_check_reachable():
     listing = MagicMock(data=[MagicMock(id="gpt-4o-mini"), MagicMock(id="gpt-4o")])
-    with patch("app.llm.openai_client.AsyncOpenAI") as mock_openai_cls:
-        mock_instance = mock_openai_cls.return_value
-        mock_instance.models.list = AsyncMock(return_value=listing)
+    other_models = MagicMock(data=[MagicMock(id="gpt-4o")])
+    empty = MagicMock(data=[])
+    with patch(OPENAI_SDK) as sdk_cls:
+        sdk = _mock_openai(sdk_cls)
+        sdk.models.list = AsyncMock(side_effect=[listing, other_models, empty])
 
         client = OpenAIClient(api_key="fake-key", model="gpt-4o-mini")
         health = await client.health_check()
+        missing = await client.health_check()
+        unlisted = await client.health_check()
 
     assert health.reachable is True
     assert health.model_available is True
     assert health.provider == "openai"
+    assert (missing.reachable, missing.model_available) == (True, False)
+    assert missing.detail == "Model 'gpt-4o-mini' not available to this account"
+    # An empty listing never claims the model is missing.
+    assert (unlisted.reachable, unlisted.model_available, unlisted.detail) == (True, True, "ok")
+    # A fresh SDK client per probe, with a short timeout.
+    assert sdk_cls.call_count == 3
+    sdk_cls.assert_called_with(api_key="fake-key", timeout=10.0, max_retries=2)
 
 
 @pytest.mark.asyncio
 async def test_openai_health_check_unreachable_does_not_raise():
-    with patch("app.llm.openai_client.AsyncOpenAI") as mock_openai_cls:
-        mock_instance = mock_openai_cls.return_value
-        mock_instance.models.list = AsyncMock(side_effect=RuntimeError("boom"))
+    with patch(OPENAI_SDK) as sdk_cls:
+        sdk = _mock_openai(sdk_cls)
+        sdk.models.list = AsyncMock(side_effect=RuntimeError(f"boom {CANARY_KEY}"))
 
-        client = OpenAIClient(api_key="fake-key", model="gpt-4o-mini")
+        client = OpenAIClient(api_key=CANARY_KEY, model="gpt-4o-mini")
         health = await client.health_check()
 
     assert health.reachable is False
     assert health.model_available is False
+    # Type name only: this detail is shown in the UI's header LLM pill.
+    assert health.detail == "OpenAI API unreachable: RuntimeError"
+    assert CANARY_KEY not in health.detail
 
 
 # --- Live integration test (requires a real, running Ollama with the model pulled) ---

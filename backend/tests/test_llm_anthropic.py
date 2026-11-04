@@ -19,10 +19,10 @@ from app.agent.orchestrator import run_agent_cycle
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.core.config import Settings
 from app.db.enums import CycleStatus, DecisionAction
-from app.llm.anthropic_client import DECISION_JSON_SCHEMA, AnthropicClient
+from app.llm.anthropic_client import AnthropicClient
 from app.llm.base import LLMHealth
+from app.llm.decision_schema import DECISION_JSON_SCHEMA
 from app.llm.factory import configured_model, create_llm_client
-from app.schemas import DecisionProposal
 
 FAKE_KEY = "sk-ant-test-not-a-real-key"
 MODEL = "claude-opus-5-5"
@@ -64,17 +64,6 @@ def test_factory_returns_anthropic_client():
     assert client.provider == "anthropic"
     assert configured_model(settings) == MODEL
     assert Settings.model_fields["anthropic_model"].default == "claude-opus-5-5"
-
-
-def test_decision_schema_matches_decision_proposal():
-    fields = set(DecisionProposal.model_fields)
-
-    assert set(DECISION_JSON_SCHEMA["properties"]) == fields
-    assert set(DECISION_JSON_SCHEMA["required"]) == fields
-    assert set(DECISION_JSON_SCHEMA["properties"]["action"]["enum"]) == {
-        action.value for action in DecisionAction
-    }
-    assert DECISION_JSON_SCHEMA["additionalProperties"] is False
 
 
 @pytest.mark.asyncio
