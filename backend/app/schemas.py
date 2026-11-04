@@ -84,11 +84,21 @@ class AgentConfigUpdate(BaseModel):
     ) = None
     approval_mode: ApprovalMode | None = None
 
-    @field_validator("watchlist")
+    @field_validator("watchlist", mode="before")
     @classmethod
-    def _dedupe_watchlist(cls, value: list[str] | None) -> list[str] | None:
-        # Order-preserving de-dupe of the already-normalized symbols.
-        return None if value is None else list(dict.fromkeys(value))
+    def _normalize_and_dedupe_watchlist(cls, value: Any) -> Any:
+        # Trim, upper-case and de-dupe (first occurrence kept) BEFORE the Ticker pattern
+        # and the size limit run, so the limit counts distinct symbols: 20 tickers plus
+        # a repeated "aapl" is 20 symbols, not 21. Anything that is not a list of strings
+        # passes through unchanged for the normal validation errors.
+        if not isinstance(value, list):
+            return value
+        normalized = [item.strip().upper() if isinstance(item, str) else item for item in value]
+        deduped: list[Any] = []
+        for item in normalized:
+            if not (isinstance(item, str) and item in deduped):
+                deduped.append(item)
+        return deduped
 
     @model_validator(mode="after")
     def _at_least_one_field_and_no_nulls(self) -> "AgentConfigUpdate":

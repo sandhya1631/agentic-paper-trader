@@ -235,8 +235,9 @@ unknown strategy version is rejected.
 
 The owner reads this row with `GET /agent/config`. An `OPERATOR` or `ADMIN` can
 change only `watchlist` and `approval_mode` with `PATCH /agent/config` (#141).
-Symbols are trimmed, upper-cased, pattern-checked and de-duplicated in order, and
-the list must hold 1 to `MAX_WATCHLIST_SIZE` (20) symbols; the cap is exposed as
+Symbols are trimmed, upper-cased and de-duplicated in order, then pattern-checked,
+and the de-duplicated list must hold 1 to `MAX_WATCHLIST_SIZE` (20) symbols (so a
+repeated symbol never counts twice toward the cap); the cap is exposed as
 `max_watchlist_size` by `GET /meta/constants`. Every other field, including
 `cadence_minutes` and the allocation/risk limits, is rejected with `422`. Each
 change increments `version` and writes one `audit_events` row in the same commit.
@@ -995,7 +996,7 @@ The direct order endpoint checks the kill switch, but it does not create the
 
 - `GET /agent/kill-switch`
 - `PUT /agent/kill-switch`
-- `GET /agent/config` (optional `?agent_id=`; `404` when the caller has no agent, never auto-provisions)
+- `GET /agent/config` (optional `?agent_id=`; `404` when the caller has no agent, never auto-provisions; a named `agent_id` the caller doesn't own is `404 "Agent not found"`)
 - `PATCH /agent/config` (optional `?agent_id=`; `watchlist` and/or `approval_mode` only)
 - `POST /agent/cycles/run`
 - `GET /agent/cycles/{cycle_id}`

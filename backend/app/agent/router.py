@@ -151,6 +151,14 @@ async def update_kill_switch(
 _NO_AGENT_DETAIL = "No agent configured yet. Trigger a cycle to create your default agent."
 
 
+def _agent_config_not_found(agent_id: uuid.UUID | None) -> HTTPException:
+    """404 for GET/PATCH /agent/config. A named agent_id that the caller doesn't own (or
+    that doesn't exist) is "Agent not found", which reveals nothing about other users'
+    agents; without an agent_id the caller simply has no agent yet."""
+    detail = "Agent not found" if agent_id is not None else _NO_AGENT_DETAIL
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+
+
 async def _get_owned_agent(
     db: AsyncSession,
     user_id: uuid.UUID,
@@ -189,7 +197,7 @@ async def get_agent_config(
     """Return the caller's agent config. Never provisions an agent (404 when none)."""
     agent = await _get_owned_agent(db, current_user.id, agent_id)
     if agent is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NO_AGENT_DETAIL)
+        raise _agent_config_not_found(agent_id)
     return AgentConfigDetailRead.model_validate(agent)
 
 
@@ -213,7 +221,7 @@ async def update_agent_config(
     """
     agent = await _get_owned_agent(db, current_user.id, agent_id, for_update=True)
     if agent is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NO_AGENT_DETAIL)
+        raise _agent_config_not_found(agent_id)
 
     changes: dict[str, dict[str, Any]] = {}
     current_watchlist = list(agent.watchlist or [])

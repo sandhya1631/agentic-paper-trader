@@ -250,6 +250,24 @@ async def test_patch_watchlist_persists_and_normalizes(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_patch_size_limit_counts_distinct_symbols(client: AsyncClient):
+    """The size limit applies after de-duplication: MAX_WATCHLIST_SIZE distinct tickers
+    plus a repeated one (in another case) is accepted as MAX_WATCHLIST_SIZE symbols."""
+    email = "cfg-size@example.com"
+    token = await _operator(client, email)
+    agent_id = await _seed_agent_for(email)
+    distinct = [f"S{i}" for i in range(MAX_WATCHLIST_SIZE - 1)] + ["AAPL"]
+
+    response = await client.patch(
+        "/agent/config", json={"watchlist": [*distinct, "aapl"]}, headers=_auth(token)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["watchlist"] == distinct
+    assert (await _load_agent(agent_id)).watchlist == distinct
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "payload",
     [
@@ -324,14 +342,20 @@ async def test_patch_is_owner_scoped(client: AsyncClient):
     agent_b = await _seed_agent_for("cfg-owner-b@example.com")
 
     # B cannot read or modify A's agent, even by naming it explicitly.
+    # A named agent_id gets "Agent not found", not the "no agent yet" hint.
     foreign_get = await client.get(f"/agent/config?agent_id={agent_a}", headers=_auth(token_b))
     assert foreign_get.status_code == 404
+    assert foreign_get.json()["detail"] == "Agent not found"
     foreign_patch = await client.patch(
         f"/agent/config?agent_id={agent_a}",
         json={"watchlist": ["TSLA"], "approval_mode": "AUTO"},
         headers=_auth(token_b),
     )
     assert foreign_patch.status_code == 404
+    assert foreign_patch.json()["detail"] == "Agent not found"
+    unknown = await client.get(f"/agent/config?agent_id={uuid.uuid4()}", headers=_auth(token_b))
+    assert unknown.status_code == 404
+    assert unknown.json()["detail"] == "Agent not found"
 
     # B's own PATCH changes only B's agent.
     own_patch = await client.patch(
