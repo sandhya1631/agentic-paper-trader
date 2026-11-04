@@ -9,6 +9,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
+from alpaca.common.enums import Sort
 from alpaca.common.exceptions import APIError
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical.stock import StockHistoricalDataClient
@@ -75,7 +76,10 @@ class MarketDataCollector:
             timeframe_minutes if timeframe_minutes is not None else self._default_timeframe_minutes
         )
         # A 30-day lookback window ensures enough 5-minute bars are returned across weekends,
-        # holidays, and non-trading hours to fulfill the requested `limit`.
+        # holidays, and non-trading hours to fulfill the requested `limit`. We request them
+        # newest-first (sort=desc) so the window's *latest* `limit` bars are returned — the
+        # default ascending order would return the oldest bars in the window, leaving the
+        # "latest" bar ~30 days stale — then reverse back to chronological below.
         start_time = datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
         result: dict[str, list[OHLCVBar]] = {symbol: [] for symbol in symbols}
@@ -88,6 +92,7 @@ class MarketDataCollector:
                 limit=limit,
                 start=start_time,
                 feed=DataFeed.IEX,
+                sort=Sort.DESC,
             )
             # Deliberately not caught here: a fetch/retry failure (APIError) or a
             # data-quality failure (MarketDataValidationError) must propagate, per the
@@ -110,6 +115,10 @@ class MarketDataCollector:
                 )
                 for bar in bars
             ]
+            # Alpaca returned newest-first (sort=desc); restore chronological
+            # order (oldest->newest) so consumers (charts, indicators, bars[-1])
+            # see the window's latest bars in natural order.
+            parsed.reverse()
             if validate:
                 from app.market_data.validation import validate_ohlcv_bars
                 parsed = validate_ohlcv_bars(sym, parsed, min_bars=effective_min_bars)
