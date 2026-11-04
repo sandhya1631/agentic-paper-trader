@@ -1,9 +1,11 @@
 """Agent Cycle Orchestrator Engine.
 
 Orchestrates automated and manual agent cycles:
-  1. Rejects the request if this agent already has a non-terminal cycle in
-     progress (`CycleOverlapError`). A scheduled watchlist sweep
-     (`run_watchlist_cycles`) checks this once, on its first symbol, so its own
+  1. Takes the agent's cycle lock (`agent_cycle_lock`, a Postgres advisory lock), so a
+     manual run and a scheduled watchlist sweep (`run_watchlist_cycles`) for the same
+     agent never run concurrently; then rejects the request if this agent already has
+     a non-terminal cycle in progress (`CycleOverlapError`). A sweep holds the lock for
+     all of its symbols and checks the status gate once, on its first symbol, so its own
      per-symbol cycles can coexist (e.g. several PENDING_APPROVAL in REQUIRED mode).
   2. Creates an `AgentCycle` record in PostgreSQL (`PENDING`).
   3. Collects OHLCV market bars for the watchlist and calculates indicators.
@@ -17,15 +19,17 @@ Orchestrates automated and manual agent cycles:
       `llm_raw_response`, `proposal_json`) to PostgreSQL and marks status `SUCCESS` or `FAILED`.
 """
 
+import contextlib
 import hashlib
 import json
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import BigInteger, bindparam, select, text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
 from app.agent.approval import (
@@ -60,6 +64,37 @@ class CycleOverlapError(Exception):
     """Raised when the agent already has a non-terminal cycle in progress."""
 
 
+_AGENT_LOCK_SQL = text("SELECT pg_try_advisory_xact_lock(:key)").bindparams(
+    bindparam("key", type_=BigInteger)
+)
+
+
+def _agent_lock_key(agent_id: uuid.UUID) -> int:
+    """A signed 64-bit advisory-lock key for the agent, identical in every process."""
+    digest = hashlib.blake2b(b"agent-cycle:" + agent_id.bytes, digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+@contextlib.asynccontextmanager
+async def agent_cycle_lock(db: AsyncSession, agent_id: uuid.UUID) -> AsyncIterator[None]:
+    """Hold this agent's cycle lock for the block, or raise CycleOverlapError at once.
+
+    Serializes a manual run (API process) and a scheduled sweep (Celery worker) for
+    the same agent, so two concurrent cycles can never both submit an order. The
+    Postgres advisory lock lives in its own transaction on a dedicated connection that
+    stays open for the whole block: a lock taken on ``db`` itself would be released
+    by the cycle's first commit. Every exit path (return, exception, cancellation,
+    connection loss) ends that transaction, so the lock cannot leak.
+    """
+    engine = db.bind
+    if not isinstance(engine, AsyncEngine):
+        raise RuntimeError("agent_cycle_lock requires a session bound to an AsyncEngine")
+    async with engine.connect() as conn, conn.begin():
+        if not await conn.scalar(_AGENT_LOCK_SQL, {"key": _agent_lock_key(agent_id)}):
+            raise CycleOverlapError(f"Agent '{agent_id}' already has a cycle in progress")
+        yield
+
+
 async def run_agent_cycle(
     agent_id: uuid.UUID,
     db: AsyncSession,
@@ -71,7 +106,36 @@ async def run_agent_cycle(
     bars_per_symbol: dict[str, list[Any]] | None = None,
     enforce_no_overlap: bool = True,
 ) -> AgentCycle:
-    """Execute a single end-to-end agent decision cycle.
+    """Run one decision cycle while holding the agent's cycle lock.
+
+    Raises CycleOverlapError at once if another cycle or sweep for this agent holds
+    the lock. See ``_run_agent_cycle`` for the parameters.
+    """
+    async with agent_cycle_lock(db, agent_id):
+        return await _run_agent_cycle(
+            agent_id,
+            db,
+            trigger=trigger,
+            llm_client=llm_client,
+            collector=collector,
+            target_symbol=target_symbol,
+            bars_per_symbol=bars_per_symbol,
+            enforce_no_overlap=enforce_no_overlap,
+        )
+
+
+async def _run_agent_cycle(
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    *,
+    trigger: CycleTrigger = CycleTrigger.MANUAL,
+    llm_client: LLMClient | None = None,
+    collector: MarketDataCollector | None = None,
+    target_symbol: str | None = None,
+    bars_per_symbol: dict[str, list[Any]] | None = None,
+    enforce_no_overlap: bool = True,
+) -> AgentCycle:
+    """Execute a single end-to-end agent decision cycle (caller holds the agent lock).
 
     When ``target_symbol`` is given, the decision is scoped to that symbol: the
     prompt is told to decide for it, and a proposal naming any other symbol is
@@ -393,7 +457,26 @@ async def run_watchlist_cycles(
     llm_client: LLMClient | None = None,
     collector: MarketDataCollector | None = None,
 ) -> list[AgentCycle]:
-    """Run one decision cycle per watchlist symbol in a single tick.
+    """Run a watchlist sweep while holding the agent's cycle lock for all of it.
+
+    Raises CycleOverlapError at once if another cycle or sweep for this agent holds
+    the lock. See ``_run_watchlist_cycles`` for the sweep itself.
+    """
+    async with agent_cycle_lock(db, agent_id):
+        return await _run_watchlist_cycles(
+            agent_id, db, trigger=trigger, llm_client=llm_client, collector=collector
+        )
+
+
+async def _run_watchlist_cycles(
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    *,
+    trigger: CycleTrigger = CycleTrigger.SCHEDULED,
+    llm_client: LLMClient | None = None,
+    collector: MarketDataCollector | None = None,
+) -> list[AgentCycle]:
+    """Run one decision cycle per watchlist symbol in a single tick (caller holds the lock).
 
     This is what makes the agent evaluate its whole watchlist instead of a single
     (historically AAPL-anchored) symbol. Market bars are fetched once for the
@@ -410,8 +493,9 @@ async def run_watchlist_cycles(
         raise ValueError(f"AgentConfig with id '{agent_id}' not found")
 
     # Normalize to the canonical upper-case form the Ticker type produces, so the
-    # per-symbol scope guard and P-005 compare against one consistent form.
-    symbols = [str(s).strip().upper() for s in (agent.watchlist or [])]
+    # per-symbol scope guard and P-005 compare against one consistent form, and drop
+    # duplicates so one sweep never evaluates (or orders) the same symbol twice.
+    symbols = list(dict.fromkeys(str(s).strip().upper() for s in (agent.watchlist or [])))
     if not symbols:
         return []
 
@@ -435,7 +519,7 @@ async def run_watchlist_cycles(
     last_error: Exception | None = None
     for index, symbol in enumerate(symbols):
         try:
-            cycle = await run_agent_cycle(
+            cycle = await _run_agent_cycle(
                 agent_id,
                 db,
                 trigger=trigger,

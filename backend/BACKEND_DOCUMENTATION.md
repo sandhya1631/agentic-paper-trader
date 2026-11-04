@@ -529,16 +529,21 @@ main sequence.
 
 ### Step 1: Load and gate the agent
 
+- Take the agent's cycle lock (`agent_cycle_lock`): a Postgres advisory try-lock
+  held on a dedicated connection for the whole run. If another cycle or sweep for
+  this agent already holds it, raise `CycleOverlapError` immediately.
 - Load `AgentConfig`.
 - Expire old pending approvals for this agent.
 - Search for a cycle in any active status.
 - If an active cycle is `RECONCILING`, try to reconcile its broker order first.
 - If an active cycle remains, raise `CycleOverlapError`.
 
-This prevents a new trigger from starting while the agent has a cycle in progress.
-Scheduled ticks use `run_watchlist_cycles()`, which runs one cycle per watchlist
-symbol (`target_symbol`) and checks this gate only on the first symbol, so the
-sweep's own per-symbol cycles may be active together.
+This prevents a new trigger from starting while the agent has a cycle in progress,
+including across processes: a manual run (API) and a scheduled sweep (Celery
+worker) for the same agent can never interleave (#156). Scheduled ticks use
+`run_watchlist_cycles()`, which holds the lock for the whole sweep, runs one cycle
+per de-duplicated watchlist symbol (`target_symbol`) and checks the status gate only
+on the first symbol, so the sweep's own per-symbol cycles may be active together.
 
 ### Step 2: Create the cycle
 
@@ -681,8 +686,8 @@ result contains complete evidence instead of stopping at the first failure.
 | P-003 | Market open | Requires Alpaca clock to report open. |
 | P-004 | Fresh data | Requires data age at most 600 seconds. |
 | P-005 | Symbol allowlist | Requires symbol in agent watchlist. |
-| P-007 | Maximum allocation | BUY projected symbol exposure must be at most configured max, default 10% of equity. |
-| P-008 | Available cash | BUY cost must fit cash minus configured reserve. |
+| P-007 | Maximum allocation | BUY projected exposure in that symbol must be at most configured max, default 10% of equity. Per symbol by design (#156), so the caps can add up across a watchlist. |
+| P-008 | Available cash | BUY cost must fit cash minus configured reserve. The aggregate backstop: total deployment stays at about (1 − reserve) of equity; unfilled orders are not counted. |
 | P-009 | Sell ownership | SELL quantity cannot exceed owned long position. |
 | P-010 | Open-order conflict | Rejects a symbol that already has an open order. |
 | P-011 | Daily loss | Rejects when daily P&L is at or below the configured loss limit. |
