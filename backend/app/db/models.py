@@ -31,6 +31,7 @@ from app.db.base import Base
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
+    AuditActorType,
     BrokerOrderStatus,
     CycleStatus,
     CycleTrigger,
@@ -234,6 +235,25 @@ class KillSwitchEvent(Base, UUIDPrimaryKey):
     new_enabled: Mapped[bool] = mapped_column(Boolean)
     outcome: Mapped[str] = mapped_column(String(30))
     reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+
+class AuditEvent(Base, UUIDPrimaryKey):
+    """Generic append-only audit trail (#141); the persisted form of `AuditEventRead`.
+
+    Written via app.audit.record_audit_event in the SAME transaction as the change it
+    records. First producer: AGENT_CONFIG_UPDATED from PATCH /agent/config.
+    actor_type is plain text (an AuditActorType value), so no Postgres enum type is needed.
+    """
+
+    __tablename__ = "audit_events"
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    actor_type: Mapped[str] = mapped_column(String(20), default=AuditActorType.USER.value)
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(50), index=True)
+    entity_type: Mapped[str] = mapped_column(String(50))
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    correlation_id: Mapped[uuid.UUID] = mapped_column(Uuid, default=uuid.uuid4, index=True)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class CycleApproval(Base, UUIDPrimaryKey):

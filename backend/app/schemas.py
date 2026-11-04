@@ -3,9 +3,16 @@ from decimal import Decimal
 from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
-from app.core.constants import DEFAULT_STRATEGY_VERSION
+from app.core.constants import DEFAULT_STRATEGY_VERSION, MAX_WATCHLIST_SIZE
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -50,6 +57,47 @@ class AgentConfigRead(APIModel):
     daily_loss_limit: Decimal = Decimal("0.02")
     approval_mode: ApprovalMode = ApprovalMode.REQUIRED
     enabled: bool = False
+
+
+class AgentConfigDetailRead(AgentConfigRead):
+    """GET/PATCH /agent/config response (#141): the agent config plus its watchlist.
+
+    A subclass rather than new AgentConfigRead fields, because AgentConfigRead is
+    embedded in PolicyInput. Allocation/risk limits and cadence are display-only here.
+    """
+
+    watchlist: list[str]
+
+
+class AgentConfigUpdate(BaseModel):
+    """PATCH /agent/config body (#141). Only the watchlist and approval mode are editable.
+
+    extra="forbid" makes any other field (cadence_minutes, risk limits, enabled,
+    strategy/model) a 422 instead of being silently ignored. Each symbol is a Ticker
+    (trimmed, upper-cased, pattern-checked); the binding allowlist stays P-005.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    watchlist: (
+        Annotated[list[Ticker], Field(min_length=1, max_length=MAX_WATCHLIST_SIZE)] | None
+    ) = None
+    approval_mode: ApprovalMode | None = None
+
+    @field_validator("watchlist")
+    @classmethod
+    def _dedupe_watchlist(cls, value: list[str] | None) -> list[str] | None:
+        # Order-preserving de-dupe of the already-normalized symbols.
+        return None if value is None else list(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def _at_least_one_field_and_no_nulls(self) -> "AgentConfigUpdate":
+        if not self.model_fields_set:
+            raise ValueError("Provide at least one of: watchlist, approval_mode")
+        for name in sorted(self.model_fields_set):
+            if getattr(self, name) is None:
+                raise ValueError(f"{name} cannot be null")
+        return self
 
 
 class DecisionProposal(APIModel):
