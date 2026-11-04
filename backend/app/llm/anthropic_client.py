@@ -1,7 +1,7 @@
 import logging
 from typing import Any
 
-from anthropic import AsyncAnthropic, NotFoundError
+from anthropic import APIError, AsyncAnthropic, NotFoundError
 
 from app.llm.base import LLMClient, LLMHealth
 
@@ -68,7 +68,8 @@ class AnthropicClient(LLMClient):
         (temperature/top_p/top_k). Output is constrained to DECISION_JSON_SCHEMA via
         structured output. Content is never raised on: a bad or empty answer is
         returned as-is (possibly "") so validate_decision_proposal can trigger the
-        orchestrator's self-repair retry.
+        orchestrator's self-repair retry. An API failure (auth, rate limit, network)
+        raises a RuntimeError naming only the error type and HTTP status.
         """
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -85,8 +86,26 @@ class AnthropicClient(LLMClient):
             kwargs["betas"] = [_FALLBACK_BETA]
             kwargs["fallbacks"] = "default"
 
-        async with self._new_client(_GENERATE_TIMEOUT) as client:
-            response = await client.beta.messages.create(**kwargs)
+        try:
+            async with self._new_client(_GENERATE_TIMEOUT) as client:
+                response = await client.beta.messages.create(**kwargs)
+        except APIError as exc:
+            # The SDK's message embeds the provider's response body (error JSON, request
+            # id). Log the diagnostics server-side and raise only the exception type and
+            # HTTP status, matching health_check(); `from None` keeps the original (and
+            # its body) out of the cycle's failure_message, the API response and the UI.
+            status_code = getattr(exc, "status_code", None)
+            logger.warning(
+                "Anthropic request failed: %s status=%s request_id=%s model=%s",
+                type(exc).__name__,
+                status_code,
+                getattr(exc, "request_id", None),
+                self._model,
+            )
+            status_part = f" (HTTP {status_code})" if status_code is not None else ""
+            raise RuntimeError(
+                f"Anthropic API error: {type(exc).__name__}{status_part}"
+            ) from None
 
         if response.stop_reason in ("refusal", "max_tokens"):
             category = getattr(getattr(response, "stop_details", None), "category", None)

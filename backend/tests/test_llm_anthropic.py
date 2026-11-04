@@ -152,6 +152,44 @@ async def test_anthropic_generate_omits_fallbacks_for_other_models():
 
 
 @pytest.mark.asyncio
+async def test_anthropic_api_errors_are_sanitized(caplog):
+    """An API failure surfaces only its type and HTTP status: the provider's response
+    body, request id and the key never reach the raised message (which becomes the
+    cycle's failure_message, the API response and the UI); diagnostics go to the log."""
+    body = {
+        "type": "error",
+        "error": {"type": "authentication_error", "message": "invalid x-api-key"},
+    }
+    auth_error = anthropic.AuthenticationError(
+        f"Error code: 401 - {body} {FAKE_KEY}",
+        response=MagicMock(status_code=401, headers={"request-id": "req_E2E_SECRET_ID"}),
+        body=body,
+    )
+    connection_error = anthropic.APIConnectionError(request=MagicMock())
+
+    with patch(SDK) as sdk_cls:
+        sdk = _mock_sdk(sdk_cls)
+        sdk.beta.messages.create = AsyncMock(side_effect=[auth_error, connection_error])
+        client = AnthropicClient(api_key=FAKE_KEY, model=MODEL)
+
+        with caplog.at_level(logging.WARNING, logger="app.llm.anthropic_client"):
+            with pytest.raises(RuntimeError) as auth_raised:
+                await client.generate("p")
+            with pytest.raises(RuntimeError) as connection_raised:
+                await client.generate("p")
+
+    assert str(auth_raised.value) == "Anthropic API error: AuthenticationError (HTTP 401)"
+    assert str(connection_raised.value) == "Anthropic API error: APIConnectionError"
+    for raised in (auth_raised.value, connection_raised.value):
+        assert raised.__cause__ is None and raised.__suppress_context__
+        for leaked in ("invalid x-api-key", "authentication_error", "req_E2E_SECRET_ID", FAKE_KEY):
+            assert leaked not in str(raised)
+    # Server-side diagnostics keep the request id, never the key.
+    assert "req_E2E_SECRET_ID" in caplog.text
+    assert FAKE_KEY not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_anthropic_malformed_output_triggers_cycle_self_repair():
     agent, db, _, collector = _run_inputs()
 

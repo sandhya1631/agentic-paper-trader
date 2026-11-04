@@ -1117,7 +1117,7 @@ async context-manager methods. Function locations are relative to `backend`.
 | `OpenAIClient.generate` | `app/llm/openai_client.py` | Calls OpenAI chat completions. |
 | `OpenAIClient.health_check` | `app/llm/openai_client.py` | Lists OpenAI models and checks availability. |
 | `AnthropicClient.__init__` | `app/llm/anthropic_client.py` | Requires an API key and stores the model. |
-| `AnthropicClient.generate` | `app/llm/anthropic_client.py` | Calls the Messages API with structured JSON output; returns the text blocks. |
+| `AnthropicClient.generate` | `app/llm/anthropic_client.py` | Calls the Messages API with structured JSON output; returns the text blocks. An API error raises a `RuntimeError` naming only its type and HTTP status (the provider's body and request id are logged server-side, never returned). |
 | `AnthropicClient.health_check` | `app/llm/anthropic_client.py` | Retrieves the model and checks reachability/availability. |
 | `llm_health` | `app/llm/router.py` | Echoes configuration or performs an active LLM probe. |
 
