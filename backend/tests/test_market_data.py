@@ -13,9 +13,9 @@ from app.market_data.alpaca_client import (
 )
 
 
-def _make_bar(price: float) -> MagicMock:
+def _make_bar(price: float, minute: int = 0) -> MagicMock:
     bar = MagicMock()
-    bar.timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    bar.timestamp = datetime(2026, 1, 1, 0, minute, tzinfo=timezone.utc)
     bar.open = price
     bar.high = price + 1
     bar.low = price - 1
@@ -42,14 +42,23 @@ def test_collector_requires_credentials():
 
 @pytest.mark.asyncio
 async def test_fetch_latest_bars_parses_response():
+    """Issue #151: the request asks Alpaca for newest-first bars (sort=desc) and the
+    collector reverses them back to chronological (oldest->newest) for its consumers."""
+    from alpaca.common.enums import Sort
+
     collector = MarketDataCollector(api_key="fake-key", api_secret="fake-secret")
 
+    # Alpaca returns newest-first under sort=desc (minute 5 is newer than minute 0).
     fake_bar_set = MagicMock()
-    fake_bar_set.data = {"AAPL": [_make_bar(150.0), _make_bar(151.0)]}
+    fake_bar_set.data = {"AAPL": [_make_bar(151.0, minute=5), _make_bar(150.0, minute=0)]}
 
-    with patch.object(collector._client, "get_stock_bars", return_value=fake_bar_set):
+    mock_get = MagicMock(return_value=fake_bar_set)
+    with patch.object(collector._client, "get_stock_bars", mock_get):
         result = await collector.fetch_latest_bars(["AAPL"], limit=2)
 
+    # Outbound request asked for newest-first data.
+    assert mock_get.call_args.args[0].sort == Sort.DESC
+    # Result restored to chronological order: oldest first, latest last.
     assert list(result.keys()) == ["AAPL"]
     assert len(result["AAPL"]) == 2
     assert result["AAPL"][0].close == 150.0

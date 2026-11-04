@@ -140,6 +140,13 @@ class AlpacaClient:
         returned early in the trading session, and across weekends/holidays,
         to fulfill `limit` - without a `start`, Alpaca only returns bars from
         the current session so far, which can be far short of `limit`.
+
+        `sort=desc` makes Alpaca return the **newest** `limit` bars in the
+        window (newest-first); without it the default ascending order returns
+        the *oldest* bars in the 30-day window, making `bars[-1]` ~30 days
+        stale and failing the P-004 freshness policy. We reverse the result
+        back to chronological (oldest->newest) so downstream code — indicators
+        and `bars[-1]` as "latest" — behaves unchanged.
         """
         url = f"{self.data_base_url}/v2/stocks/bars"
         start = datetime.now(timezone.utc) - timedelta(days=lookback_days)
@@ -149,6 +156,7 @@ class AlpacaClient:
             "limit": limit,
             "feed": ALPACA_DATA_FEED,
             "start": start.isoformat(),
+            "sort": "desc",
         }
         client = self._get_client()
         resp = await client.get(url, headers=self.headers, params=params, timeout=10.0)
@@ -156,6 +164,9 @@ class AlpacaClient:
         data = resp.json()
 
         symbol_bars = data.get("bars", {}).get(symbol.upper(), [])
+        # Alpaca returned newest-first (sort=desc); restore chronological order
+        # (oldest->newest) so bars[-1] is the latest bar and indicators compute in order.
+        symbol_bars.reverse()
         return symbol_bars
 
     async def get_market_snapshot(self, symbol: str) -> MarketSnapshotRead:
