@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 
 from app.agent.orchestrator import run_watchlist_cycles
 from app.core.constants import DEFAULT_WATCHLIST, MAX_WATCHLIST_SIZE
-from app.db.enums import ApprovalMode, CycleStatus, CycleTrigger, UserRole
+from app.db.enums import ApprovalMode, CycleStatus, CycleTrigger, PolicyDecisionType, UserRole
 from app.db.models import (
     AgentConfig,
     AuditEvent,
@@ -510,3 +510,53 @@ async def test_next_cycle_uses_updated_watchlist(client: AsyncClient):
     assert [c.proposal_json["symbol"] for c in cycles] == ["MSFT", "TSLA"]
     assert all(c.snapshot_json["watchlist"] == ["MSFT", "TSLA"] for c in cycles)
     assert sweep_collector.fetch_latest_bars.await_args.args[0] == ["MSFT", "TSLA"]
+
+
+@pytest.mark.asyncio
+async def test_config_change_mid_sweep_applies_to_remaining_symbols(client: AsyncClient):
+    """A PATCH that commits while a sweep is running applies to the sweep's later symbols.
+
+    The sweep reuses one session, so without re-reading the row its later cycles would
+    keep the approval mode the sweep started with (e.g. keep auto-submitting after the
+    operator turned AUTO off).
+    """
+    email = "cfg-midsweep@example.com"
+    token = await _operator(client, email)
+    agent_id = await _seed_agent_for(
+        email, watchlist=["AAPL", "NVDA"], approval_mode=ApprovalMode.AUTO
+    )
+
+    calls = 0
+
+    async def gen(prompt_input: str, system: str | None = None) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:  # the operator turns AUTO off while AAPL is being decided
+            response = await client.patch(
+                "/agent/config", json={"approval_mode": "OBSERVE_ONLY"}, headers=_auth(token)
+            )
+            assert response.status_code == 200
+        target = json.loads(prompt_input)["decision_target"]
+        return json.dumps(
+            {"symbol": target, "action": "BUY", "quantity": 1, "reasoning": REASONING}
+        )
+
+    llm = MagicMock()
+    llm.generate = AsyncMock(side_effect=gen)
+    allow = MagicMock()
+    allow.decision = PolicyDecisionType.ALLOW
+    allow.model_dump = MagicMock(return_value={"decision": "ALLOW", "evaluations": []})
+    order = MagicMock()
+    order.status.value = "SUBMITTED"
+    gate = AsyncMock(return_value=(allow, order))
+
+    with patch("app.agent.orchestrator.evaluate_and_submit_cycle_trade", gate):
+        async with TestSessionLocal() as db:
+            cycles = await run_watchlist_cycles(
+                agent_id, db, llm_client=llm, collector=_collector_for(["AAPL", "NVDA"])
+            )
+
+    # AAPL's cycle had already loaded AUTO; NVDA's cycle re-reads the row.
+    assert gate.await_count == 1
+    assert [c.proposal_json["symbol"] for c in cycles] == ["AAPL", "NVDA"]
+    assert cycles[1].snapshot_json["execution_status"] == "OBSERVE_ONLY"

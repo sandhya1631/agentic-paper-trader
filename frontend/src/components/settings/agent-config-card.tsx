@@ -105,6 +105,7 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
   function onSymbolChange(value: string) {
     setSymbolInput(value);
     setPreview(null);
+    previewRequest.current++; // drop any preview still loading for the previous input
   }
 
   async function onPreview(event?: React.FormEvent) {

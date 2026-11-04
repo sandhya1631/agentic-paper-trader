@@ -414,7 +414,7 @@ reconciliation.
 | Downloaded Ollama models | Ollama container filesystem | Durable in Compose | Pulled model files | `ollama_data` Docker volume; not PostgreSQL or Redis |
 | Logs and exceptions | Application process logging destination | Deployment-dependent | Operational messages and stack traces | Observability only; not a structured business-data store |
 
-### 4.12 Storage boundaries in one request
+### 4.13 Storage boundaries in one request
 
 For a scheduled trade, the storage sequence is:
 
