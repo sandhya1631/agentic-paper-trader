@@ -299,6 +299,28 @@ async def test_sweep_continues_after_one_symbol_errors(db_session: AsyncSession)
 
 
 @pytest.mark.asyncio
+async def test_sweep_raises_when_every_symbol_fails(db_session: AsyncSession):
+    """If no symbol succeeds (e.g. the LLM is down), the sweep surfaces the error so
+    the scheduler reports the tick as FAILED instead of an all-OK sweep."""
+    watchlist = ["AAPL", "NVDA"]
+    agent = await _seed_agent(db_session, watchlist=watchlist, approval_mode=ApprovalMode.REQUIRED)
+    llm = MagicMock()
+    llm.generate = AsyncMock(side_effect=RuntimeError("LLM unreachable"))
+
+    with pytest.raises(RuntimeError, match="LLM unreachable"):
+        await run_watchlist_cycles(
+            agent.id, db_session, llm_client=llm, collector=_collector_for(watchlist)
+        )
+
+    # Each attempted symbol still left an audited FAILED cycle.
+    rows = (
+        await db_session.execute(select(AgentCycle).where(AgentCycle.agent_id == agent.id))
+    ).scalars().all()
+    assert len(rows) == len(watchlist)
+    assert all(r.status == CycleStatus.FAILED for r in rows)
+
+
+@pytest.mark.asyncio
 async def test_sweep_executes_each_symbol_in_auto_mode(db_session: AsyncSession):
     """AUTO mode: each per-symbol cycle runs the execution gate and, on approval,
     reaches COMPLETED with a submitted broker order for that symbol."""

@@ -1,7 +1,11 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.core.constants import DEFAULT_PROMPT_REVISION, DEFAULT_STRATEGY_VERSION
+from app.core.constants import DEFAULT_STRATEGY_VERSION
+
+# Revision backfilled onto cycles created before prompt-revision tracking existed —
+# they ran the original S-001 prompt, so they must not take the current revision.
+LEGACY_PROMPT_REVISION = "1.0.0"
 
 
 async def ensure_agent_cycle_prompt_columns(conn: AsyncConnection) -> None:
@@ -17,7 +21,7 @@ async def ensure_agent_cycle_prompt_columns(conn: AsyncConnection) -> None:
         text(
             "ALTER TABLE agent_cycles "
             "ADD COLUMN IF NOT EXISTS prompt_revision VARCHAR(30) "
-            f"NOT NULL DEFAULT '{DEFAULT_PROMPT_REVISION}'"
+            f"NOT NULL DEFAULT '{LEGACY_PROMPT_REVISION}'"
         )
     )
 

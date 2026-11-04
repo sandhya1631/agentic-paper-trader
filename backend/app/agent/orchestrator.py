@@ -2,7 +2,9 @@
 
 Orchestrates automated and manual agent cycles:
   1. Rejects the request if this agent already has a non-terminal cycle in
-     progress (`CycleOverlapError`) — active cycles never overlap.
+     progress (`CycleOverlapError`). A scheduled watchlist sweep
+     (`run_watchlist_cycles`) checks this once, on its first symbol, so its own
+     per-symbol cycles can coexist (e.g. several PENDING_APPROVAL in REQUIRED mode).
   2. Creates an `AgentCycle` record in PostgreSQL (`PENDING`).
   3. Collects OHLCV market bars for the watchlist and calculates indicators.
   4. Builds sanitized context via `build_agent_context`.
@@ -398,7 +400,9 @@ async def run_watchlist_cycles(
     watchlist and reused across the per-symbol cycles. The active-cycle gate runs
     once (on the first symbol); if the agent already has a cycle in progress,
     CycleOverlapError propagates and no symbols run - matching the previous
-    per-agent scheduled behaviour.
+    per-agent scheduled behaviour. A failing symbol is logged (its cycle is persisted
+    as FAILED) and the sweep continues; if every symbol fails, the last error is
+    re-raised so the scheduler counts the agent as failed.
     """
     agent_res = await db.execute(select(AgentConfig).where(AgentConfig.id == agent_id))
     agent = agent_res.scalar_one_or_none()
@@ -428,6 +432,7 @@ async def run_watchlist_cycles(
             bars_per_symbol = {}
 
     cycles: list[AgentCycle] = []
+    last_error: Exception | None = None
     for index, symbol in enumerate(symbols):
         try:
             cycle = await run_agent_cycle(
@@ -447,8 +452,13 @@ async def run_watchlist_cycles(
             # Only the first symbol runs the gate, so this means the agent is already
             # busy: skip the whole tick, matching the previous per-agent behaviour.
             raise
-        except Exception:
+        except Exception as exc:
             # One symbol's transient failure (e.g. LLM timeout) must not drop the
             # rest of the watchlist for this tick.
             logger.exception("Watchlist sweep: cycle failed for %s; continuing", symbol)
+            last_error = exc
+    if last_error is not None and not cycles:
+        # Every symbol failed (e.g. the LLM is unreachable): surface it so the scheduler
+        # reports the tick as FAILED instead of a misleading all-OK sweep.
+        raise last_error
     return cycles

@@ -20,6 +20,7 @@ from app.agent.approval import reconcile_uncertain_cycle
 from app.agent.context import build_agent_context
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.agent.prompt import get_prompt_definition, get_system_prompt
+from app.core.constants import DEFAULT_PROMPT_REVISION
 from app.db.enums import ApprovalMode, ApprovalStatus, CycleStatus, CycleTrigger, UserRole
 from app.db.models import (
     AgentConfig,
@@ -107,8 +108,8 @@ def test_agent_config_rejects_unknown_strategy_version_on_creation():
 def test_get_prompt_definition_records_revision_separately():
     definition = get_prompt_definition("S-001")
 
-    assert definition.revision == "1.0.0"
-    assert "PROMPT REVISION: 1.0.0" in definition.text
+    assert definition.revision == DEFAULT_PROMPT_REVISION
+    assert f"PROMPT REVISION: {DEFAULT_PROMPT_REVISION}" in definition.text
 
 
 def test_build_agent_context():
@@ -205,7 +206,7 @@ async def test_run_agent_cycle_success(db_session: AsyncSession):
     }
     assert cycle.snapshot_json["execution_status"] == "PENDING_APPROVAL"
     assert cycle.prompt_version == agent.strategy_version
-    assert cycle.prompt_revision == "1.0.0"
+    assert cycle.prompt_revision == DEFAULT_PROMPT_REVISION
     assert "S-001" in cycle.prompt_text
     assert mock_llm.generate.await_args.kwargs["system"] == get_system_prompt("S-001")
     assert cycle.approval.status == ApprovalStatus.PENDING

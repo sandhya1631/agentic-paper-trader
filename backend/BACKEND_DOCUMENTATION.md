@@ -501,7 +501,8 @@ The LLM may return only a `DecisionProposal`:
 
 Rules:
 
-- Symbol must be one of `AAPL`, `NVDA`, or `SPY`.
+- Symbol must be a well-formed ticker (normalized to upper case). Watchlist membership
+  is not checked here; policy P-005 enforces it at execution time.
 - Action must be `BUY`, `SELL`, or `HOLD`.
 - BUY/SELL quantity must be positive.
 - HOLD quantity defaults to zero.
@@ -534,7 +535,10 @@ main sequence.
 - If an active cycle is `RECONCILING`, try to reconcile its broker order first.
 - If an active cycle remains, raise `CycleOverlapError`.
 
-This prevents two cycles for the same agent from running at the same time.
+This prevents a new trigger from starting while the agent has a cycle in progress.
+Scheduled ticks use `run_watchlist_cycles()`, which runs one cycle per watchlist
+symbol (`target_symbol`) and checks this gate only on the first symbol, so the
+sweep's own per-symbol cycles may be active together.
 
 ### Step 2: Create the cycle
 

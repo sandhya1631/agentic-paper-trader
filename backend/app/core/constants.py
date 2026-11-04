@@ -41,7 +41,9 @@ ACTIVE_CYCLE_STATUSES = (
     CycleStatus.RECONCILING,
 )
 DEFAULT_STRATEGY_VERSION = "S-001"
-DEFAULT_PROMPT_REVISION = "1.0.0"
+# Bump whenever the S-001 prompt text changes, so each cycle's audit record names the
+# exact prompt it ran. 1.1.0 (#153): per-symbol `decision_target`, no hardcoded tickers.
+DEFAULT_PROMPT_REVISION = "1.1.0"
 
 # --- Broker credential vault ---
 ALPACA_PROVIDER = "ALPACA"

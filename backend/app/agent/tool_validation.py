@@ -34,8 +34,9 @@ def validate_decision_proposal(raw: str | bytes | dict) -> DecisionProposal:
     Raises `ToolValidationError` — never an unhandled exception — for:
       - malformed JSON
       - a JSON value that isn't an object
-      - a well-formed object that fails DecisionProposal's schema (bad action, symbol
-        outside the watchlist, non-positive quantity, missing fields, etc.)
+      - a well-formed object that fails DecisionProposal's schema (bad action,
+        malformed ticker, non-positive quantity, missing fields, etc.)
+    Watchlist membership is NOT checked here; policy P-005 enforces it at execution.
     """
     try:
         data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw

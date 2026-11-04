@@ -24,9 +24,9 @@ from app.db.enums import (
 Money = Decimal
 
 # A tradable ticker. Deliberately a validated string, not a fixed enum: the
-# watchlist is per-agent and user-editable (#138/#141), so proposals must be
-# able to name any symbol. Normalized to upper-case; the *real* allowlist is
-# enforced at policy time by P-005 (`symbol in watchlist`), not by this type.
+# watchlist is per-agent (and slated to become user-editable, #141), so proposals
+# must be able to name any symbol. Normalized to upper-case; the *real* allowlist
+# is enforced at policy time by P-005 (`symbol in watchlist`), not by this type.
 Ticker = Annotated[
     str,
     StringConstraints(
