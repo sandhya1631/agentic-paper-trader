@@ -120,7 +120,7 @@ Important settings:
 | `ALPACA_PAPER_BASE_URL` | Must be `https://paper-api.alpaca.markets` with optional `/v2`. |
 | `LLM_PROVIDER` | `ollama`, `openai` or `anthropic`; defaults to `ollama`. |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local LLM connection. |
-| `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI connection. |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI connection; `OPENAI_MODEL` (default `gpt-4o-mini`) must support strict structured output (`json_schema`) and `temperature`. |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Anthropic (Claude) connection; model defaults to `claude-opus-5-5`. |
 | `CREDENTIAL_ENCRYPTION_KEY` | Required Fernet key for user Alpaca credentials. |
 | `SCHEDULER_ENABLED` | Enables the global APScheduler job; defaults to false. |
@@ -1113,9 +1113,10 @@ async context-manager methods. Function locations are relative to `backend`.
 | `OllamaClient.__init__` | `app/llm/ollama_client.py` | Stores Ollama URL and model. |
 | `OllamaClient.generate` | `app/llm/ollama_client.py` | Calls Ollama `/api/chat` without streaming. |
 | `OllamaClient.health_check` | `app/llm/ollama_client.py` | Checks Ollama reachability and installed model. |
-| `OpenAIClient.__init__` | `app/llm/openai_client.py` | Requires an API key and stores the model. |
-| `OpenAIClient.generate` | `app/llm/openai_client.py` | Calls OpenAI chat completions. |
-| `OpenAIClient.health_check` | `app/llm/openai_client.py` | Lists OpenAI models and checks availability. |
+| `DECISION_JSON_SCHEMA` | `app/llm/decision_schema.py` | Provider-neutral decision schema used for structured output by the OpenAI and Anthropic clients (imports no SDK). |
+| `OpenAIClient.__init__` | `app/llm/openai_client.py` | Requires an API key and stores it with the model; an SDK client is created per call. |
+| `OpenAIClient.generate` | `app/llm/openai_client.py` | Calls chat completions with strict structured JSON output; a refusal returns `""`. An API error raises a `RuntimeError` naming only its type and HTTP status (the provider's body and request id are logged server-side, never returned). |
+| `OpenAIClient.health_check` | `app/llm/openai_client.py` | Lists OpenAI models and checks availability; on failure the detail names only the exception type. |
 | `AnthropicClient.__init__` | `app/llm/anthropic_client.py` | Requires an API key and stores the model. |
 | `AnthropicClient.generate` | `app/llm/anthropic_client.py` | Calls the Messages API with structured JSON output; returns the text blocks. An API error raises a `RuntimeError` naming only its type and HTTP status (the provider's body and request id are logged server-side, never returned). |
 | `AnthropicClient.health_check` | `app/llm/anthropic_client.py` | Retrieves the model and checks reachability/availability. |

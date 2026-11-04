@@ -117,8 +117,16 @@ LLM_PROVIDER=ollama   # or "openai" / "anthropic"
 - `ollama`: requires a local [Ollama](https://ollama.com) server running (`OLLAMA_BASE_URL`, default
   `http://localhost:11434`) with the model pulled (`OLLAMA_MODEL`, default `llama3.1`).
 - `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
+  Replies are constrained to the decision JSON schema (strict structured output), so
+  `OPENAI_MODEL` must support structured output and `temperature` (`gpt-4o-mini` does); other
+  models get HTTP 400 on every call.
 - `anthropic`: requires `ANTHROPIC_API_KEY` set; model via `ANTHROPIC_MODEL` (default
   `claude-opus-5-5`). Replies are constrained to the decision JSON schema (structured output).
+
+Both cloud providers use the same decision schema (`app/llm/decision_schema.py`) and report an
+API failure only as `<Provider> API error: <Type> (HTTP <status>)`: the provider's response body,
+request id and key never reach the cycle record, API responses or the UI (diagnostics are logged
+server-side). `validate_decision_proposal` remains the authoritative check for every provider.
 
 #### Install & verify the local LLM
 
