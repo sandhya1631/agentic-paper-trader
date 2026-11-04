@@ -2,10 +2,11 @@
  * Market-data API seam — typed wrappers over the read-only market-data endpoints
  * (#142). The shared api client attaches the Bearer token and handles 401 globally.
  *
- * NOTE: `/market-data/bars` may return stale bars in this environment (a known
- * collector bug returns the oldest bars in the lookback window, not the newest).
- * The UI handles that by flagging staleness rather than hiding it — see
- * `freshness.ts`.
+ * NOTE: bars can still be legitimately stale — outside regular US market hours the
+ * newest 5-minute bar is from the last session. The UI flags staleness rather than
+ * hiding it (see `freshness.ts`), matching the backend's P-004 policy, which denies
+ * trades on data older than 600 s. (The old "oldest bars returned" collector bug was
+ * fixed in #151.)
  */
 import { api } from "@/lib/api/client";
 
