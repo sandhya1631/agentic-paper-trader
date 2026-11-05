@@ -124,9 +124,11 @@ LLM_PROVIDER=ollama   # or "openai" / "anthropic"
   `claude-opus-5-5`). Replies are constrained to the decision JSON schema (structured output).
 
 Both cloud providers use the same decision schema (`app/llm/decision_schema.py`) and report an
-API failure only as `<Provider> API error: <Type> (HTTP <status>)`: the provider's response body,
-request id and key never reach the cycle record, API responses or the UI (diagnostics are logged
-server-side). `validate_decision_proposal` remains the authoritative check for every provider.
+API failure only as `<Provider> API error: <Type>`, plus ` (HTTP <status>)` when the provider
+answered (connection errors and timeouts have none). The provider's response body and the key
+never reach the cycle record, API responses, the UI or the log; the error type, HTTP status and
+request id are logged server-side. `validate_decision_proposal` remains the authoritative check
+for every provider.
 
 #### Install & verify the local LLM
 

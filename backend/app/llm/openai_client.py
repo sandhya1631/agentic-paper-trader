@@ -56,10 +56,11 @@ class OpenAIClient(LLMClient):
         """Return the model's JSON decision text for the prompt.
 
         Output is constrained to DECISION_JSON_SCHEMA via structured output. Content is
-        never raised on: a refusal, an empty answer or malformed text is returned as text
-        (possibly "") so validate_decision_proposal can trigger the orchestrator's
-        self-repair retry. An API failure (auth, rate limit, network, timeout) raises a
-        RuntimeError naming only the error type and HTTP status.
+        never raised on: a refusal (its text), an empty answer or malformed text is
+        returned as text (possibly "") so validate_decision_proposal can trigger the
+        orchestrator's self-repair retry. An API failure (auth, rate limit, network,
+        timeout) raises a RuntimeError naming only the error type and, when the provider
+        answered, its HTTP status.
         """
         messages: list[ChatCompletionMessageParam] = []
         if system:
@@ -75,15 +76,20 @@ class OpenAIClient(LLMClient):
                     response_format=_RESPONSE_FORMAT,
                 )
         except APIError as exc:
-            # The SDK's message embeds the provider's response body (which can quote part
-            # of the key) and its request id. Log diagnostics server-side and raise only
+            # The SDK's message embeds the provider's response body (OpenAI's 401 quotes the
+            # key's first 8 and last 4 characters) and its request id. Log only structured,
+            # enum-like diagnostics server-side (never the message or body) and raise only
             # the exception type and HTTP status; `from None` keeps the original (and its
             # body) out of the cycle's failure_message, the API response and the UI.
             status_code = getattr(exc, "status_code", None)
             logger.warning(
-                "OpenAI request failed: %s status=%s request_id=%s model=%s",
+                "OpenAI request failed: %s status=%s code=%s type=%s param=%s "
+                "request_id=%s model=%s",
                 type(exc).__name__,
                 status_code,
+                exc.code,
+                exc.type,
+                exc.param,
                 getattr(exc, "request_id", None),
                 self._model,
             )
@@ -95,13 +101,15 @@ class OpenAIClient(LLMClient):
             return ""
         choice = response.choices[0]
         if choice.message.refusal:
-            # Never log the refusal text itself; the stop reason is enough to diagnose.
+            # Return the refusal text as the (invalid) answer: it then fails validation like
+            # any non-JSON reply and is recorded in the cycle's llm_raw_response, so the
+            # audit trail shows the model refused. It is not written to the log.
             logger.warning(
                 "OpenAI refused the request: finish_reason=%s model=%s",
                 choice.finish_reason,
                 self._model,
             )
-            return ""
+            return choice.message.refusal
         if choice.finish_reason in ("length", "content_filter"):
             logger.warning(
                 "OpenAI response stopped early: finish_reason=%s model=%s",

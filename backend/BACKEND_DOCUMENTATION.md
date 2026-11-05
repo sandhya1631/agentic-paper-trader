@@ -1115,10 +1115,10 @@ async context-manager methods. Function locations are relative to `backend`.
 | `OllamaClient.health_check` | `app/llm/ollama_client.py` | Checks Ollama reachability and installed model. |
 | `DECISION_JSON_SCHEMA` | `app/llm/decision_schema.py` | Provider-neutral decision schema used for structured output by the OpenAI and Anthropic clients (imports no SDK). |
 | `OpenAIClient.__init__` | `app/llm/openai_client.py` | Requires an API key and stores it with the model; an SDK client is created per call. |
-| `OpenAIClient.generate` | `app/llm/openai_client.py` | Calls chat completions with strict structured JSON output; a refusal returns `""`. An API error raises a `RuntimeError` naming only its type and HTTP status (the provider's body and request id are logged server-side, never returned). |
+| `OpenAIClient.generate` | `app/llm/openai_client.py` | Calls chat completions with strict structured JSON output; a refusal's text is returned as the (invalid) answer, so it is recorded in the cycle's raw response. An API error raises a `RuntimeError` naming only its type and HTTP status; the type, status, error code/type/param and request id are logged server-side, while the provider's message and body are never logged or returned. |
 | `OpenAIClient.health_check` | `app/llm/openai_client.py` | Lists OpenAI models and checks availability; on failure the detail names only the exception type. |
 | `AnthropicClient.__init__` | `app/llm/anthropic_client.py` | Requires an API key and stores the model. |
-| `AnthropicClient.generate` | `app/llm/anthropic_client.py` | Calls the Messages API with structured JSON output; returns the text blocks. An API error raises a `RuntimeError` naming only its type and HTTP status (the provider's body and request id are logged server-side, never returned). |
+| `AnthropicClient.generate` | `app/llm/anthropic_client.py` | Calls the Messages API with structured JSON output; returns the text blocks. An API error raises a `RuntimeError` naming only its type and HTTP status; the type, status and request id are logged server-side, while the provider's body is never logged or returned. |
 | `AnthropicClient.health_check` | `app/llm/anthropic_client.py` | Retrieves the model and checks reachability/availability. |
 | `llm_health` | `app/llm/router.py` | Echoes configuration or performs an active LLM probe. |
 

@@ -27,9 +27,12 @@ from app.llm.openai_client import OpenAIClient
 from app.schemas import DecisionProposal
 
 OPENAI_SDK = "app.llm.openai_client.AsyncOpenAI"
-# Fake, key-shaped value used to prove a key never leaks; OpenAI quotes keys with the
-# middle masked, so the tests also look for its last 6 characters.
+# Fake, key-shaped value used to prove a key never leaks. OpenAI's 401 body quotes the key
+# masked as its first 8 + last 4 characters ("Incorrect API key provided: sk-canar****Y9Q7"),
+# so the tests look for those fragments too.
 CANARY_KEY = "sk-canary-test-K3Y9Q7"
+CANARY_MASKED = f"{CANARY_KEY[:8]}{'*' * 8}{CANARY_KEY[-4:]}"
+CANARY_FRAGMENTS = (CANARY_KEY, CANARY_KEY[:8], CANARY_KEY[-4:])
 OPENAI_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {"name": "decision_proposal", "schema": DECISION_JSON_SCHEMA, "strict": True},
@@ -223,8 +226,15 @@ def _completion(content=None, *, refusal=None, finish_reason="stop") -> SimpleNa
 
 
 def _status_error(cls, status: int, message: str):
+    """An SDK status error shaped like the real one (body = OpenAI's `error` object)."""
     response = MagicMock(status_code=status, headers={"x-request-id": "req_OPENAI_SECRET_ID"})
-    return cls(message, response=response, body={"error": {"message": message}})
+    body = {
+        "message": message,
+        "type": "invalid_request_error",
+        "code": "invalid_api_key",
+        "param": None,
+    }
+    return cls(message, response=response, body=body)
 
 
 def test_openai_client_requires_api_key():
@@ -261,30 +271,34 @@ async def test_openai_client_generate_calls_chat_completions():
 @pytest.mark.asyncio
 async def test_openai_generate_returns_refusals_and_bad_content_as_text(caplog):
     """Content is never raised on: refusals, empty or malformed answers come back as text
-    so validation (and the orchestrator's single self-repair retry) decides."""
+    so validation (and the orchestrator's single self-repair retry) decides. A refusal's
+    text is returned so the cycle's llm_raw_response records that the model refused."""
+    refusal = "I can't help with that."
     with patch(OPENAI_SDK) as sdk_cls:
         sdk = _mock_openai(sdk_cls)
         sdk.chat.completions.create = AsyncMock(
             side_effect=[
-                _completion(refusal="I can't help with that."),
+                _completion(refusal=refusal),
                 _completion(None),
                 _completion("not json"),
                 _completion('{"symbol": "AAPL"', finish_reason="length"),
+                _completion("", finish_reason="content_filter"),
                 SimpleNamespace(choices=[]),
             ]
         )
         client = OpenAIClient(api_key=CANARY_KEY, model="gpt-4o-mini")
 
         with caplog.at_level(logging.WARNING, logger="app.llm.openai_client"):
-            answers = [await client.generate("p") for _ in range(5)]
+            answers = [await client.generate("p") for _ in range(6)]
 
-    assert answers == ["", "", "not json", '{"symbol": "AAPL"', ""]
-    for raw in answers:
+    assert answers == [refusal, "", "not json", '{"symbol": "AAPL"', "", ""]
+    for raw in answers:  # every one of these must end in validation, never a guessed trade
         with pytest.raises(ToolValidationError):
             validate_decision_proposal(raw)
     assert "OpenAI refused the request" in caplog.text
-    assert "I can't help with that." not in caplog.text  # the refusal text is never logged
+    assert refusal not in caplog.text  # the refusal text is recorded on the cycle, not logged
     assert "finish_reason=length" in caplog.text
+    assert "finish_reason=content_filter" in caplog.text
     assert "had no choices" in caplog.text
     assert CANARY_KEY not in caplog.text
 
@@ -315,7 +329,7 @@ async def test_openai_api_errors_are_sanitized(caplog):
     """An API failure surfaces only its type and HTTP status: the provider's response
     body (which can quote part of the key), request id and the key never reach the
     raised message (the cycle's failure_message, the API response and the UI)."""
-    body_text = f"Incorrect API key provided: {CANARY_KEY}. You can find your API key at ..."
+    body_text = f"Incorrect API key provided: {CANARY_MASKED}. You can find your API key at ..."
     auth_error = _status_error(openai.AuthenticationError, 401, f"Error code: 401 - {body_text}")
     connection_error = openai.APIConnectionError(request=MagicMock())
     timeout_error = openai.APITimeoutError(request=MagicMock())
@@ -341,18 +355,23 @@ async def test_openai_api_errors_are_sanitized(caplog):
     ]
     for exc in raised:
         assert exc.__cause__ is None and exc.__suppress_context__
-        for leaked in (CANARY_KEY, CANARY_KEY[-6:], "Incorrect API key", "req_OPENAI_SECRET_ID"):
+        for leaked in (*CANARY_FRAGMENTS, "Incorrect API key", "req_OPENAI_SECRET_ID"):
             assert leaked not in str(exc)
-    # Server-side diagnostics keep the request id, never the key.
+    # Server-side diagnostics keep the request id and the enum-like error fields (enough to
+    # tell a bad key from an unsupported model or quota), never the message, body or key.
     assert "req_OPENAI_SECRET_ID" in caplog.text
-    assert CANARY_KEY not in caplog.text and CANARY_KEY[-6:] not in caplog.text
+    assert "code=invalid_api_key type=invalid_request_error" in caplog.text
+    assert "Incorrect API key" not in caplog.text
+    assert not any(fragment in caplog.text for fragment in CANARY_FRAGMENTS)
 
 
 @pytest.mark.asyncio
 async def test_openai_api_error_never_reaches_the_cycle_record():
     agent, db, _, collector = _run_inputs()
     auth_error = _status_error(
-        openai.AuthenticationError, 401, f"Error code: 401 - Incorrect API key: {CANARY_KEY}"
+        openai.AuthenticationError,
+        401,
+        f"Error code: 401 - Incorrect API key provided: {CANARY_MASKED}",
     )
 
     with patch(OPENAI_SDK) as sdk_cls:
@@ -371,7 +390,7 @@ async def test_openai_api_error_never_reaches_the_cycle_record():
     stored = " ".join(
         str(value) for value in (cycle.failure_message, cycle.llm_raw_response, cycle.snapshot_json)
     )
-    assert CANARY_KEY not in stored and CANARY_KEY[-6:] not in stored
+    assert not any(fragment in stored for fragment in CANARY_FRAGMENTS)
 
 
 def test_openai_uses_a_fresh_sdk_client_per_call_across_event_loops():
@@ -532,16 +551,23 @@ async def test_openai_health_check_reachable():
     assert missing.detail == "Model 'gpt-4o-mini' not available to this account"
     # An empty listing never claims the model is missing.
     assert (unlisted.reachable, unlisted.model_available, unlisted.detail) == (True, True, "ok")
-    # A fresh SDK client per probe, with a short timeout.
+    # A fresh SDK client per probe, with a short timeout, each one closed afterwards.
     assert sdk_cls.call_count == 3
     sdk_cls.assert_called_with(api_key="fake-key", timeout=10.0, max_retries=2)
+    assert sdk.__aexit__.await_count == 3
 
 
 @pytest.mark.asyncio
 async def test_openai_health_check_unreachable_does_not_raise():
     with patch(OPENAI_SDK) as sdk_cls:
         sdk = _mock_openai(sdk_cls)
-        sdk.models.list = AsyncMock(side_effect=RuntimeError(f"boom {CANARY_KEY}"))
+        sdk.models.list = AsyncMock(
+            side_effect=_status_error(
+                openai.AuthenticationError,
+                401,
+                f"Error code: 401 - Incorrect API key provided: {CANARY_MASKED}",
+            )
+        )
 
         client = OpenAIClient(api_key=CANARY_KEY, model="gpt-4o-mini")
         health = await client.health_check()
@@ -549,8 +575,8 @@ async def test_openai_health_check_unreachable_does_not_raise():
     assert health.reachable is False
     assert health.model_available is False
     # Type name only: this detail is shown in the UI's header LLM pill.
-    assert health.detail == "OpenAI API unreachable: RuntimeError"
-    assert CANARY_KEY not in health.detail
+    assert health.detail == "OpenAI API unreachable: AuthenticationError"
+    assert not any(fragment in health.detail for fragment in CANARY_FRAGMENTS)
 
 
 # --- Live integration test (requires a real, running Ollama with the model pulled) ---
