@@ -34,6 +34,7 @@ from app.db.enums import (
     BrokerOrderStatus,
     CycleStatus,
     CycleTrigger,
+    KillSwitchScope,
     OrderSide,
     UserRole,
 )
@@ -221,6 +222,13 @@ class KillSwitchEvent(Base, UUIDPrimaryKey):
 
     Rows are only ever added. A request the server refused (an environment force-on
     cannot be disabled by API) is recorded too, with outcome REJECTED_ENV_OVERRIDE.
+
+    scope distinguishes the admin-only GLOBAL switch (halts every user) from a USER
+    switch (a user pausing only their own scheduler via /agent/scheduler/*). Regardless
+    of scope, previous_enabled/new_enabled always mean "trading halted", so a resumed
+    scheduler is new_enabled=False same as the global switch being turned off.
+    target_user_id is the user affected (None for a GLOBAL event); actor_id is always
+    who made the change, which for a USER event is the same user.
     """
 
     __tablename__ = "kill_switch_events"
@@ -234,6 +242,10 @@ class KillSwitchEvent(Base, UUIDPrimaryKey):
     new_enabled: Mapped[bool] = mapped_column(Boolean)
     outcome: Mapped[str] = mapped_column(String(30))
     reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    scope: Mapped[str] = mapped_column(String(10), default=KillSwitchScope.GLOBAL.value)
+    target_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
 
 class CycleApproval(Base, UUIDPrimaryKey):

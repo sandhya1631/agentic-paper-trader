@@ -49,6 +49,7 @@ from app.risk.kill_switch import (
     get_latest_activation_reason,
     list_kill_switch_events,
     set_kill_switch,
+    set_user_scheduler_switch,
 )
 from app.schemas import (
     AgentScheduleRead,
@@ -609,7 +610,7 @@ async def start_agent_schedule(
     else:
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
-    current_user.scheduler_enabled = True
+    await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=True)
     try:
         await db.commit()
     except IntegrityError:
@@ -625,7 +626,7 @@ async def start_agent_schedule(
             raise
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
-        current_user.scheduler_enabled = True
+        await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=True)
         await db.commit()
     await db.refresh(schedule)
     schedules_result = await db.execute(
@@ -667,7 +668,7 @@ async def stop_agent_schedule(
     schedule = result.scalar_one_or_none()
     if schedule is None:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    current_user.scheduler_enabled = False
+    await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=False)
     await db.commit()
     await db.refresh(schedule)
 

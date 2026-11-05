@@ -6,20 +6,22 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy import select
 
 from app.agent.router import (
     get_kill_switch,
     list_kill_switch_audit,
     update_kill_switch,
 )
-from app.db.enums import UserRole
-from app.db.models import KillSwitchEvent, SystemRuntimeControl
+from app.db.enums import KillSwitchScope, UserRole
+from app.db.models import KillSwitchEvent, SystemRuntimeControl, User
 from app.risk.kill_switch import (
     OUTCOME_APPLIED,
     OUTCOME_REJECTED_ENV_OVERRIDE,
     EnvironmentKillSwitchOverrideError,
     is_kill_switch_enabled,
     set_kill_switch,
+    set_user_scheduler_switch,
 )
 from app.schemas import KillSwitchUpdate
 
@@ -255,6 +257,8 @@ async def test_audit_trail_endpoint_is_admin_only_and_lists_events():
         new_enabled=True,
         outcome=OUTCOME_APPLIED,
         reason="Unexpected trades",
+        scope="GLOBAL",
+        target_user_id=None,
     )
     scalars = SimpleNamespace(all=lambda: [event])
     db = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalars=lambda: scalars)))
@@ -271,3 +275,86 @@ async def test_audit_trail_endpoint_is_admin_only_and_lists_events():
     assert len(rows) == 1
     assert rows[0].reason == "Unexpected trades"
     assert rows[0].new_enabled is True
+
+
+def _make_user(*, scheduler_enabled: bool) -> User:
+    return User(
+        email=f"{uuid4()}@example.com",
+        password_hash="not-a-real-hash",
+        role=UserRole.OPERATOR,
+        scheduler_enabled=scheduler_enabled,
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_scheduler_switch_pauses_and_audits_as_user_scope(db_session):
+    """Stopping a user's scheduler flips the flag and writes a USER-scope event whose
+    polarity means "trading halted", same as the global switch."""
+    user = _make_user(scheduler_enabled=True)
+    db_session.add(user)
+    await db_session.flush()
+
+    await set_user_scheduler_switch(db_session, user=user, scheduler_enabled=False)
+    await db_session.commit()
+
+    assert user.scheduler_enabled is False
+    events = (await db_session.execute(select(KillSwitchEvent))).scalars().all()
+    (event,) = events
+    assert event.scope == KillSwitchScope.USER.value
+    assert event.target_user_id == user.id
+    assert event.actor_id == user.id
+    assert event.previous_enabled is False  # was running -> not halted
+    assert event.new_enabled is True  # now paused -> halted
+
+
+@pytest.mark.asyncio
+async def test_user_scheduler_switch_resume_is_also_audited(db_session):
+    user = _make_user(scheduler_enabled=False)
+    db_session.add(user)
+    await db_session.flush()
+
+    await set_user_scheduler_switch(db_session, user=user, scheduler_enabled=True)
+    await db_session.commit()
+
+    assert user.scheduler_enabled is True
+    events = (await db_session.execute(select(KillSwitchEvent))).scalars().all()
+    (event,) = events
+    assert event.previous_enabled is True  # was paused -> halted
+    assert event.new_enabled is False  # now running -> not halted
+
+
+@pytest.mark.asyncio
+async def test_user_scheduler_switch_is_a_no_op_when_unchanged(db_session):
+    """Starting a schedule for a user whose scheduler is already enabled writes no
+    audit row, matching the admin switch's no-op behavior elsewhere in this codebase."""
+    user = _make_user(scheduler_enabled=True)
+    db_session.add(user)
+    await db_session.flush()
+
+    await set_user_scheduler_switch(db_session, user=user, scheduler_enabled=True)
+    await db_session.commit()
+
+    assert user.scheduler_enabled is True
+    events = (await db_session.execute(select(KillSwitchEvent))).scalars().all()
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_user_and_global_kill_switch_events_are_independently_scoped(db_session):
+    """A user pausing their own scheduler must never read as, or be confused with, the
+    admin global halt - the two live in the same audit table but stay distinguishable."""
+    user = _make_user(scheduler_enabled=True)
+    db_session.add(user)
+    await db_session.flush()
+
+    await set_user_scheduler_switch(db_session, user=user, scheduler_enabled=False)
+    await set_kill_switch(db_session, enabled=True, actor_id=user.id, reason="global halt drill")
+
+    events = (
+        (await db_session.execute(select(KillSwitchEvent).order_by(KillSwitchEvent.occurred_at)))
+        .scalars()
+        .all()
+    )
+    assert [e.scope for e in events] == [KillSwitchScope.USER.value, KillSwitchScope.GLOBAL.value]
+    assert events[0].target_user_id == user.id
+    assert events[1].target_user_id is None
