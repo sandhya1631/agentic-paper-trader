@@ -242,6 +242,10 @@ class KillSwitchEventRead(APIModel):
     scope: str
     # The user affected by a USER-scope event; None for GLOBAL.
     target_user_id: UUID | None = None
+    # Denormalized for the audit UI (#169), so it never has to resolve a UUID itself.
+    # None if the acting/affected user has since been deleted.
+    actor_email: str | None = None
+    target_user_email: str | None = None
 
 
 class SchedulerTickStatus(APIModel):

@@ -249,10 +249,11 @@ async def test_two_toggles_are_both_audited(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_audit_trail_endpoint_is_admin_only_and_lists_events():
+    actor_id = uuid4()
     event = SimpleNamespace(
         id=uuid4(),
         occurred_at=datetime.now(UTC),
-        actor_id=uuid4(),
+        actor_id=actor_id,
         previous_enabled=False,
         new_enabled=True,
         outcome=OUTCOME_APPLIED,
@@ -260,8 +261,10 @@ async def test_audit_trail_endpoint_is_admin_only_and_lists_events():
         scope="GLOBAL",
         target_user_id=None,
     )
-    scalars = SimpleNamespace(all=lambda: [event])
-    db = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalars=lambda: scalars)))
+    events_result = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [event]))
+    email_row = SimpleNamespace(id=actor_id, email="admin@example.com")
+    emails_result = [email_row]
+    db = SimpleNamespace(execute=AsyncMock(side_effect=[events_result, emails_result]))
 
     with pytest.raises(HTTPException) as denied:
         await list_kill_switch_audit(
@@ -275,6 +278,7 @@ async def test_audit_trail_endpoint_is_admin_only_and_lists_events():
     assert len(rows) == 1
     assert rows[0].reason == "Unexpected trades"
     assert rows[0].new_enabled is True
+    assert rows[0].actor_email == "admin@example.com"
 
 
 def _make_user(*, scheduler_enabled: bool) -> User:
@@ -358,3 +362,42 @@ async def test_user_and_global_kill_switch_events_are_independently_scoped(db_se
     assert [e.scope for e in events] == [KillSwitchScope.USER.value, KillSwitchScope.GLOBAL.value]
     assert events[0].target_user_id == user.id
     assert events[1].target_user_id is None
+
+
+@pytest.mark.asyncio
+async def test_audit_endpoint_denormalizes_emails_over_http(client, db_session) -> None:
+    """End-to-end (#169): the admin audit endpoint resolves actor_id/target_user_id
+    to real emails in one extra query, so the UI never has to do it itself."""
+    operator_email = f"operator-{uuid4()}@example.com"
+    admin_email = f"admin-{uuid4()}@example.com"
+    password = "S3cure-Password!1"
+
+    await client.post("/auth/register", json={"email": operator_email, "password": password})
+    await client.post("/auth/register", json={"email": admin_email, "password": password})
+
+    operator = (
+        await db_session.execute(select(User).where(User.email == operator_email))
+    ).scalar_one()
+    admin = (await db_session.execute(select(User).where(User.email == admin_email))).scalar_one()
+    admin.role = UserRole.ADMIN
+    await db_session.commit()
+
+    # One USER-scope event (the operator pausing their own scheduler) ...
+    await set_user_scheduler_switch(db_session, user=operator, scheduler_enabled=False)
+    await db_session.commit()
+    # ... and one GLOBAL event by the admin.
+    await set_kill_switch(db_session, enabled=True, actor_id=admin.id, reason="drill")
+
+    login = await client.post("/auth/login", json={"email": admin_email, "password": password})
+    admin_token = login.json()["access_token"]
+
+    response = await client.get(
+        "/agent/kill-switch/events", headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    assert response.status_code == 200
+    rows = {row["scope"]: row for row in response.json()}
+
+    assert rows["USER"]["actor_email"] == operator_email
+    assert rows["USER"]["target_user_email"] == operator_email
+    assert rows["GLOBAL"]["actor_email"] == admin_email
+    assert rows["GLOBAL"]["target_user_email"] is None
