@@ -30,6 +30,8 @@ from app.db.enums import (
     BrokerOrderStatus,
     CycleStatus,
     CycleTrigger,
+    DecisionAction,
+    PolicyDecisionType,
     UserRole,
 )
 from app.db.models import (
@@ -279,6 +281,11 @@ async def trigger_manual_cycle(
 async def list_agent_cycles(
     limit: int = 20,
     offset: int = 0,
+    started_after: datetime | None = None,
+    started_before: datetime | None = None,
+    action: DecisionAction | None = None,
+    status_filter: CycleStatus | None = Query(default=None, alias="status"),
+    policy_decision: PolicyDecisionType | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> CycleListRead:
@@ -287,11 +294,21 @@ async def list_agent_cycles(
     Shared read surface for the dashboard cycle-history (#79), decision timeline
     (#81), and audit history (#82). Covers both MANUAL and SCHEDULED cycles and is
     ownership-scoped: a user only ever sees cycles belonging to their own agents.
+
+    Every filter is optional and they AND together. ``action`` matches the LLM's
+    proposed action (``proposal_json.action``); ``policy_decision`` matches the
+    cycle's overall, first-class outcome (ALLOW/DENY/RESIZE/NOT_EVALUATED) rather
+    than any single policy's result, which would need a slower, unindexed JSON
+    search over ``policy_result_json.evaluations`` (#82's noted follow-up).
     """
     if not 1 <= limit <= 100:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
     if offset < 0:
         raise HTTPException(status_code=422, detail="offset must be >= 0")
+    if started_after is not None and started_before is not None and started_after > started_before:
+        raise HTTPException(
+            status_code=422, detail="started_after must not be after started_before"
+        )
 
     owned_cycles = (
         select(AgentCycle)
@@ -299,6 +316,21 @@ async def list_agent_cycles(
         .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
         .where(TradingAccount.user_id == current_user.id)
     )
+    if started_after is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.started_at >= started_after)
+    if started_before is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.started_at <= started_before)
+    if action is not None:
+        # proposal_json is a plain JSON column (not JSONB), so comparing it to a
+        # string needs the explicit as_string() cast - Postgres has no json = text
+        # operator (confirmed: raises UndefinedFunctionError without this).
+        owned_cycles = owned_cycles.where(
+            AgentCycle.proposal_json["action"].as_string() == action.value
+        )
+    if status_filter is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.status == status_filter)
+    if policy_decision is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.policy_decision == policy_decision.value)
 
     total = await db.scalar(
         select(func.count()).select_from(owned_cycles.subquery())
