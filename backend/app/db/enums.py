@@ -114,3 +114,10 @@ class AuditActorType(StrEnum):
     USER = "USER"
     SYSTEM = "SYSTEM"
     SCHEDULER = "SCHEDULER"
+
+
+class KillSwitchScope(StrEnum):
+    """Which trading the kill-switch event affects: everyone, or one user's own agent."""
+
+    GLOBAL = "GLOBAL"
+    USER = "USER"

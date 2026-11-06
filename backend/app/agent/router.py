@@ -49,6 +49,7 @@ from app.risk.kill_switch import (
     get_latest_activation_reason,
     list_kill_switch_events,
     set_kill_switch,
+    set_user_scheduler_switch,
 )
 from app.schemas import (
     AgentScheduleRead,
@@ -108,7 +109,36 @@ async def list_kill_switch_audit(
     if current_user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin role required")
     events = await list_kill_switch_events(db, limit)
-    return [KillSwitchEventRead.model_validate(event) for event in events]
+
+    # Denormalize emails for the UI (#169) in one extra query, rather than making
+    # it resolve actor_id/target_user_id itself. None for a user who no longer
+    # exists (both columns are ON DELETE SET NULL).
+    user_ids = {e.actor_id for e in events if e.actor_id} | {
+        e.target_user_id for e in events if e.target_user_id
+    }
+    emails_by_id: dict[uuid.UUID, str] = {}
+    if user_ids:
+        rows = await db.execute(select(User.id, User.email).where(User.id.in_(user_ids)))
+        emails_by_id = {row.id: row.email for row in rows}
+
+    return [
+        KillSwitchEventRead(
+            id=event.id,
+            occurred_at=event.occurred_at,
+            actor_id=event.actor_id,
+            previous_enabled=event.previous_enabled,
+            new_enabled=event.new_enabled,
+            outcome=event.outcome,
+            reason=event.reason,
+            scope=event.scope,
+            target_user_id=event.target_user_id,
+            actor_email=emails_by_id.get(event.actor_id) if event.actor_id else None,
+            target_user_email=(
+                emails_by_id.get(event.target_user_id) if event.target_user_id else None
+            ),
+        )
+        for event in events
+    ]
 
 
 @router.put(
@@ -609,7 +639,7 @@ async def start_agent_schedule(
     else:
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
-    current_user.scheduler_enabled = True
+    await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=True)
     try:
         await db.commit()
     except IntegrityError:
@@ -625,7 +655,7 @@ async def start_agent_schedule(
             raise
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
-        current_user.scheduler_enabled = True
+        await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=True)
         await db.commit()
     await db.refresh(schedule)
     schedules_result = await db.execute(
@@ -667,7 +697,7 @@ async def stop_agent_schedule(
     schedule = result.scalar_one_or_none()
     if schedule is None:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    current_user.scheduler_enabled = False
+    await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=False)
     await db.commit()
     await db.refresh(schedule)
 
