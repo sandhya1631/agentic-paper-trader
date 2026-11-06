@@ -19,7 +19,7 @@ class OpenAIClient(LLMClient):
         prompt: str,
         *,
         system: str | None = None,
-        temperature: float = 0.2,
+        temperature: float | None = None,
     ) -> str:
         messages: list[dict[str, str]] = []
         if system:
@@ -29,7 +29,7 @@ class OpenAIClient(LLMClient):
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=messages,
-            temperature=temperature,
+            temperature=temperature if temperature is not None else 0.2,
         )
         return response.choices[0].message.content or ""
 

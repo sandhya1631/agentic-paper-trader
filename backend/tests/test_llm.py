@@ -144,6 +144,9 @@ async def test_ollama_client_generate_calls_chat_api():
     args, kwargs = mock_client.post.call_args
     assert args[0] == "http://localhost:11434/api/chat"
     assert kwargs["json"]["model"] == "llama3.1"
+    assert kwargs["json"]["format"] == "json"
+    assert kwargs["json"]["options"]["temperature"] == 0.1
+    assert kwargs["json"]["options"]["num_ctx"] == 4096
     assert kwargs["json"]["messages"] == [
         {"role": "system", "content": "be nice"},
         {"role": "user", "content": "hi"},

@@ -20,7 +20,13 @@ def create_llm_client(settings: Settings | None = None) -> LLMClient:
     if provider == "openai":
         return OpenAIClient(api_key=settings.openai_api_key, model=settings.openai_model)
     if provider == "ollama":
-        return OllamaClient(base_url=settings.ollama_base_url, model=settings.ollama_model)
+        return OllamaClient(
+            base_url=settings.ollama_base_url,
+            model=settings.ollama_model,
+            temperature=settings.ollama_temperature,
+            num_ctx=settings.ollama_num_ctx,
+            json_format=settings.ollama_json_format,
+        )
 
     raise ValueError(
         f"Unsupported LLM_PROVIDER '{settings.llm_provider}'. "

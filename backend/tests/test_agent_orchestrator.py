@@ -93,6 +93,15 @@ def test_get_system_prompt_unknown_raises():
         get_system_prompt("INVALID_VERSION")
 
 
+def test_s002_is_short_json_focused_strategy():
+    prompt = get_system_prompt("S-002")
+
+    assert "STRATEGY VERSION: S-002" in prompt
+    assert "account data_status is LIVE" in prompt
+    assert "Return only one valid JSON object" in prompt
+    assert len(prompt) < len(get_system_prompt("S-001"))
+
+
 def test_agent_config_rejects_unknown_strategy_version():
     agent = AgentConfig(strategy_version="S-001")
 
@@ -124,7 +133,81 @@ def test_build_agent_context():
     assert context["watchlist"] == ["AAPL", "NVDA"]
     assert context["market"]["AAPL"]["latest_price"] == 154.9
     assert context["market"]["AAPL"]["rsi_14"] is not None
+    assert len(context["market"]["AAPL"]["recent_bars"]) == 12
+    assert context["market"]["AAPL"]["recent_bars"][-1]["close"] == 154.9
+    assert context["market"]["AAPL"]["recent_bars"][-1]["change_pct"] > 0
     assert context["market"]["NVDA"]["status"] == "NO_DATA"
+    assert context["account"]["data_status"] == "NOT_PROVIDED"
+
+
+def test_build_agent_context_marks_unavailable_account_data():
+    context = build_agent_context(
+        ["AAPL"],
+        {"AAPL": []},
+        account_data_status="UNAVAILABLE_BROKER",
+    )
+
+    assert context["account"]["data_status"] == "UNAVAILABLE_BROKER"
+    assert context["account"]["cash"] is None
+    assert context["positions"] == []
+    assert context["open_orders"] == []
+
+
+def test_build_agent_context_sanitizes_live_portfolio_data():
+    context = build_agent_context(
+        ["AAPL"],
+        {"AAPL": []},
+        account_info={
+            "cash": "12000.00",
+            "equity": "25000.00",
+            "buying_power": "48000.00",
+            "daily_pnl": "-125.00",
+        },
+        positions=[
+            {
+                "symbol": "AAPL",
+                "qty": "10",
+                "market_value": "1800.00",
+                "unrealized_pl": "-25.00",
+            }
+        ],
+        open_orders=[
+            {
+                "id": "order-1",
+                "symbol": "AAPL",
+                "side": "buy",
+                "qty": "2",
+                "status": "new",
+            }
+        ],
+        account_data_status="LIVE",
+    )
+
+    assert context["account"] == {
+        "cash": "12000.00",
+        "equity": "25000.00",
+        "buying_power": "48000.00",
+        "daily_pnl": "-125.00",
+        "data_status": "LIVE",
+    }
+    assert context["positions"] == [
+        {
+            "symbol": "AAPL",
+            "qty": "10",
+            "market_value": "1800.00",
+            "unrealized_pnl": "-25.00",
+        }
+    ]
+    assert context["open_orders"] == [
+        {
+            "id": "order-1",
+            "symbol": "AAPL",
+            "side": "buy",
+            "qty": "2",
+            "status": "new",
+        }
+    ]
+    assert "encrypted_api_key" not in json.dumps(context)
 
 
 # --- Orchestrator Integration Tests ---
@@ -205,6 +288,10 @@ async def test_run_agent_cycle_success(db_session: AsyncSession):
         "policy": POLICY_VERSION,
     }
     assert cycle.snapshot_json["execution_status"] == "PENDING_APPROVAL"
+    assert cycle.snapshot_json["observability"]["symbols"] == 2
+    assert cycle.snapshot_json["observability"]["bars_used"] == 50
+    assert cycle.snapshot_json["observability"]["context_chars"] > 0
+    assert cycle.snapshot_json["observability"]["estimated_input_tokens"] > 0
     assert cycle.prompt_version == agent.strategy_version
     assert cycle.prompt_revision == DEFAULT_PROMPT_REVISION
     assert "S-001" in cycle.prompt_text

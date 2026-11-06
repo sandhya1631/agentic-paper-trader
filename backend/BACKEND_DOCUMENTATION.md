@@ -119,7 +119,10 @@ Important settings:
 | `ALPACA_API_KEY`, `ALPACA_API_SECRET` | Server-level credentials used by market-data and scheduler clock checks. |
 | `ALPACA_PAPER_BASE_URL` | Must be `https://paper-api.alpaca.markets` with optional `/v2`. |
 | `LLM_PROVIDER` | `ollama` or `openai`; defaults to `ollama`. |
-| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local LLM connection. |
+| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local LLM connection; defaults to `http://localhost:11434` and `llama3.1`. |
+| `OLLAMA_TEMPERATURE` | Ollama generation temperature; defaults to `0.1` for low-variance decisions. |
+| `OLLAMA_NUM_CTX` | Ollama context-window size; defaults to 4096 tokens. |
+| `OLLAMA_JSON_FORMAT` | Requests Ollama JSON output mode; defaults to true. |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI connection. |
 | `CREDENTIAL_ENCRYPTION_KEY` | Required Fernet key for user Alpaca credentials. |
 | `SCHEDULER_ENABLED` | Enables the global APScheduler job; defaults to false. |
@@ -215,7 +218,7 @@ Stores how an agent is configured:
 - `policy_set_id`
 - `name`
 - `watchlist` as JSON
-- `strategy_version` (currently `S-001`)
+- `strategy_version` (`S-001` by default; `S-002` is an available shorter Ollama-focused prompt)
 - `cadence_minutes` (database constraint currently requires 15)
 - `target_allocation`
 - `max_symbol_allocation`
@@ -258,8 +261,8 @@ Stored fields:
 - `correlation_id`
 
 The backend does **not** store the raw OHLCV bars in a dedicated table. The
-cycle stores the summarized context and technical indicators in
-`snapshot_json`.
+cycle stores the latest 12-bar compact evidence summary, technical indicators,
+and sanitized portfolio context in `snapshot_json`.
 
 ### 4.6 `agent_schedules`
 
@@ -467,21 +470,38 @@ system for market data, paper-account balances, positions, and broker orders.
 `build_agent_context()` creates a sanitized dictionary containing:
 
 - Strategy version and watchlist.
-- Latest price, timestamp, RSI-14, SMA-20, SMA-50, and bar count per symbol.
-- Account cash, equity, buying power, and daily P&L if supplied.
+- Latest price, timestamp, RSI-14, SMA-20, SMA-50, bar count, and the latest
+  12 compact OHLCV bars with close-to-close percentage changes per symbol.
+- Live account cash, equity, buying power, and daily P&L when available.
 - Position symbol, quantity, market value, and unrealized P&L if supplied.
 - Open-order id, symbol, side, quantity, and status if supplied.
 
-It does not include credentials. The orchestrator adds the strategy and policy
-versions, serializes the context as JSON, and sends it with the versioned
-system prompt to the selected LLM client.
+It does not include credentials. The orchestrator loads live account, position,
+and open-order state once per watchlist sweep through the encrypted credential
+vault and Alpaca paper client. If that state cannot be loaded, the context
+contains an explicit account `data_status` such as `UNAVAILABLE_BROKER` or
+`UNAVAILABLE_NOT_CONNECTED`; it does not present synthetic balances as live
+data.
 
-The current prompt (`S-001`, revision `1.0.0`) describes a technical-momentum
+The orchestrator adds strategy and policy versions, serializes the context as
+JSON, and sends it with the versioned system prompt to the selected LLM client.
+The persisted snapshot also contains an `observability` object with context and
+system-prompt character counts, approximate input tokens, symbol count, bars
+used, and account-data status. These fields are audit measurements and are not
+included in the model input.
+
+The default prompt (`S-001`, revision `1.1.0`) describes a technical-momentum
 strategy:
 
 - BUY when RSI/price trend/cash conditions align.
 - SELL when RSI is overbought or price breaks below SMA-20 and a position exists.
 - HOLD when data is missing, stale, conflicting, flat, or uncertain.
+
+`S-002` is an opt-in shorter prompt designed for local Ollama models. It
+emphasizes using only supplied JSON, requires live account data for BUY
+decisions, and requests concise evidence-based JSON output. Strategy prompts
+are immutable and each cycle stores the exact prompt version, revision, and
+text used.
 
 The prompt is guidance only. The Pydantic proposal validator and deterministic
 policies are authoritative.
@@ -553,15 +573,21 @@ Insert an `AgentCycle` with:
 ### Step 3: Collect market context
 
 Set status to `COLLECTING`, fetch watchlist bars, calculate indicators where
-there are at least 50 closes, and build the sanitized context.
+there are at least 50 closes, and build the sanitized context. The number of
+bars is controlled by `DEFAULT_BAR_LIMIT` and the latest 12 bars are included
+as compact model evidence. The watchlist sweep fetches market bars and live
+portfolio state once, then reuses both across its per-symbol cycles.
 
 A collector construction or bar-fetch problem is logged and leaves the cycle
 with empty/missing market data, allowing the strategy's HOLD mandate to apply.
+Portfolio-state failures are recorded in account `data_status`; strategies
+requiring live account evidence should HOLD rather than infer balances.
 
 ### Step 4: Ask the LLM
 
 Set status to `REASONING`, load the provider-neutral client, and send the
-context plus versioned system prompt.
+context plus versioned system prompt. Ollama requests use the configured
+temperature and context window and request JSON mode by default.
 
 ### Step 5: Validate the proposal
 

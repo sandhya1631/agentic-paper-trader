@@ -114,7 +114,12 @@ LLM_PROVIDER=ollama   # or "openai"
 ```
 
 - `ollama`: requires a local [Ollama](https://ollama.com) server running (`OLLAMA_BASE_URL`, default
-  `http://localhost:11434`) with the model pulled (`OLLAMA_MODEL`, default `llama3.1`).
+  `http://localhost:11434`) with the model pulled (`OLLAMA_MODEL`, default `llama3.1`). Local
+  generation defaults to low variance (`OLLAMA_TEMPERATURE=0.1`), a 4096-token context
+  (`OLLAMA_NUM_CTX=4096`), and Ollama JSON output mode (`OLLAMA_JSON_FORMAT=true`).
+- Agents may opt into the shorter local-model prompt `S-002`; existing agents remain on
+  `S-001` until their strategy version is explicitly changed. Strategy prompts are immutable
+  versions and are saved with each cycle for auditability.
 - `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
 
 #### Install & verify the local LLM

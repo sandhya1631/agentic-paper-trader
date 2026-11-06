@@ -17,6 +17,7 @@ Orchestrates automated and manual agent cycles:
       `llm_raw_response`, `proposal_json`) to PostgreSQL and marks status `SUCCESS` or `FAILED`.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -28,6 +29,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
+from app.accounts.credential_vault import (
+    CredentialVaultError,
+    get_decrypted_alpaca_credentials,
+)
 from app.agent.approval import (
     evaluate_and_submit_cycle_trade,
     expire_pending_approvals,
@@ -36,6 +41,7 @@ from app.agent.approval import (
 from app.agent.context import build_agent_context
 from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
+from app.broker.alpaca import AlpacaClient
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
 from app.core.constants import ACTIVE_CYCLE_STATUSES, POLICY_VERSION
@@ -47,7 +53,7 @@ from app.db.enums import (
     DecisionAction,
     PolicyDecisionType,
 )
-from app.db.models import AgentConfig, AgentCycle, CycleApproval, utcnow
+from app.db.models import AgentConfig, AgentCycle, CycleApproval, TradingAccount, utcnow
 from app.llm.base import LLMClient
 from app.llm.factory import get_llm_client
 from app.market_data.alpaca_client import MarketDataCollector, create_market_data_collector
@@ -60,6 +66,67 @@ class CycleOverlapError(Exception):
     """Raised when the agent already has a non-terminal cycle in progress."""
 
 
+async def _load_portfolio_context(
+    agent: AgentConfig, db: AsyncSession
+) -> dict[str, Any]:
+    """Fetch sanitized live portfolio data for the model context."""
+    account_id = getattr(agent, "account_id", None)
+    if account_id is None:
+        return {
+            "account": None,
+            "positions": [],
+            "open_orders": [],
+            "status": "UNAVAILABLE_NOT_CONFIGURED",
+        }
+    account_result = await db.execute(
+        select(TradingAccount).where(TradingAccount.id == account_id)
+    )
+    account = account_result.scalar_one_or_none()
+    if account is None or not account.is_connected:
+        return {
+            "account": None,
+            "positions": [],
+            "open_orders": [],
+            "status": "UNAVAILABLE_NOT_CONNECTED",
+        }
+
+    try:
+        api_key, api_secret = await get_decrypted_alpaca_credentials(db, account.user_id)
+        settings = get_settings()
+        async with AlpacaClient(
+            api_key=api_key,
+            api_secret=api_secret,
+            base_url=settings.alpaca_paper_base_url,
+        ) as client:
+            account_state, positions, orders = await asyncio.gather(
+                client.get_account(),
+                client.get_positions(),
+                client.get_orders(status="open"),
+            )
+        return {
+            "account": account_state.model_dump(mode="json"),
+            "positions": [position.model_dump(mode="json") for position in positions],
+            "open_orders": [order.model_dump(mode="json") for order in orders],
+            "status": "LIVE",
+        }
+    except CredentialVaultError:
+        logger.exception("Could not load encrypted Alpaca credentials for agent %s", agent.id)
+        return {
+            "account": None,
+            "positions": [],
+            "open_orders": [],
+            "status": "UNAVAILABLE_CREDENTIALS",
+        }
+    except Exception:
+        logger.exception("Could not load live portfolio context for agent %s", agent.id)
+        return {
+            "account": None,
+            "positions": [],
+            "open_orders": [],
+            "status": "UNAVAILABLE_BROKER",
+        }
+
+
 async def run_agent_cycle(
     agent_id: uuid.UUID,
     db: AsyncSession,
@@ -69,6 +136,7 @@ async def run_agent_cycle(
     collector: MarketDataCollector | None = None,
     target_symbol: str | None = None,
     bars_per_symbol: dict[str, list[Any]] | None = None,
+    portfolio_context: dict[str, Any] | None = None,
     enforce_no_overlap: bool = True,
 ) -> AgentCycle:
     """Execute a single end-to-end agent decision cycle.
@@ -150,17 +218,27 @@ async def run_agent_cycle(
             bars_per_symbol = {}
             if collector:
                 try:
+                    settings = get_settings()
                     bars_per_symbol = await collector.fetch_latest_bars(
-                        agent.watchlist, limit=50, lookback_days=30, validate=False
+                        agent.watchlist,
+                        limit=settings.default_bar_limit,
+                        lookback_days=30,
+                        validate=False,
                     )
                 except Exception as exc:
                     logger.warning("Failed to fetch market bars for cycle: %s", exc)
 
         # 5. Build Context & Get Versioned Prompt
+        if portfolio_context is None:
+            portfolio_context = await _load_portfolio_context(agent, db)
         context = build_agent_context(
             symbols=agent.watchlist,
             bars_per_symbol=bars_per_symbol,
+            account_info=portfolio_context.get("account"),
+            positions=portfolio_context.get("positions"),
+            open_orders=portfolio_context.get("open_orders"),
             strategy_version=agent.strategy_version,
+            account_data_status=portfolio_context.get("status", "UNAVAILABLE"),
         )
         context["versions"] = {
             "strategy": agent.strategy_version,
@@ -172,6 +250,28 @@ async def run_agent_cycle(
 
         system_prompt = prompt_definition.text
         prompt_input = json.dumps(context, indent=2)
+        market_context = context.get("market", {})
+        bars_used = sum(
+            int(symbol_context.get("bar_count", 0))
+            for symbol_context in market_context.values()
+        )
+        context_chars = len(prompt_input)
+        system_chars = len(system_prompt)
+        context["observability"] = {
+            "context_chars": context_chars,
+            "system_prompt_chars": system_chars,
+            "estimated_input_tokens": (context_chars + system_chars + 3) // 4,
+            "symbols": len(agent.watchlist),
+            "bars_used": bars_used,
+            "account_data_status": context["account"]["data_status"],
+        }
+        logger.info(
+            "Prepared agent context for cycle %s: %s chars, ~%s tokens, %s bars",
+            cycle.id,
+            context_chars + system_chars,
+            context["observability"]["estimated_input_tokens"],
+            bars_used,
+        )
 
         # 6. Execute LLM Call
         cycle.status = CycleStatus.REASONING
@@ -424,13 +524,18 @@ async def run_watchlist_cycles(
             collector = None
     if collector:
         try:
+            settings = get_settings()
             bars_per_symbol = await collector.fetch_latest_bars(
-                symbols, limit=50, lookback_days=30, validate=False
+                symbols,
+                limit=settings.default_bar_limit,
+                lookback_days=30,
+                validate=False,
             )
         except Exception as exc:
             logger.warning("Watchlist sweep: bar prefetch failed: %s", exc)
             bars_per_symbol = {}
 
+    portfolio_context = await _load_portfolio_context(agent, db)
     cycles: list[AgentCycle] = []
     last_error: Exception | None = None
     for index, symbol in enumerate(symbols):
@@ -443,6 +548,7 @@ async def run_watchlist_cycles(
                 collector=collector,
                 target_symbol=symbol,
                 bars_per_symbol=bars_per_symbol,
+                portfolio_context=portfolio_context,
                 # Gate once on the first symbol; the rest are sequential and must not
                 # block on an approval/execution the first symbol may have left active.
                 enforce_no_overlap=(index == 0),

@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o-mini"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
+    ollama_temperature: float = Field(default=0.1, ge=0, le=2)
+    ollama_num_ctx: int = Field(default=4096, ge=512)
+    ollama_json_format: bool = True
 
     # Encrypted Alpaca Credential Vault — Fernet key. No default: a working key
     # baked into source would make "encryption at rest" meaningless for any
