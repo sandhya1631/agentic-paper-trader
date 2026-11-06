@@ -79,6 +79,25 @@ class User(Base, UUIDPrimaryKey, Timestamped):
         self.password_hash = value
 
 
+class PasswordResetToken(Base, UUIDPrimaryKey):
+    """One-time password reset token (#166).
+
+    Only the SHA-256 hash of the token is stored — the raw token is handed to the
+    caller once (logged server-side in dev, since real email delivery is out of
+    scope) and never persisted, so a database read alone cannot be used to reset a
+    password. A token is single-use (used_at) and time-limited (expires_at).
+    """
+
+    __tablename__ = "password_reset_tokens"
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class TradingAccount(Base, UUIDPrimaryKey, Timestamped):
     __tablename__ = "trading_accounts"
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
