@@ -51,3 +51,20 @@ async def ensure_user_scheduler_column(conn: AsyncConnection) -> None:
             "NOT NULL DEFAULT TRUE"
         )
     )
+
+
+async def ensure_kill_switch_event_scope_columns(conn: AsyncConnection) -> None:
+    """Add the user-level kill-switch scope columns to pre-existing databases."""
+    await conn.execute(
+        text(
+            "ALTER TABLE kill_switch_events "
+            "ADD COLUMN IF NOT EXISTS scope VARCHAR(10) NOT NULL DEFAULT 'GLOBAL'"
+        )
+    )
+    await conn.execute(
+        text(
+            "ALTER TABLE kill_switch_events "
+            "ADD COLUMN IF NOT EXISTS target_user_id UUID "
+            "REFERENCES users(id) ON DELETE SET NULL"
+        )
+    )

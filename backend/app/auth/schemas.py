@@ -51,3 +51,27 @@ class UserRead(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordResponse(BaseModel):
+    # Always this exact message, whether or not the email is registered (#166):
+    # the response must not be usable to enumerate accounts.
+    detail: str = "If that email is registered, a password reset link has been sent."
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=1)
+    new_password: str = Field(min_length=8)
+
+    @field_validator("new_password")
+    @classmethod
+    def password_within_bcrypt_limit(cls, value: str) -> str:
+        return _ensure_within_bcrypt_limit(value)
+
+
+class ResetPasswordResponse(BaseModel):
+    detail: str = "Password has been reset. You can now log in with your new password."

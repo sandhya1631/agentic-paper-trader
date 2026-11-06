@@ -95,6 +95,11 @@ async def test_lifespan_starts_scheduler_before_yield_and_stops_it(monkeypatch):
     )
     monkeypatch.setattr(
         main_module,
+        "ensure_kill_switch_event_scope_columns",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        main_module,
         "AsyncSessionLocal",
         lambda: AsyncContext(db),
     )
@@ -476,6 +481,7 @@ async def test_start_schedule_persists_interval_and_registers_job():
                 ),
             ]
         ),
+        scalar=AsyncMock(return_value=False),
         add=MagicMock(),
         commit=AsyncMock(),
         refresh=AsyncMock(side_effect=assign_schedule_id),
@@ -528,6 +534,7 @@ async def test_start_schedule_recovers_from_concurrent_insert():
                 ),
             ]
         ),
+        scalar=AsyncMock(return_value=False),
         add=MagicMock(),
         commit=AsyncMock(
             side_effect=[
@@ -588,6 +595,8 @@ async def test_stop_schedule_pauses_all_schedules_for_user():
                     ),
                 ]
             ),
+            scalar=AsyncMock(return_value=True),
+            add=MagicMock(),
             commit=AsyncMock(),
             refresh=AsyncMock(),
         ),
