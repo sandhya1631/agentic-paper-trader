@@ -420,6 +420,22 @@ execution framework; its broker and result backend are configured to use Redis.
 Likewise, Alpaca is not a local database: it is the external authoritative
 system for market data, paper-account balances, positions, and broker orders.
 
+### 4.13 `password_reset_tokens`
+
+Stores one-time password reset tokens (Issue #166):
+
+- `id`
+- `user_id` (`ON DELETE CASCADE`)
+- `token_hash` (SHA-256 of the raw token; the raw token itself is never stored)
+- `created_at`, `expires_at`, `used_at`
+
+Only the hash is persisted, so reading this table alone cannot be used to reset
+a password - the caller must know the raw token, which is handed to them once
+(logged server-side in place of a real email, see 5.1) and never written to the
+database. A token is single-use (`used_at`) and expires after
+`PASSWORD_RESET_TOKEN_EXPIRY_MINUTES` (30). Requesting a new token invalidates
+any earlier unused one for that user.
+
 ---
 
 ## 5. Data and decision flow
@@ -434,6 +450,21 @@ system for market data, paper-account balances, positions, and broker orders.
 6. Protected endpoints call `get_current_user()`.
 7. The dependency validates the JWT, converts `sub` to UUID, and loads the
    corresponding user.
+
+**Password reset (Issue #166):**
+
+1. `POST /auth/forgot-password` looks up the email. The response is the same
+   generic message whether or not an account exists, so this endpoint cannot
+   be used to enumerate registered emails.
+2. If a user is found, a random token is generated, hashed, and stored in
+   `password_reset_tokens` with a 30-minute expiry; any earlier unused token
+   for that user is invalidated in the same step.
+3. The raw (unhashed) token is logged server-side (`log_password_reset_link`)
+   instead of emailed - real email delivery is out of scope for #166.
+4. `POST /auth/reset-password` hashes the submitted token, looks it up, and
+   rejects it (400) if missing, already used, or expired.
+5. On success the token is marked used and `users.password_hash` is updated;
+   the old password stops working immediately.
 
 ### 5.2 Credential flow
 

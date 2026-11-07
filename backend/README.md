@@ -68,6 +68,8 @@ On startup, the API creates missing tables and adds the `prompt_version` and
 - `POST /auth/register` — create a user (bcrypt-hashed password).
 - `POST /auth/login` — returns a signed JWT (`access_token`) on valid credentials.
 - `GET /auth/me` — protected route; requires `Authorization: Bearer <token>`, rejects unauthenticated requests with 401.
+- `POST /auth/forgot-password` — always returns the same generic message; if the email is registered, logs a reset link server-side (no real email delivery yet).
+- `POST /auth/reset-password` — consumes a one-time token from `/auth/forgot-password` and sets a new password.
 - `GET /market-data/bars` — protected route; latest OHLCV bars (default: 50 bars, 5-minute, for AAPL/NVDA/SPY)
   from Alpaca's Data API. Requires `ALPACA_API_KEY`/`ALPACA_API_SECRET` in `.env` (free paper-trading keys from
   https://app.alpaca.markets/); retries automatically on rate limiting (HTTP 429).
