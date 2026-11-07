@@ -351,3 +351,39 @@ def test_prompt_has_no_hardcoded_symbol():
     assert "AAPL" not in prompt
     # It drives the decision off the per-cycle target instead.
     assert "decision_target" in prompt
+
+
+@pytest.mark.asyncio
+async def test_sweep_reads_the_live_account_once_and_shares_it(db_session: AsyncSession):
+    """A watchlist sweep makes one broker read, not one per symbol."""
+    from app.agent.live_context import LiveAccountData
+
+    agent = await _seed_agent(
+        db_session, watchlist=["AAPL", "NVDA", "SPY"], approval_mode=ApprovalMode.OBSERVE_ONLY
+    )
+    live = LiveAccountData(
+        account={"cash": "52000.50", "equity": "98000.25", "buying_power": "1", "daily_pnl": "0"},
+        positions=[{"symbol": "NVDA", "qty": "3", "market_value": "900", "unrealized_pnl": "1"}],
+        open_orders=[],
+        market_open=True,
+    )
+    llm = _echo_target_llm()
+    collector = MagicMock()
+    collector.fetch_latest_bars = AsyncMock(return_value={})
+
+    with patch(
+        "app.agent.orchestrator.fetch_live_account_data", AsyncMock(return_value=live)
+    ) as fetch:
+        cycles = await run_watchlist_cycles(
+            agent.id,
+            db_session,
+            trigger=CycleTrigger.SCHEDULED,
+            llm_client=llm,
+            collector=collector,
+        )
+
+    assert len(cycles) == 3
+    fetch.assert_awaited_once()
+    for cycle in cycles:
+        assert cycle.snapshot_json["account"]["cash"] == "52000.50"
+        assert cycle.snapshot_json["positions"][0]["symbol"] == "NVDA"

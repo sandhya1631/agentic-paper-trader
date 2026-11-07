@@ -1,8 +1,13 @@
 """Agent Context Builder.
 
 Compiles structured market data, technical indicators (RSI-14, SMA-20, SMA-50),
-portfolio cash/equity, open positions, and open orders into a sanitized context
-dictionary for the LLM. Strips all API keys, secrets, and credential tokens.
+portfolio cash/equity, open positions, open orders and market status into a
+sanitized context dictionary for the LLM. Strips all API keys, secrets, and
+credential tokens.
+
+When the live account could not be read (``account_info`` is None) the context says
+so (``account_data: "UNAVAILABLE"``) instead of inventing balances: fabricated cash
+or "no positions" would mislead the model, so the prompt tells it to HOLD.
 """
 
 from typing import Any
@@ -18,6 +23,7 @@ def build_agent_context(
     positions: list[dict[str, Any]] | None = None,
     open_orders: list[dict[str, Any]] | None = None,
     strategy_version: str = DEFAULT_STRATEGY_VERSION,
+    market_open: bool | None = None,
 ) -> dict[str, Any]:
     """Assemble sanitized market and account context for LLM prompt generation."""
     market_context: dict[str, Any] = {}
@@ -70,14 +76,16 @@ def build_agent_context(
             "bar_count": len(bars),
         }
 
-    # Sanitize account information (guarantee no credentials)
-    acc = account_info or {}
-    sanitized_account = {
-        "cash": str(acc.get("cash", "100000.00")),
-        "equity": str(acc.get("equity", "100000.00")),
-        "buying_power": str(acc.get("buying_power", "400000.00")),
-        "daily_pnl": str(acc.get("daily_pnl", "0.00")),
-    }
+    # Sanitize account information (guarantee no credentials). Never invent numbers:
+    # without live data the account is marked UNAVAILABLE.
+    account_available = account_info is not None
+    if account_info is not None:
+        sanitized_account: dict[str, Any] = {
+            key: (str(account_info[key]) if account_info.get(key) is not None else None)
+            for key in ("cash", "equity", "buying_power", "daily_pnl")
+        }
+    else:
+        sanitized_account = {"status": "UNAVAILABLE"}
 
     sanitized_positions = [
         {
@@ -100,10 +108,17 @@ def build_agent_context(
         for ord in (open_orders or [])
     ]
 
+    if market_open is None:
+        market_status = "UNKNOWN"
+    else:
+        market_status = "OPEN" if market_open else "CLOSED"
+
     return {
         "strategy_version": strategy_version,
         "watchlist": symbols,
+        "market_status": market_status,
         "market": market_context,
+        "account_data": "LIVE" if account_available else "UNAVAILABLE",
         "account": sanitized_account,
         "positions": sanitized_positions,
         "open_orders": sanitized_orders,
