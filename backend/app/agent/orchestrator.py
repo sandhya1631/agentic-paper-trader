@@ -34,6 +34,7 @@ from app.agent.approval import (
     reconcile_uncertain_cycle,
 )
 from app.agent.context import build_agent_context
+from app.agent.live_context import UNSET, LiveAccountData, Unset, fetch_live_account_data
 from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.broker.gateway import TradingDisabledError
@@ -70,6 +71,7 @@ async def run_agent_cycle(
     target_symbol: str | None = None,
     bars_per_symbol: dict[str, list[Any]] | None = None,
     enforce_no_overlap: bool = True,
+    account_data: LiveAccountData | None | Unset = UNSET,
 ) -> AgentCycle:
     """Execute a single end-to-end agent decision cycle.
 
@@ -80,6 +82,9 @@ async def run_agent_cycle(
     watchlist sweep fetches once. ``enforce_no_overlap`` runs the active-cycle
     gate; a sweep runs it once (first symbol) and skips it for the rest, so one
     tick can produce a cycle per symbol without each blocking the next.
+    ``account_data`` is the live paper account shown to the model; when omitted it is
+    fetched here, and a sweep passes it in so the broker is read once per tick.
+    ``None`` means "could not be read" and the context says UNAVAILABLE (never defaults).
     """
     # 1. Fetch AgentConfig
     stmt = select(AgentConfig).where(AgentConfig.id == agent_id)
@@ -157,9 +162,19 @@ async def run_agent_cycle(
                     logger.warning("Failed to fetch market bars for cycle: %s", exc)
 
         # 5. Build Context & Get Versioned Prompt
+        # Real account, positions, open orders and market status for the model.
+        live = (
+            await fetch_live_account_data(db, agent)
+            if isinstance(account_data, Unset)
+            else account_data
+        )
         context = build_agent_context(
             symbols=agent.watchlist,
             bars_per_symbol=bars_per_symbol,
+            account_info=live.account if live else None,
+            positions=live.positions if live else None,
+            open_orders=live.open_orders if live else None,
+            market_open=live.market_open if live else None,
             strategy_version=agent.strategy_version,
         )
         context["versions"] = {
@@ -431,6 +446,9 @@ async def run_watchlist_cycles(
             logger.warning("Watchlist sweep: bar prefetch failed: %s", exc)
             bars_per_symbol = {}
 
+    # Read the live account once per tick; every per-symbol cycle reuses it.
+    live_account_data = await fetch_live_account_data(db, agent)
+
     cycles: list[AgentCycle] = []
     last_error: Exception | None = None
     for index, symbol in enumerate(symbols):
@@ -443,6 +461,7 @@ async def run_watchlist_cycles(
                 collector=collector,
                 target_symbol=symbol,
                 bars_per_symbol=bars_per_symbol,
+                account_data=live_account_data,
                 # Gate once on the first symbol; the rest are sequential and must not
                 # block on an approval/execution the first symbol may have left active.
                 enforce_no_overlap=(index == 0),
