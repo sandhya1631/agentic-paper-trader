@@ -17,6 +17,7 @@ dependencies = [
     "pandas>=2.2",
     "python-multipart>=0.0.12",
     "openai>=1.50",
+    "anthropic>=2.4,<3",
     "alpaca-py>=0.30",
     "cryptography>=43.0",
     "apscheduler>=3.10,<4",
@@ -92,7 +93,6 @@ warn_redundant_casts = true
 # green. Remove these overrides as each module is cleaned up (tighten over time).
 [[tool.mypy.overrides]]
 module = [
-    "app.llm.openai_client",
     "app.broker.alpaca",
     "app.broker.router",
     "app.market_data.alpaca_client",

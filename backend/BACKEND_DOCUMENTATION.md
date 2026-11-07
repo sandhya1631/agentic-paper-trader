@@ -10,7 +10,7 @@ The backend is a FastAPI application using:
 
 - PostgreSQL through async SQLAlchemy 2.0 and `asyncpg`.
 - Alpaca's paper-trading and market-data APIs.
-- Ollama or OpenAI for the language-model decision proposal.
+- Ollama, OpenAI or Anthropic (Claude) for the language-model decision proposal.
 - APScheduler for in-process schedule timing.
 - Celery and Redis for scheduled-cycle execution.
 - Fernet encryption for user Alpaca credentials.
@@ -45,7 +45,7 @@ HTTP request or scheduler tick
        |             |
        v             v
  Market data     LLM provider
- bars + TA       Ollama/OpenAI
+ bars + TA   Ollama/OpenAI/Claude
        |             |
        +------+------+
               v
@@ -118,9 +118,10 @@ Important settings:
 | `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_ISSUER`, `JWT_EXPIRATION_MINUTES` | JWT authentication settings. |
 | `ALPACA_API_KEY`, `ALPACA_API_SECRET` | Server-level credentials used by market-data and scheduler clock checks. |
 | `ALPACA_PAPER_BASE_URL` | Must be `https://paper-api.alpaca.markets` with optional `/v2`. |
-| `LLM_PROVIDER` | `ollama` or `openai`; defaults to `ollama`. |
+| `LLM_PROVIDER` | `ollama`, `openai` or `anthropic`; defaults to `ollama`. |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local LLM connection. |
-| `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI connection. |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI connection; `OPENAI_MODEL` (default `gpt-4o-mini`) must support strict structured output (`json_schema`) and `temperature`. |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Anthropic (Claude) connection; model defaults to `claude-opus-5-5`. |
 | `CREDENTIAL_ENCRYPTION_KEY` | Required Fernet key for user Alpaca credentials. |
 | `SCHEDULER_ENABLED` | Enables the global APScheduler job; defaults to false. |
 | `SCHEDULER_INTERVAL_MINUTES` | Global schedule interval; defaults to 15. |
@@ -373,7 +374,7 @@ reconciliation.
 | Scheduler tick history | Redis + `redis_data` volume in Compose | Up to 100 entries/key, 30-day expiry | Tick status, counts, reason, timestamps | Shared operational monitoring state |
 | Scheduler dispatch locks | Redis | Short-lived, about two interval lengths | `SET NX` slot keys preventing duplicate enqueueing | Distributed coordination lock, not history |
 | Scheduler fallback history | API process memory | Temporary | Recent tick summaries if Redis cannot be read/written | Best-effort fallback; lost on process restart |
-| LLM prompt and response | LLM provider during request; PostgreSQL after cycle | Provider runtime plus durable cycle record | Prompt sent to Ollama/OpenAI and returned text | Provider performs generation; PostgreSQL preserves the cycle evidence |
+| LLM prompt and response | LLM provider during request; PostgreSQL after cycle | Provider runtime plus durable cycle record | Prompt sent to Ollama/OpenAI/Anthropic and returned text | Provider performs generation; PostgreSQL preserves the cycle evidence |
 | Downloaded Ollama models | Ollama container filesystem | Durable in Compose | Pulled model files | `ollama_data` Docker volume; not PostgreSQL or Redis |
 | Logs and exceptions | Application process logging destination | Deployment-dependent | Operational messages and stack traces | Observability only; not a structured business-data store |
 
@@ -1137,14 +1138,19 @@ async context-manager methods. Function locations are relative to `backend`.
 |---|---|---|
 | `LLMClient.generate` | `app/llm/base.py` | Abstract provider-neutral text-generation contract. |
 | `LLMClient.health_check` | `app/llm/base.py` | Abstract provider/model availability contract. |
-| `create_llm_client` | `app/llm/factory.py` | Creates OpenAI or Ollama from settings. |
+| `create_llm_client` | `app/llm/factory.py` | Creates OpenAI, Ollama or Anthropic from settings (Anthropic imported lazily). |
+| `configured_model` | `app/llm/factory.py` | Returns the configured provider's model id without reading keys. |
 | `get_llm_client` | `app/llm/factory.py` | Returns a cached provider client. |
 | `OllamaClient.__init__` | `app/llm/ollama_client.py` | Stores Ollama URL and model. |
 | `OllamaClient.generate` | `app/llm/ollama_client.py` | Calls Ollama `/api/chat` without streaming. |
 | `OllamaClient.health_check` | `app/llm/ollama_client.py` | Checks Ollama reachability and installed model. |
-| `OpenAIClient.__init__` | `app/llm/openai_client.py` | Requires an API key and stores the model. |
-| `OpenAIClient.generate` | `app/llm/openai_client.py` | Calls OpenAI chat completions. |
-| `OpenAIClient.health_check` | `app/llm/openai_client.py` | Lists OpenAI models and checks availability. |
+| `DECISION_JSON_SCHEMA` | `app/llm/decision_schema.py` | Provider-neutral decision schema used for structured output by the OpenAI and Anthropic clients (imports no SDK). |
+| `OpenAIClient.__init__` | `app/llm/openai_client.py` | Requires an API key and stores it with the model; an SDK client is created per call. |
+| `OpenAIClient.generate` | `app/llm/openai_client.py` | Calls chat completions with strict structured JSON output; a refusal's text is returned as the (invalid) answer, so it is recorded in the cycle's raw response. An API error raises a `RuntimeError` naming only its type and HTTP status; the type, status, error code/type/param and request id are logged server-side, while the provider's message and body are never logged or returned. |
+| `OpenAIClient.health_check` | `app/llm/openai_client.py` | Lists OpenAI models and checks availability; on failure the detail names only the exception type. |
+| `AnthropicClient.__init__` | `app/llm/anthropic_client.py` | Requires an API key and stores the model. |
+| `AnthropicClient.generate` | `app/llm/anthropic_client.py` | Calls the Messages API with structured JSON output; returns the text blocks. An API error raises a `RuntimeError` naming only its type and HTTP status; the type, status and request id are logged server-side, while the provider's body is never logged or returned. |
+| `AnthropicClient.health_check` | `app/llm/anthropic_client.py` | Retrieves the model and checks reachability/availability. |
 | `llm_health` | `app/llm/router.py` | Echoes configuration or performs an active LLM probe. |
 
 ### Alpaca broker integration
