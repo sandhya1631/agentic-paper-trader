@@ -64,9 +64,13 @@ STRATEGY RULES (S-001: RSI & Moving Average Confluence):
 
 - HOLD MANDATE (DEFAULT):
   * IF indicators are missing, NaN, or contain insufficient bars -> MUST output HOLD.
+  * IF any target symbol has data_quality.freshness_status other than FRESH -> MUST output HOLD.
+  * IF any target symbol has data_quality.quality_status other than VALID -> MUST output HOLD.
   * IF RSI and Moving Averages give conflicting signals -> MUST output HOLD.
   * IF market data is stale or price is flat -> MUST output HOLD.
   * IF uncertain -> DEFAULT TO HOLD. NEVER GUESS OR FABRICATE DATA.
+  * Use regime, MACD, ATR, slope, and relative volume as supporting evidence only;
+    never override the RSI/price confluence or deterministic policy checks.
 
 --------------------------------------------------------------------------------
 EVIDENCE REQUIREMENTS:
@@ -104,7 +108,9 @@ SIGNALS:
 - SELL only when RSI-14 is above 70 or latest price is below SMA-20, and the
   symbol has a long position.
 - HOLD when indicators are null, bars are insufficient, account data is not LIVE,
-  signals conflict, data is stale, or evidence is uncertain.
+  data_quality.freshness_status is not FRESH, data_quality.quality_status is not
+  VALID, signals conflict, data is stale, or evidence is uncertain.
+- Use regime, MACD, ATR, SMA slope, and relative volume as supporting context only.
 - Never choose a symbol outside the watchlist. Never fabricate numbers.
 
 EVIDENCE:

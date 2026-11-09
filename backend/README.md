@@ -72,7 +72,9 @@ On startup, the API creates missing tables and adds the `prompt_version` and
 - `POST /auth/reset-password` — consumes a one-time token from `/auth/forgot-password` and sets a new password.
 - `GET /market-data/bars` — protected route; latest OHLCV bars (default: 50 bars, 5-minute, for AAPL/NVDA/SPY)
   from Alpaca's Data API. Requires `ALPACA_API_KEY`/`ALPACA_API_SECRET` in `.env` (free paper-trading keys from
-  https://app.alpaca.markets/); retries automatically on rate limiting (HTTP 429).
+  https://app.alpaca.markets/); retries automatically on rate limiting (HTTP 429). Agent cycles
+  mark bar sets stale when their latest timestamp is older than `MAX_MARKET_DATA_AGE_MINUTES`
+  (default: 15).
 - `GET /llm/health` — reports the configured LLM provider/model (no API call, no cost).
 - `GET /api/v1/broker/account` — fetches the authenticated user's paper-account
   metrics and stores a non-sensitive snapshot in `account_snapshots`. The
@@ -123,6 +125,17 @@ LLM_PROVIDER=ollama   # or "openai"
   `S-001` until their strategy version is explicitly changed. Strategy prompts are immutable
   versions and are saved with each cycle for auditability.
 - `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
+
+#### Offline strategy replay
+
+`app/agent/replay.py` provides `evaluate_replay()` for comparing strategy
+versions against fixed historical samples without database, broker, approval,
+or order execution. It reports valid/invalid output counts, BUY/SELL/HOLD
+distribution, estimated input tokens, latency, and a simple one-step return
+versus buy-and-hold. Use identical samples when comparing `S-001` and `S-002`;
+the one-step return is an evaluation signal, not a production backtest because
+it does not model fills, spread, slippage, commissions, sizing, or multi-period
+portfolio state.
 
 #### Install & verify the local LLM
 

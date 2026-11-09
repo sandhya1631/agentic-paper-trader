@@ -132,6 +132,7 @@ Important settings:
 | `MAX_ORDERS_PER_DAY` | Runtime value for policy P-012; defaults to 10 and must be at least 1. |
 | `DEFAULT_BAR_LIMIT` | Default number of market bars per symbol; defaults to 50. |
 | `DEFAULT_TIMEFRAME_MINUTES` | Default market-bar interval; defaults to 5 minutes. |
+| `MAX_MARKET_DATA_AGE_MINUTES` | Maximum age for a bar set to be considered fresh; defaults to 15 minutes. |
 | `MAX_RETRY_ATTEMPTS` | Maximum market-data request attempts; defaults to 3. |
 | `RETRY_BACKOFF_SECONDS` | Initial rate-limit retry delay; defaults to 1 second and doubles per retry. |
 
@@ -492,9 +493,14 @@ any earlier unused one for that user.
    timestamps.
 5. `calculate_indicators()` requires at least 50 closes and returns RSI-14,
    SMA-20, and SMA-50.
-6. The orchestrator's current call uses `validate=False`; insufficient data is
-   represented as missing indicators in the LLM context, which the prompt
-   directs the model to treat as `HOLD`.
+6. The context builder reports per-symbol data quality:
+   `age_seconds`, `freshness_status` (`FRESH`, `STALE`, or `UNKNOWN`),
+   `missing_close_count`, `duplicate_timestamp_count`, and `quality_status`
+   (`VALID`, `DEGRADED`, or `NO_DATA`).
+7. `MAX_MARKET_DATA_AGE_MINUTES` controls freshness, defaulting to 15 minutes.
+   The orchestrator's current call uses `validate=False`; insufficient, stale,
+   or degraded data is represented explicitly in the LLM context and the prompt
+   directs the model to treat it as `HOLD`.
 
 ### 5.4 Context and LLM flow
 
@@ -503,6 +509,13 @@ any earlier unused one for that user.
 - Strategy version and watchlist.
 - Latest price, timestamp, RSI-14, SMA-20, SMA-50, bar count, and the latest
   12 compact OHLCV bars with close-to-close percentage changes per symbol.
+- Per-symbol freshness and quality metadata, including bar age, missing-close
+  count, duplicate-timestamp count, and quality status.
+- Extended deterministic indicators when complete OHLCV data is available:
+  ATR-14, MACD, MACD signal and histogram, SMA-20 slope, relative volume over
+  20 bars, and a simple `UPTREND`, `DOWNTREND`, or `RANGE` regime label.
+- Top-level `market_status` from the Alpaca market clock: `OPEN`, `CLOSED`, or
+  `UNKNOWN` when the clock could not be read.
 - Live account cash, equity, buying power, and daily P&L when available.
 - Position symbol, quantity, market value, and unrealized P&L if supplied.
 - Open-order id, symbol, side, quantity, and status if supplied.
@@ -521,12 +534,17 @@ system-prompt character counts, approximate input tokens, symbol count, bars
 used, and account-data status. These fields are audit measurements and are not
 included in the model input.
 
-The default prompt (`S-001`, revision `1.1.0`) describes a technical-momentum
+The default prompt (`S-001`, revision `1.2.0`) describes a technical-momentum
 strategy:
 
 - BUY when RSI/price trend/cash conditions align.
 - SELL when RSI is overbought or price breaks below SMA-20 and a position exists.
 - HOLD when data is missing, stale, conflicting, flat, or uncertain.
+- HOLD when account data is not `LIVE`; the prompt also receives market status
+  so it can distinguish open, closed, and unknown market conditions.
+- ATR, MACD, SMA slope, relative volume, and regime are supporting evidence;
+  they do not override the primary RSI/price confluence or deterministic
+  execution policies.
 
 `S-002` is an opt-in shorter prompt designed for local Ollama models. It
 emphasizes using only supplied JSON, requires live account data for BUY
@@ -604,10 +622,12 @@ Insert an `AgentCycle` with:
 ### Step 3: Collect market context
 
 Set status to `COLLECTING`, fetch watchlist bars, calculate indicators where
-there are at least 50 closes, and build the sanitized context. The number of
-bars is controlled by `DEFAULT_BAR_LIMIT` and the latest 12 bars are included
-as compact model evidence. The watchlist sweep fetches market bars and live
-portfolio state once, then reuses both across its per-symbol cycles.
+there are at least 50 closes, read the Alpaca market clock, and build the
+sanitized context. The number of bars is controlled by `DEFAULT_BAR_LIMIT` and
+the latest 12 bars are included as compact model evidence. The watchlist sweep
+fetches market bars and live portfolio state once, then reuses both across its
+per-symbol cycles. A market-clock failure does not invalidate otherwise live
+portfolio data; it records `market_status=UNKNOWN`.
 
 A collector construction or bar-fetch problem is logged and leaves the cycle
 with empty/missing market data, allowing the strategy's HOLD mandate to apply.
@@ -656,6 +676,29 @@ the LLM produced it.
 For REQUIRED, approval endpoints perform the same fresh evaluation at approval
 time. The account and market can therefore change between proposal time and
 execution time.
+
+### 6.1 Offline replay evaluation
+
+`app/agent/replay.py` provides an offline `evaluate_replay()` harness. It uses
+the same context builder, versioned strategy prompt, and proposal validator as
+live cycles, but never opens a database session, calls the broker, creates an
+approval, or submits an order.
+
+Each `ReplaySample` contains historical bars, optional portfolio state, and an
+optional next price. The resulting `ReplayMetrics` reports:
+
+- valid and invalid model outputs;
+- BUY, SELL, and HOLD counts;
+- average estimated input tokens;
+- average model latency;
+- simple one-step strategy return;
+- matching buy-and-hold return.
+
+Run the replay harness with fixed samples for each strategy version to compare
+`S-001` and `S-002` on identical evidence. These metrics are evaluation
+signals, not a production backtest: the current one-step return model does not
+include fills, spread, slippage, commissions, position sizing, or multi-period
+portfolio state.
 
 ---
 

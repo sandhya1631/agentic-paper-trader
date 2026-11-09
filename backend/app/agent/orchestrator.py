@@ -247,6 +247,7 @@ async def run_agent_cycle(
             strategy_version=agent.strategy_version,
             account_data_status=portfolio_context.get("status", "UNAVAILABLE"),
             market_open=portfolio_context.get("market_open"),  # CHANGE 3
+            max_data_age_seconds=get_settings().max_market_data_age_minutes * 60,
         )
         context["versions"] = {
             "strategy": agent.strategy_version,

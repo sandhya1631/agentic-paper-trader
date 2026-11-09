@@ -5,6 +5,7 @@ portfolio cash/equity, open positions, and open orders into a sanitized context
 dictionary for the LLM. Strips all API keys, secrets, and credential tokens.
 """
 
+from datetime import datetime, timezone
 from typing import Any
 
 from app.core.constants import DEFAULT_STRATEGY_VERSION
@@ -48,6 +49,50 @@ def _recent_bar_summary(bars: list[Any], count: int = 12) -> list[dict[str, Any]
     return summary
 
 
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if timestamp.tzinfo is None:
+        return timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
+
+
+def _bar_quality(
+    bars: list[Any], latest_timestamp: Any, max_age_seconds: int
+) -> dict[str, Any]:
+    timestamps = [_bar_value(bar, "timestamp") for bar in bars]
+    timestamp_keys = [str(timestamp) for timestamp in timestamps if timestamp is not None]
+    duplicate_count = len(timestamp_keys) - len(set(timestamp_keys))
+    missing_close_count = sum(_bar_value(bar, "close") is None for bar in bars)
+    parsed_latest = _parse_timestamp(latest_timestamp)
+
+    if parsed_latest is None:
+        freshness_status = "UNKNOWN"
+        age_seconds = None
+    else:
+        age_seconds = max(
+            0, int((datetime.now(timezone.utc) - parsed_latest).total_seconds())
+        )
+        freshness_status = "FRESH" if age_seconds <= max_age_seconds else "STALE"
+
+    quality_status = (
+        "VALID"
+        if missing_close_count == 0 and duplicate_count == 0
+        else "DEGRADED"
+    )
+    return {
+        "age_seconds": age_seconds,
+        "freshness_status": freshness_status,
+        "missing_close_count": missing_close_count,
+        "duplicate_timestamp_count": duplicate_count,
+        "quality_status": quality_status,
+    }
+
+
 def build_agent_context(
     symbols: list[str],
     bars_per_symbol: dict[str, list[Any]],
@@ -57,6 +102,7 @@ def build_agent_context(
     strategy_version: str = DEFAULT_STRATEGY_VERSION,
     account_data_status: str = "NOT_PROVIDED",
     market_open: bool | None = None,  # CHANGE 1: whether the market is open (None = unknown)
+    max_data_age_seconds: int = 900,
 ) -> dict[str, Any]:
     """Assemble sanitized market and account context for LLM prompt generation."""
     market_context: dict[str, Any] = {}
@@ -71,6 +117,13 @@ def build_agent_context(
                 "sma_50": None,
                 "bar_count": 0,
                 "status": "NO_DATA",
+                "data_quality": {
+                    "age_seconds": None,
+                    "freshness_status": "UNKNOWN",
+                    "missing_close_count": 0,
+                    "duplicate_timestamp_count": 0,
+                    "quality_status": "NO_DATA",
+                },
             }
             continue
 
@@ -79,19 +132,30 @@ def build_agent_context(
         latest_ts = _bar_value(latest_bar, "timestamp")
 
         close_prices = []
+        high_prices = []
+        low_prices = []
+        volumes = []
         for b in bars:
             val = _bar_value(b, "close")
             if val is not None:
                 close_prices.append(val)
+            high_prices.append(_bar_value(b, "high"))
+            low_prices.append(_bar_value(b, "low"))
+            volumes.append(_bar_value(b, "volume"))
 
         indicators: dict[str, float | None] = {}
         if len(close_prices) >= 50:
             try:
-                indicators = calculate_indicators(close_prices)
+                indicators = calculate_indicators(
+                    close_prices,
+                    highs=high_prices if all(value is not None for value in high_prices) else None,
+                    lows=low_prices if all(value is not None for value in low_prices) else None,
+                    volumes=volumes if all(value is not None for value in volumes) else None,
+                )
             except Exception:
-                indicators = {"rsi_14": None, "sma_20": None, "sma_50": None}
+                indicators = {}
         else:
-            indicators = {"rsi_14": None, "sma_20": None, "sma_50": None}
+            indicators = {}
 
         market_context[sym] = {
             "latest_price": float(latest_price) if latest_price is not None else None,
@@ -99,8 +163,16 @@ def build_agent_context(
             "rsi_14": indicators.get("rsi_14"),
             "sma_20": indicators.get("sma_20"),
             "sma_50": indicators.get("sma_50"),
+            "sma_20_slope_pct": indicators.get("sma_20_slope_pct"),
+            "macd": indicators.get("macd"),
+            "macd_signal": indicators.get("macd_signal"),
+            "macd_histogram": indicators.get("macd_histogram"),
+            "atr_14": indicators.get("atr_14"),
+            "relative_volume_20": indicators.get("relative_volume_20"),
+            "regime": indicators.get("regime"),
             "bar_count": len(bars),
             "recent_bars": _recent_bar_summary(bars),
+            "data_quality": _bar_quality(bars, latest_ts, max_data_age_seconds),
         }
 
     # Sanitize account information (guarantee no credentials)

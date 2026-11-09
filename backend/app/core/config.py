@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     # Market data collector (app/market_data/alpaca_client.py)
     default_bar_limit: int = Field(default=50, ge=1)
     default_timeframe_minutes: int = Field(default=5, ge=1)
+    max_market_data_age_minutes: int = Field(default=15, ge=1)
     max_retry_attempts: int = Field(default=3, ge=1)
     retry_backoff_seconds: float = Field(default=1.0, gt=0)
 

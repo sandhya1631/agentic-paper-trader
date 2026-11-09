@@ -136,8 +136,38 @@ def test_build_agent_context():
     assert len(context["market"]["AAPL"]["recent_bars"]) == 12
     assert context["market"]["AAPL"]["recent_bars"][-1]["close"] == 154.9
     assert context["market"]["AAPL"]["recent_bars"][-1]["change_pct"] > 0
+    assert context["market"]["AAPL"]["data_quality"]["freshness_status"] == "STALE"
     assert context["market"]["NVDA"]["status"] == "NO_DATA"
+    assert context["market"]["NVDA"]["data_quality"]["quality_status"] == "NO_DATA"
     assert context["account"]["data_status"] == "NOT_PROVIDED"
+
+
+def test_build_agent_context_reports_market_data_quality():
+    timestamp = datetime.now(timezone.utc).isoformat()
+    bars = [
+        {"timestamp": timestamp, "close": 100.0},
+        {"timestamp": timestamp, "close": None},
+        {"timestamp": timestamp, "close": 101.0},
+    ]
+
+    context = build_agent_context(
+        ["AAPL"],
+        {"AAPL": bars},
+        max_data_age_seconds=60,
+    )
+
+    quality = context["market"]["AAPL"]["data_quality"]
+    assert quality["freshness_status"] == "FRESH"
+    assert quality["quality_status"] == "DEGRADED"
+    assert quality["missing_close_count"] == 1
+    assert quality["duplicate_timestamp_count"] == 2
+
+
+def test_s001_requires_fresh_and_valid_market_data():
+    prompt = get_system_prompt("S-001")
+
+    assert "data_quality.freshness_status other than FRESH" in prompt
+    assert "data_quality.quality_status other than VALID" in prompt
 
 
 def test_build_agent_context_marks_unavailable_account_data():
