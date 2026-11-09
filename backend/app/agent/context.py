@@ -56,6 +56,7 @@ def build_agent_context(
     open_orders: list[dict[str, Any]] | None = None,
     strategy_version: str = DEFAULT_STRATEGY_VERSION,
     account_data_status: str = "NOT_PROVIDED",
+    market_open: bool | None = None,  # CHANGE 1: whether the market is open (None = unknown)
 ) -> dict[str, Any]:
     """Assemble sanitized market and account context for LLM prompt generation."""
     market_context: dict[str, Any] = {}
@@ -164,9 +165,16 @@ def build_agent_context(
         for ord in (open_orders or [])
     ]
 
+    # CHANGE 2: tell the model whether the market is open, closed or unknown.
+    if market_open is None:
+        market_status = "UNKNOWN"
+    else:
+        market_status = "OPEN" if market_open else "CLOSED"
+
     return {
         "strategy_version": strategy_version,
         "watchlist": symbols,
+        "market_status": market_status,  # CHANGE 2
         "market": market_context,
         "account": sanitized_account,
         "positions": sanitized_positions,

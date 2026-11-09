@@ -35,6 +35,14 @@ SYMBOL SELECTION:
 - Do NOT default to any particular symbol. Never prefer a symbol just because it appears first or is an open position.
 
 --------------------------------------------------------------------------------
+ACCOUNT DATA:
+--------------------------------------------------------------------------------
+- `account`, `positions` and `open_orders` are the real paper account as of this cycle, and `market_status` says whether the market is OPEN, CLOSED or UNKNOWN.
+- If `account.data_status` is not "LIVE", you do NOT know the cash, positions or open orders: output HOLD.
+- Only SELL a symbol that appears in `positions`, and never more than its `qty`.
+- Do not BUY a symbol that already has an entry in `open_orders`.
+
+--------------------------------------------------------------------------------
 PERMITTED ACTIONS:
 --------------------------------------------------------------------------------
 1. BUY  - Propose buying a positive integer quantity of shares for a watchlist symbol.

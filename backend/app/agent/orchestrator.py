@@ -57,6 +57,7 @@ from app.db.models import AgentConfig, AgentCycle, CycleApproval, TradingAccount
 from app.llm.base import LLMClient
 from app.llm.factory import get_llm_client
 from app.market_data.alpaca_client import MarketDataCollector, create_market_data_collector
+from app.risk.market_hours import fetch_market_clock_for  # CHANGE 1: market clock helper
 from app.schemas import DecisionProposal
 
 logger = logging.getLogger(__name__)
@@ -103,11 +104,17 @@ async def _load_portfolio_context(
                 client.get_positions(),
                 client.get_orders(status="open"),
             )
+            # CHANGE 2: the clock is informational: if it fails the portfolio is still LIVE.
+            try:
+                market_open: bool | None = bool((await fetch_market_clock_for(client)).is_open)
+            except Exception:
+                market_open = None
         return {
             "account": account_state.model_dump(mode="json"),
             "positions": [position.model_dump(mode="json") for position in positions],
             "open_orders": [order.model_dump(mode="json") for order in orders],
             "status": "LIVE",
+            "market_open": market_open,  # CHANGE 2
         }
     except CredentialVaultError:
         logger.exception("Could not load encrypted Alpaca credentials for agent %s", agent.id)
@@ -239,6 +246,7 @@ async def run_agent_cycle(
             open_orders=portfolio_context.get("open_orders"),
             strategy_version=agent.strategy_version,
             account_data_status=portfolio_context.get("status", "UNAVAILABLE"),
+            market_open=portfolio_context.get("market_open"),  # CHANGE 3
         )
         context["versions"] = {
             "strategy": agent.strategy_version,
