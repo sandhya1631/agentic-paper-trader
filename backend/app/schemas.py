@@ -20,6 +20,7 @@ from app.db.enums import (
     PolicyOutcome,
     TimeInForce,
 )
+from app.market_data.alpaca_client import OHLCVBar
 
 Money = Decimal
 
@@ -50,6 +51,52 @@ class AgentConfigRead(APIModel):
     daily_loss_limit: Decimal = Decimal("0.02")
     approval_mode: ApprovalMode = ApprovalMode.REQUIRED
     enabled: bool = False
+
+
+class ReplaySampleRequest(APIModel):
+    """Historical decision point submitted to the offline replay endpoint."""
+
+    symbols: list[Ticker] = Field(min_length=1, max_length=10)
+    bars_per_symbol: dict[str, list[OHLCVBar]]
+    account_info: dict[str, Any] | None = None
+    positions: list[dict[str, Any]] | None = None
+    open_orders: list[dict[str, Any]] | None = None
+    market_open: bool | None = True
+    next_prices: dict[str, float] | None = None
+
+    @model_validator(mode="after")
+    def validate_symbol_bars(self) -> "ReplaySampleRequest":
+        missing = set(self.symbols) - set(self.bars_per_symbol)
+        if missing:
+            raise ValueError(f"bars_per_symbol is missing symbols: {sorted(missing)}")
+        if any(not bars for bars in self.bars_per_symbol.values()):
+            raise ValueError("bars_per_symbol entries must contain at least one bar")
+        if any(len(bars) > 1000 for bars in self.bars_per_symbol.values()):
+            raise ValueError("bars_per_symbol entries cannot contain more than 1000 bars")
+        if self.next_prices and any(price <= 0 for price in self.next_prices.values()):
+            raise ValueError("next_prices must contain positive prices")
+        return self
+
+
+class ReplayRequest(APIModel):
+    """Request body for evaluating one strategy against historical samples."""
+
+    strategy_version: str = Field(default=DEFAULT_STRATEGY_VERSION, min_length=1, max_length=30)
+    samples: list[ReplaySampleRequest] = Field(min_length=1, max_length=100)
+
+
+class ReplayMetricsRead(APIModel):
+    """Aggregated metrics returned by the offline replay endpoint."""
+
+    strategy_version: str
+    samples: int
+    valid_decisions: int
+    invalid_decisions: int
+    action_counts: dict[str, int]
+    average_input_tokens: float
+    average_latency_ms: float
+    cumulative_return_pct: float
+    buy_and_hold_return_pct: float
 
 
 class DecisionProposal(APIModel):

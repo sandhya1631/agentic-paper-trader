@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.agent.replay import ReplaySample, evaluate_replay
+from app.agent.router import run_replay
 from app.market_data.alpaca_client import OHLCVBar
+from app.schemas import ReplayRequest
 
 
 def _bars(start: float = 100.0) -> list[OHLCVBar]:
@@ -69,3 +71,34 @@ async def test_replay_counts_invalid_outputs_without_failing():
 
     assert metrics.valid_decisions == 0
     assert metrics.invalid_decisions == 1
+
+
+@pytest.mark.asyncio
+async def test_replay_endpoint_returns_metrics_without_creating_trades():
+    llm = MagicMock()
+    llm.generate = AsyncMock(
+        return_value=json.dumps(
+            {
+                "symbol": "AAPL",
+                "action": "HOLD",
+                "quantity": 0,
+                "reasoning": "Replay fixture",
+            }
+        )
+    )
+    request = ReplayRequest(
+        strategy_version="S-001",
+        samples=[
+            {
+                "symbols": ["AAPL"],
+                "bars_per_symbol": {"AAPL": [bar.model_dump() for bar in _bars()]},
+            }
+        ],
+    )
+
+    response = await run_replay(request, _current_user=MagicMock(), llm_client=llm)
+
+    assert response.samples == 1
+    assert response.valid_decisions == 1
+    assert response.action_counts == {"BUY": 0, "SELL": 0, "HOLD": 1}
+    llm.generate.assert_awaited_once()

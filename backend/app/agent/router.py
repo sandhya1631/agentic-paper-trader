@@ -21,6 +21,7 @@ from sqlalchemy.orm import selectinload
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
+from app.agent.replay import ReplaySample, evaluate_replay
 from app.auth.dependencies import get_current_user, require_operator
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
@@ -43,6 +44,8 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
+from app.llm.base import LLMClient
+from app.llm.factory import get_llm_client
 from app.risk.kill_switch import (
     EnvironmentKillSwitchOverrideError,
     get_kill_switch_control,
@@ -61,6 +64,8 @@ from app.schemas import (
     KillSwitchRead,
     KillSwitchUpdate,
     PendingApprovalRead,
+    ReplayMetricsRead,
+    ReplayRequest,
     ScheduledCycleStatus,
     ScheduledOrderStatus,
     SchedulerLogsRead,
@@ -269,6 +274,48 @@ async def trigger_manual_cycle(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Agent cycle failed: {exc}",
         ) from exc
+
+
+@router.post(
+    "/replay",
+    response_model=ReplayMetricsRead,
+    summary="Evaluate a strategy against historical samples without trading",
+)
+async def run_replay(
+    body: ReplayRequest,
+    _current_user: User = Depends(get_current_user),
+    llm_client: LLMClient = Depends(get_llm_client),
+) -> ReplayMetricsRead:
+    """Run offline strategy evaluation using the configured LLM provider.
+
+    The submitted bars are evaluated in memory. This endpoint never creates
+    cycles, reads broker state, submits orders, or changes portfolio state.
+    """
+    try:
+        samples = [
+            ReplaySample(
+                symbols=sample.symbols,
+                bars_per_symbol=sample.bars_per_symbol,
+                account_info=sample.account_info,
+                positions=sample.positions,
+                open_orders=sample.open_orders,
+                market_open=sample.market_open,
+                next_prices=sample.next_prices,
+            )
+            for sample in body.samples
+        ]
+        metrics = await evaluate_replay(
+            samples,
+            strategy_version=body.strategy_version,
+            llm_factory=lambda: llm_client,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    return ReplayMetricsRead.model_validate(metrics)
 
 
 @router.get(

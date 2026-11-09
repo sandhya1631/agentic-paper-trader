@@ -137,6 +137,14 @@ the one-step return is an evaluation signal, not a production backtest because
 it does not model fills, spread, slippage, commissions, sizing, or multi-period
 portfolio state.
 
+The evaluator is also exposed as the authenticated `POST /agent/replay`
+endpoint. Submit `strategy_version` and 1-100 historical samples containing
+`symbols` and `bars_per_symbol`; optional account state and `next_prices` enable
+more realistic decisions and one-step return metrics. Each symbol is limited to
+1,000 bars. The endpoint returns replay metrics and performs no database writes,
+broker calls, approvals, or order execution. It uses the configured LLM provider,
+so Ollama must be running for the default local configuration.
+
 #### Install & verify the local LLM
 
 The project's `docker-compose.yml` runs Ollama as a service (reachable from the backend

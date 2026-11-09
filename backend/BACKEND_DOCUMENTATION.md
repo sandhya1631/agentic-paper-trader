@@ -700,6 +700,47 @@ signals, not a production backtest: the current one-step return model does not
 include fills, spread, slippage, commissions, position sizing, or multi-period
 portfolio state.
 
+The same evaluator is available to authenticated users through
+`POST /agent/replay`. The request body contains `strategy_version` and between
+1 and 100 `samples`. Each sample supplies one or more symbols, historical
+`bars_per_symbol`, optional account/position/order context, and optional
+`next_prices` for the one-step return comparison. Each symbol may contain at
+most 1,000 bars. The endpoint returns `ReplayMetrics` and uses the configured
+LLM provider; it does not persist data, create cycles, access the broker, or
+submit orders. Unknown strategy versions return `422`, while malformed sample
+data is rejected by request validation.
+
+Example:
+
+```json
+{
+  "strategy_version": "S-002",
+  "samples": [
+    {
+      "symbols": ["AAPL"],
+      "bars_per_symbol": {
+        "AAPL": [
+          {
+            "timestamp": "2026-11-09T14:00:00+00:00",
+            "open": 100,
+            "high": 101,
+            "low": 99,
+            "close": 100.5,
+            "volume": 1000
+          }
+        ]
+      },
+      "account_info": {
+        "cash": "10000",
+        "equity": "10000",
+        "buying_power": "10000"
+      },
+      "next_prices": {"AAPL": 101}
+    }
+  ]
+}
+```
+
 ---
 
 ## 7. How the decision changes over time
