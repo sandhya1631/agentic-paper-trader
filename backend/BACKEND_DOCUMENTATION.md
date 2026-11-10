@@ -1086,6 +1086,7 @@ async context-manager methods. Function locations are relative to `backend`.
 | `get_db` | `app/db/session.py` | Yields one async SQLAlchemy session per request. |
 | `ensure_agent_cycle_prompt_columns` | `app/db/schema.py` | Adds prompt metadata columns to older databases. |
 | `ensure_user_scheduler_column` | `app/db/schema.py` | Adds `users.scheduler_enabled` to older databases. |
+| `ensure_policy_token_scrubbed` | `app/db/schema.py` | Removes any stored `policy_token` from cycle snapshots and policy results and from approvals (idempotent startup patch, #175). |
 | `utcnow` | `app/db/models.py` | Returns a timezone-aware UTC datetime. |
 | `User.__init__` | `app/db/models.py` | Accepts legacy `hashed_password` input and maps it to `password_hash`. |
 | `User.hashed_password` getter/setter | `app/db/models.py` | Provides compatibility access to `password_hash`. |
@@ -1144,6 +1145,7 @@ async context-manager methods. Function locations are relative to `backend`.
 | `validate_decision_proposal` | `app/agent/tool_validation.py` | Parses and validates raw LLM output as a proposal. |
 | `run_agent_cycle` | `app/agent/orchestrator.py` | Runs the complete collect, reason, validate, persist, approve/execute sequence. |
 | `evaluate_and_submit_cycle_trade` | `app/agent/approval.py` | Refreshes live state, evaluates policies, and submits an allowed order. |
+| `persistable_policy_result` | `app/agent/approval.py` | A policy decision as a JSON-safe dict without the signed `policy_token`; every stored or returned copy goes through it (#175). |
 | `reconcile_uncertain_cycle` | `app/agent/approval.py` | Resolves a cycle whose broker result was uncertain. |
 | `expire_pending_approvals` | `app/agent/approval.py` | Expires old approvals and rejects their cycles. |
 
