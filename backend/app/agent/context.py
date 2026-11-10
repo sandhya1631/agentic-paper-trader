@@ -97,16 +97,19 @@ def build_agent_context(
         for pos in (positions or [])
     ]
 
-    sanitized_orders = [
-        {
+    sanitized_orders: list[dict[str, Any]] = []
+    for ord in open_orders or []:
+        sanitized_order: dict[str, Any] = {
             "id": str(ord.get("id")),
             "symbol": ord.get("symbol"),
             "side": ord.get("side"),
             "qty": ord.get("qty"),
             "status": ord.get("status"),
         }
-        for ord in (open_orders or [])
-    ]
+        # A notional (dollar-amount) order has no qty; show its amount instead (#177).
+        if ord.get("notional") is not None:
+            sanitized_order["notional"] = str(ord.get("notional"))
+        sanitized_orders.append(sanitized_order)
 
     if market_open is None:
         market_status = "UNKNOWN"

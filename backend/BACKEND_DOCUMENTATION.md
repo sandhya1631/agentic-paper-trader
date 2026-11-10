@@ -761,9 +761,9 @@ result contains complete evidence instead of stopping at the first failure.
 | P-007 | Maximum allocation | BUY projected exposure in that symbol must be at most configured max, default 10% of equity. Per symbol by design (#156), so the caps can add up across a watchlist. |
 | P-008 | Available cash | BUY cost must fit cash minus configured reserve. The aggregate backstop: total deployment stays at about (1 − reserve) of equity; unfilled orders are not counted. |
 | P-009 | Sell ownership | SELL quantity cannot exceed owned long position. |
-| P-010 | Open-order conflict | Rejects a symbol that already has an open order. |
+| P-010 | Open-order conflict | Rejects a symbol that already has an open order. Reads every order Alpaca lists as open (`status=open`, paged past 500), not a recent-orders window (#177). |
 | P-011 | Daily loss | Rejects when daily P&L is at or below the configured loss limit. |
-| P-012 | Daily order count | Rejects when today's submitted-order count reaches `MAX_ORDERS_PER_DAY` (default 10). |
+| P-012 | Daily order count | Rejects when today's submitted-order count reaches `MAX_ORDERS_PER_DAY` (default 10). Counts every order submitted since midnight US/Eastern (queried with `after`, paged), any status. |
 
 All policy failures produce `DENY`, no policy token, and no broker call. If all
 policies pass, the result is `ALLOW`, includes the original quantity, and
@@ -1223,8 +1223,9 @@ async context-manager methods. Function locations are relative to `backend`.
 | `AlpacaClient.get_bars` | `app/broker/alpaca.py` | Fetches raw market bars from Alpaca data API. |
 | `AlpacaClient.get_market_snapshot` | `app/broker/alpaca.py` | Gets bars and computes current indicators. |
 | `AlpacaClient.submit_order` | `app/broker/alpaca.py` | Sends a paper order and maps the response. |
-| `AlpacaClient.get_orders` | `app/broker/alpaca.py` | Fetches paper order history. |
+| `AlpacaClient.get_orders` | `app/broker/alpaca.py` | Fetches one page of paper orders (optional `after`/`until`/`direction`). Notional orders parse with `qty` null and `notional` set (#177). |
 | `AlpacaClient.get_order_by_client_order_id` | `app/broker/alpaca.py` | Finds one Alpaca order by idempotency key. |
+| `fetch_all_orders` | `app/broker/alpaca.py` | Pages through every matching order (500 per request); raises `ValueError` (fail closed) if completeness can't be shown. |
 | `get_order_by_client_id` | `app/broker/gateway.py` | Finds one local `BrokerOrder`. |
 | `submit_approved_order` | `app/broker/gateway.py` | Enforces gateway checks, persists, submits, and maps order state. |
 | `reconcile_order` | `app/broker/reconcile.py` | Updates a local order from Alpaca truth. |
@@ -1262,6 +1263,7 @@ async context-manager methods. Function locations are relative to `backend`.
 | `validate_cash_reserve` | `app/risk/cash_reserve.py` | Fetches cash and fails closed on errors. |
 | `execute_with_cash_check` | `app/risk/cash_reserve.py` | Submits only after the cash check passes. |
 | `trading_day` | `app/risk/daily_limits.py` | Converts a timestamp to the US/Eastern trading date. |
+| `trading_day_start` | `app/risk/daily_limits.py` | Midnight US/Eastern at the start of that trading day. |
 | `_parse_timestamp` | `app/risk/daily_limits.py` | Parses and validates an order timestamp. |
 | `count_orders_today` | `app/risk/daily_limits.py` | Counts all submitted orders for the current trading day. |
 | `daily_pnl_pct` | `app/risk/daily_limits.py` | Calculates current equity change from previous equity. |
