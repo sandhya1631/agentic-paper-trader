@@ -203,6 +203,31 @@ describe("DashboardView live refresh in place (#164)", () => {
     expect(screen.queryByText("$25,000.00")).toBeNull();
   });
 
+  it("skips poll ticks while a slow refresh is in flight, then shows its values", async () => {
+    render(<DashboardView />);
+    await screen.findByText("$100,000.00");
+
+    const slow = deferred<Account>();
+    mockAccount.mockReturnValueOnce(slow.promise);
+    await advancePoll(); // t = 15 s: the refresh starts
+    expect(mockAccount).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      vi.advanceTimersByTime(20_000); // t = 35 s: the 30 s tick finds it still in flight
+    });
+    expect(mockAccount).toHaveBeenCalledTimes(2);
+    expect(mockCycles).toHaveBeenCalledTimes(2);
+
+    await act(async () => slow.resolve(account({ portfolio_value: "101500" }) as Account));
+    expect(await screen.findByText("$101,500.00")).toBeTruthy();
+
+    // Polling resumes once the slow refresh has landed.
+    await act(async () => {
+      vi.advanceTimersByTime(10_000); // t = 45 s
+    });
+    expect(mockAccount).toHaveBeenCalledTimes(3);
+  });
+
   it("keeps the last good data with a non-blocking note when a refresh fails", async () => {
     render(<DashboardView />);
     await screen.findByText("$100,000.00");

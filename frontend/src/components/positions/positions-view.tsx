@@ -48,14 +48,20 @@ export function PositionsView() {
   const [live, setLive] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const latestLoad = useRef(0);
+  // True while a refresh is outstanding: a poll tick then skips instead of superseding it,
+  // so a refresh slower than the interval still lands.
+  const inFlight = useRef(false);
 
   // Refreshes (the poll, or the reload after a manual order or Close) keep the page
   // mounted: values are swapped in place, so the ticket and Close confirmations survive.
   const load = useCallback(async () => {
     const request = ++latestLoad.current;
+    inFlight.current = true;
     setRefreshing(true);
     const [positions, orders] = await Promise.allSettled([getPositions(), getOrders("open")]);
-    if (request !== latestLoad.current) return; // a newer refresh started; its answer wins
+    // A newer refresh (an explicit reload after a manual order or Close) supersedes this one.
+    if (request !== latestLoad.current) return;
+    inFlight.current = false;
     setRefreshing(false);
     const now = Date.now();
 
@@ -86,7 +92,13 @@ export function PositionsView() {
     void load();
   }, [load]);
 
-  usePolling(() => void load(), REFRESH_SECONDS * 1000, live);
+  usePolling(
+    () => {
+      if (!inFlight.current) void load();
+    },
+    REFRESH_SECONDS * 1000,
+    live,
+  );
 
   if (state.loading) return <p className="text-sm text-muted">Loading positions...</p>;
   if (state.notConnected) return <ConnectAccountNotice />;

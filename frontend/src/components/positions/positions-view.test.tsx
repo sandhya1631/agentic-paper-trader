@@ -188,6 +188,58 @@ describe("PositionsView live refresh in place (#164)", () => {
     expect(livePill().getAttribute("aria-busy")).toBeNull();
   });
 
+  it("skips poll ticks while a slow refresh is in flight, then shows its values", async () => {
+    render(<PositionsView />);
+    await screen.findByText("$335.00");
+
+    const slow = deferred<AlpacaPosition[]>();
+    mockPositions.mockReturnValueOnce(slow.promise);
+    await advancePoll(); // t = 15 s: the refresh starts
+    expect(mockPositions).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      vi.advanceTimersByTime(20_000); // t = 35 s: the 30 s tick finds it still in flight
+    });
+    expect(mockPositions).toHaveBeenCalledTimes(2);
+    expect(mockOrders).toHaveBeenCalledTimes(2);
+
+    await act(async () => slow.resolve([position({ current_price: "340", market_value: "3400" })]));
+    expect(await screen.findByText("$340.00")).toBeTruthy();
+    expect(livePill().getAttribute("aria-busy")).toBeNull();
+
+    // Polling resumes once the slow refresh has landed.
+    await act(async () => {
+      vi.advanceTimersByTime(10_000); // t = 45 s
+    });
+    expect(mockPositions).toHaveBeenCalledTimes(3);
+  });
+
+  it("lets a reload after a manual order supersede a poll still in flight", async () => {
+    mockCreateOrder.mockResolvedValue({ id: "o9", status: "accepted" } as AlpacaOrder);
+    render(<PositionsView />);
+    await screen.findByText("$335.00");
+
+    const slowPoll = deferred<AlpacaPosition[]>();
+    mockPositions.mockReturnValueOnce(slowPoll.promise);
+    await advancePoll();
+    expect(mockPositions).toHaveBeenCalledTimes(2);
+
+    const reload = deferred<AlpacaPosition[]>();
+    mockPositions.mockReturnValueOnce(reload.promise);
+    fireEvent.change(screen.getByLabelText("Symbol"), { target: { value: "AAPL" } });
+    fireEvent.click(screen.getByRole("button", { name: "Review manual order" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm override" }));
+    await screen.findByText(/manual buy 1 aapl submitted/i);
+    expect(mockPositions).toHaveBeenCalledTimes(3); // not skipped
+
+    await act(async () => reload.resolve([position({ qty: "11", market_value: "3685" })]));
+    expect(await screen.findByText("$3,685.00")).toBeTruthy();
+    // The superseded poll answer arrives late and is ignored.
+    await act(async () => slowPoll.resolve([position({ current_price: "340", market_value: "3400" })]));
+    expect(screen.getByText("$3,685.00")).toBeTruthy();
+    expect(screen.queryByText("$3,400.00")).toBeNull();
+  });
+
   it("keeps the manual ticket's fields and its Confirm override step across a refresh", async () => {
     render(<PositionsView />);
     await screen.findByText("AAPL");

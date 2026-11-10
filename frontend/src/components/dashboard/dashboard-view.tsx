@@ -61,10 +61,14 @@ export function DashboardView() {
   const [live, setLive] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const latestLoad = useRef(0);
+  // True while a refresh is outstanding: a poll tick then skips instead of superseding it,
+  // so a refresh slower than the interval still lands.
+  const inFlight = useRef(false);
 
   // Refreshes keep the page mounted and swap the values in place (#164).
   const load = useCallback(async () => {
     const request = ++latestLoad.current;
+    inFlight.current = true;
     setRefreshing(true);
     const [account, positions, cycles, scheduler] = await Promise.allSettled([
       getAccount(),
@@ -72,7 +76,9 @@ export function DashboardView() {
       listCycles({ limit: 5 }),
       getSchedulerStatus(),
     ]);
-    if (request !== latestLoad.current) return; // a newer refresh started; its answer wins
+    // Defensive: if a newer refresh was started meanwhile, its answer wins.
+    if (request !== latestLoad.current) return;
+    inFlight.current = false;
     setRefreshing(false);
     const now = Date.now();
 
@@ -109,7 +115,13 @@ export function DashboardView() {
     void load();
   }, [load]);
 
-  usePolling(() => void load(), REFRESH_SECONDS * 1000, live);
+  usePolling(
+    () => {
+      if (!inFlight.current) void load();
+    },
+    REFRESH_SECONDS * 1000,
+    live,
+  );
 
   if (state.loading) {
     return <p className="text-sm text-muted">Loading dashboard...</p>;
