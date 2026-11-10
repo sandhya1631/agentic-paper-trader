@@ -3,8 +3,8 @@ import math
 import pandas as pd
 
 
-def calculate_indicators(prices):
-    """Calculate RSI-14, SMA-20, and SMA-50."""
+def calculate_indicators(prices, highs=None, lows=None, volumes=None):
+    """Calculate technical indicators from validated OHLCV series."""
 
     if len(prices) < 50:
         raise ValueError("At least 50 price values are required.")
@@ -30,6 +30,28 @@ def calculate_indicators(prices):
         validated_prices.append(value)
 
     prices = pd.Series(validated_prices, dtype=float)
+
+    def _optional_series(values, name):
+        if values is None:
+            return None
+        if len(values) != len(prices):
+            raise ValueError(f"{name} must have the same length as prices.")
+        validated = []
+        for value in values:
+            if isinstance(value, bool) or value is None:
+                raise ValueError(f"{name} values must be finite numbers.")
+            try:
+                converted = float(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} values must be finite numbers.")
+            if not math.isfinite(converted):
+                raise ValueError(f"{name} values must be finite numbers.")
+            validated.append(converted)
+        return pd.Series(validated, dtype=float)
+
+    highs_series = _optional_series(highs, "highs")
+    lows_series = _optional_series(lows, "lows")
+    volumes_series = _optional_series(volumes, "volumes")
 
     # SMA calculations
     sma_20 = prices.rolling(window=20).mean().iloc[-1]
@@ -63,8 +85,63 @@ def calculate_indicators(prices):
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
 
-    return {
+    result = {
         "rsi_14": round(float(rsi), 2),
         "sma_20": round(float(sma_20), 2),
         "sma_50": round(float(sma_50), 2),
     }
+
+    if highs_series is None and lows_series is None and volumes_series is None:
+        return result
+
+    sma_20_series = prices.rolling(window=20).mean()
+    slope_index = len(prices) - 6
+    sma_20_previous = sma_20_series.iloc[slope_index]
+    result["sma_20_slope_pct"] = round(
+        float((sma_20 - sma_20_previous) / sma_20_previous * 100)
+        if sma_20_previous
+        else 0.0,
+        2,
+    )
+
+    ema_12 = prices.ewm(span=12, adjust=False).mean()
+    ema_26 = prices.ewm(span=26, adjust=False).mean()
+    macd_series = ema_12 - ema_26
+    macd_signal = macd_series.ewm(span=9, adjust=False).mean().iloc[-1]
+    result["macd"] = round(float(macd_series.iloc[-1]), 2)
+    result["macd_signal"] = round(float(macd_signal), 2)
+    result["macd_histogram"] = round(float(macd_series.iloc[-1] - macd_signal), 2)
+
+    if highs_series is not None and lows_series is not None:
+        previous_close = prices.shift(1)
+        true_range = pd.concat(
+            [
+                highs_series - lows_series,
+                (highs_series - previous_close).abs(),
+                (lows_series - previous_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        result["atr_14"] = round(float(true_range.iloc[-14:].mean()), 2)
+    else:
+        result["atr_14"] = None
+
+    if volumes_series is not None:
+        average_volume = volumes_series.iloc[-21:-1].mean()
+        result["relative_volume_20"] = round(
+            float(volumes_series.iloc[-1] / average_volume)
+            if average_volume
+            else 0.0,
+            2,
+        )
+    else:
+        result["relative_volume_20"] = None
+
+    if sma_20 > sma_50 and result["sma_20_slope_pct"] > 0:
+        regime = "UPTREND"
+    elif sma_20 < sma_50 and result["sma_20_slope_pct"] < 0:
+        regime = "DOWNTREND"
+    else:
+        regime = "RANGE"
+    result["regime"] = regime
+    return result

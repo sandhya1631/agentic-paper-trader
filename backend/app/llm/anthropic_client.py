@@ -45,7 +45,7 @@ class AnthropicClient(LLMClient):
         prompt: str,
         *,
         system: str | None = None,
-        temperature: float = 0.2,
+        temperature: float | None = None,
     ) -> str:
         """Return Claude's JSON decision text for the prompt.
 

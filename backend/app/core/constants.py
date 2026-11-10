@@ -48,10 +48,13 @@ ACTIVE_CYCLE_STATUSES = (
     CycleStatus.RECONCILING,
 )
 DEFAULT_STRATEGY_VERSION = "S-001"
+DYNAMIC_STRATEGY_VERSION = "DYNAMIC"
 # Bump whenever the S-001 prompt text changes, so each cycle's audit record names the
 # exact prompt it ran. 1.1.0 (#153): per-symbol `decision_target`, no hardcoded tickers.
-# 1.2.0 (#64): live account data section; HOLD when the account is UNAVAILABLE.
-DEFAULT_PROMPT_REVISION = "1.2.0"
+# 1.2.0 (#64/#172): live account data section; HOLD when the account is UNAVAILABLE.
+# 1.3.0 (#64/#172 reconciliation): adds the data-quality/regime evidence rules from #64
+# on top of 1.2.0's account-data HOLD rule, so the combined text gets its own revision.
+DEFAULT_PROMPT_REVISION = "1.3.0"
 
 # --- Broker credential vault ---
 ALPACA_PROVIDER = "ALPACA"

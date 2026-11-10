@@ -119,7 +119,10 @@ Important settings:
 | `ALPACA_API_KEY`, `ALPACA_API_SECRET` | Server-level credentials used by market-data and scheduler clock checks. |
 | `ALPACA_PAPER_BASE_URL` | Must be `https://paper-api.alpaca.markets` with optional `/v2`. |
 | `LLM_PROVIDER` | `ollama`, `openai` or `anthropic`; defaults to `ollama`. |
-| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local LLM connection. |
+| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local LLM connection; defaults to `http://localhost:11434` and `llama3.1`. |
+| `OLLAMA_TEMPERATURE` | Ollama generation temperature; defaults to `0.1` for low-variance decisions. |
+| `OLLAMA_NUM_CTX` | Ollama context-window size; defaults to 4096 tokens. |
+| `OLLAMA_JSON_FORMAT` | Requests Ollama JSON output mode; defaults to true. |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI connection; `OPENAI_MODEL` (default `gpt-4o-mini`) must support strict structured output (`json_schema`) and `temperature`. |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Anthropic (Claude) connection; model defaults to `claude-opus-5-5`. |
 | `CREDENTIAL_ENCRYPTION_KEY` | Required Fernet key for user Alpaca credentials. |
@@ -130,6 +133,7 @@ Important settings:
 | `MAX_ORDERS_PER_DAY` | Runtime value for policy P-012; defaults to 10 and must be at least 1. |
 | `DEFAULT_BAR_LIMIT` | Default number of market bars per symbol; defaults to 50. |
 | `DEFAULT_TIMEFRAME_MINUTES` | Default market-bar interval; defaults to 5 minutes. |
+| `MAX_MARKET_DATA_AGE_MINUTES` | Maximum age for a bar set to be considered fresh; defaults to 15 minutes. |
 | `MAX_RETRY_ATTEMPTS` | Maximum market-data request attempts; defaults to 3. |
 | `RETRY_BACKOFF_SECONDS` | Initial rate-limit retry delay; defaults to 1 second and doubles per retry. |
 
@@ -216,7 +220,7 @@ Stores how an agent is configured:
 - `policy_set_id`
 - `name`
 - `watchlist` as JSON
-- `strategy_version` (currently `S-001`)
+- `strategy_version` (`S-001` by default; `S-002`–`S-007` are opt-in alternative prompts, and `DYNAMIC` auto-selects one per cycle)
 - `cadence_minutes` (display-only; database constraint currently requires 15)
 - `target_allocation`
 - `max_symbol_allocation`
@@ -286,8 +290,8 @@ Stored fields:
 - `correlation_id`
 
 The backend does **not** store the raw OHLCV bars in a dedicated table. The
-cycle stores the summarized context and technical indicators in
-`snapshot_json`.
+cycle stores the latest 12-bar compact evidence summary, technical indicators,
+and sanitized portfolio context in `snapshot_json`.
 
 ### 4.6 `agent_schedules`
 
@@ -562,35 +566,118 @@ any earlier unused one for that user.
    timestamps.
 5. `calculate_indicators()` requires at least 50 closes and returns RSI-14,
    SMA-20, and SMA-50.
-6. The orchestrator's current call uses `validate=False`; insufficient data is
-   represented as missing indicators in the LLM context, which the prompt
-   directs the model to treat as `HOLD`.
+6. The context builder reports per-symbol data quality:
+   `age_seconds`, `freshness_status` (`FRESH`, `STALE`, or `UNKNOWN`),
+   `missing_close_count`, `duplicate_timestamp_count`, and `quality_status`
+   (`VALID`, `DEGRADED`, or `NO_DATA`).
+7. `MAX_MARKET_DATA_AGE_MINUTES` controls freshness, defaulting to 15 minutes.
+   The orchestrator's current call uses `validate=False`; insufficient, stale,
+   or degraded data is represented explicitly in the LLM context and the prompt
+   directs the model to treat it as `HOLD`.
 
 ### 5.4 Context and LLM flow
 
 `build_agent_context()` creates a sanitized dictionary containing:
 
 - Strategy version and watchlist.
-- Latest price, timestamp, RSI-14, SMA-20, SMA-50, and bar count per symbol.
-- Account cash, equity, buying power, and daily P&L if supplied.
+- Latest price, timestamp, RSI-14, SMA-20, SMA-50, bar count, and the latest
+  12 compact OHLCV bars with close-to-close percentage changes per symbol.
+- Per-symbol freshness and quality metadata, including bar age, missing-close
+  count, duplicate-timestamp count, and quality status.
+- Extended deterministic indicators when complete OHLCV data is available:
+  ATR-14, MACD, MACD signal and histogram, SMA-20 slope, relative volume over
+  20 bars, and a simple `UPTREND`, `DOWNTREND`, or `RANGE` regime label.
+- Top-level `market_status` from the Alpaca market clock: `OPEN`, `CLOSED`, or
+  `UNKNOWN` when the clock could not be read.
+- Live account cash, equity, buying power, and daily P&L when available.
 - Position symbol, quantity, market value, and unrealized P&L if supplied.
 - Open-order id, symbol, side, quantity, and status if supplied.
 
-It does not include credentials. The orchestrator adds the strategy and policy
-versions, serializes the context as JSON, and sends it with the versioned
-system prompt to the selected LLM client.
+It does not include credentials. The orchestrator loads live account, position,
+and open-order state once per watchlist sweep through the encrypted credential
+vault and Alpaca paper client. If that state cannot be loaded, the context
+contains an explicit account `data_status` such as `UNAVAILABLE_BROKER` or
+`UNAVAILABLE_NOT_CONNECTED`; it does not present synthetic balances as live
+data.
 
-The current prompt (`S-001`, revision `1.0.0`) describes a technical-momentum
+The orchestrator adds strategy and policy versions, serializes the context as
+JSON, and sends it with the versioned system prompt to the selected LLM client.
+Before sending the payload, it checks the configured model window (`OLLAMA_NUM_CTX`
+for Ollama; a safe default ceiling for OpenAI) and trims the least critical
+market evidence when the request would exceed the limit. This keeps the
+model-facing payload under the provider window while preserving decision-critical
+fields like the target symbol, the latest bars, and the account status. The
+persisted snapshot also contains an `observability` object with context and
+system-prompt character counts, approximate input tokens, remaining context,
+forward model-window capacity, symbol count, bars used, and account-data status.
+These fields are audit measurements and are not included in the model input.
+Use `GET /agent/cycles/{cycle_id}/token-usage` to retrieve these measurements
+without downloading the full cycle response. The endpoint is authenticated and
+ownership-scoped. It returns estimated input tokens, model-window capacity,
+remaining tokens, truncation status, character counts, symbol/bar counts, and
+account-data status. It returns `409` when the cycle has not yet built model
+context and `404` when the cycle does not belong to the caller.
+
+The default prompt (`S-001`, revision `1.2.0`) describes a technical-momentum
 strategy:
 
 - BUY when RSI/price trend/cash conditions align.
 - SELL when RSI is overbought or price breaks below SMA-20 and a position exists.
 - HOLD when data is missing, stale, conflicting, flat, or uncertain.
+- HOLD when account data is not `LIVE`; the prompt also receives market status
+  so it can distinguish open, closed, and unknown market conditions.
+- ATR, MACD, SMA slope, relative volume, and regime are supporting evidence;
+  they do not override the primary RSI/price confluence or deterministic
+  execution policies.
+
+`S-002` is an opt-in shorter prompt designed for local Ollama models. It
+emphasizes using only supplied JSON, requires live account data for BUY
+decisions, and requests concise evidence-based JSON output. Strategy prompts
+are immutable and each cycle stores the exact prompt version, revision, and
+text used.
+
+Authenticated users can call `GET /agent/strategies` to list registered
+strategy versions. Operators and administrators can select one for an owned
+agent with `PUT /agent/{agent_id}/strategy` and a body such as
+`{"strategy_version": "S-002"}`. Unknown versions return `422`, and updates
+are rejected with `409` while the agent has an active cycle. The selected
+version is used by subsequent cycles; existing cycle records retain the
+strategy version and prompt text that they used.
+
+The special `DYNAMIC` selection lets the agent choose between seven registered
+strategies at the start of each cycle:
+
+- `S-001`: RSI and moving-average technical confluence.
+- `S-002`: concise safety-focused strategy for constrained Ollama contexts.
+- `S-003`: conservative trend following for confirmed uptrends.
+- `S-004`: breakout confirmation using unusual relative volume.
+- `S-005`: mean reversion for valid range-bound markets.
+- `S-006`: momentum continuation requiring multiple agreeing signals.
+- `S-007`: capital preservation with a strong HOLD default.
+
+Dynamic mode prefers `S-002` when evidence is missing/degraded or the full
+prompt would consume more than 70% of the configured context window. Otherwise
+it uses regime, relative volume, and data quality to choose among the other
+strategies. The cycle snapshot
+contains `strategy_selection.mode`, `selected_strategy`, and `reason`, and the
+cycle record stores the actual selected prompt version for auditability.
 
 The prompt is guidance only. The Pydantic proposal validator and deterministic
 policies are authoritative.
 
-### 5.5 Proposal validation
+### 5.5 Curated strategy knowledge
+
+The orchestrator retrieves at most three short, local entries from
+`app/agent/knowledge.py` and adds them to the model context under `knowledge`.
+Entries cover data-quality risk, capital preservation, trend following,
+mean-reversion, and breakout confirmation. Retrieval is deterministic from the
+selected strategy, market regime, and relative volume; it does not scrape the
+internet or call an external knowledge service. Knowledge is advisory only and
+cannot override prompt HOLD mandates, schema validation, policy checks, or
+broker safeguards. If the context-window guard needs more space, knowledge is
+removed before decision-critical market and account fields are reduced.
+
+### 5.6 Proposal validation
 
 The LLM may return only a `DecisionProposal`:
 
@@ -662,18 +749,26 @@ Insert an `AgentCycle` with:
 ### Step 3: Collect market context
 
 Set status to `COLLECTING`, fetch watchlist bars, calculate indicators where
-there are at least 50 closes, and build the sanitized context. The watchlist is
-first normalized (`normalize_watchlist`: trimmed, upper-cased, de-duplicated, blanks
-dropped), the same way for a manual cycle and a sweep, so each distinct symbol is
-collected exactly once.
+there are at least 50 closes, read the Alpaca market clock, and build the
+sanitized context. The watchlist is first normalized (`normalize_watchlist`:
+trimmed, upper-cased, de-duplicated, blanks dropped), the same way for a manual
+cycle and a sweep, so each distinct symbol is collected exactly once. The number
+of bars is controlled by `DEFAULT_BAR_LIMIT` and the latest 12 bars are included
+as compact model evidence. The watchlist sweep fetches market bars and live
+portfolio state once, then reuses both across its per-symbol cycles. A
+market-clock failure does not invalidate otherwise live portfolio data; it
+records `market_status=UNKNOWN`.
 
 A collector construction or bar-fetch problem is logged and leaves the cycle
 with empty/missing market data, allowing the strategy's HOLD mandate to apply.
+Portfolio-state failures are recorded in account `data_status`; strategies
+requiring live account evidence should HOLD rather than infer balances.
 
 ### Step 4: Ask the LLM
 
 Set status to `REASONING`, load the provider-neutral client, and send the
-context plus versioned system prompt.
+context plus versioned system prompt. Ollama requests use the configured
+temperature and context window and request JSON mode by default.
 
 ### Step 5: Validate the proposal
 
@@ -711,6 +806,70 @@ the LLM produced it.
 For REQUIRED, approval endpoints perform the same fresh evaluation at approval
 time. The account and market can therefore change between proposal time and
 execution time.
+
+### 6.1 Offline replay evaluation
+
+`app/agent/replay.py` provides an offline `evaluate_replay()` harness. It uses
+the same context builder, versioned strategy prompt, and proposal validator as
+live cycles, but never opens a database session, calls the broker, creates an
+approval, or submits an order.
+
+Each `ReplaySample` contains historical bars, optional portfolio state, and an
+optional next price. The resulting `ReplayMetrics` reports:
+
+- valid and invalid model outputs;
+- BUY, SELL, and HOLD counts;
+- average estimated input tokens;
+- average model latency;
+- simple one-step strategy return;
+- matching buy-and-hold return.
+
+Run the replay harness with fixed samples for each strategy version to compare
+`S-001` and `S-002` on identical evidence. These metrics are evaluation
+signals, not a production backtest: the current one-step return model does not
+include fills, spread, slippage, commissions, position sizing, or multi-period
+portfolio state.
+
+The same evaluator is available to authenticated users through
+`POST /agent/replay`. The request body contains `strategy_version` and between
+1 and 100 `samples`. Each sample supplies one or more symbols, historical
+`bars_per_symbol`, optional account/position/order context, and optional
+`next_prices` for the one-step return comparison. Each symbol may contain at
+most 1,000 bars. The endpoint returns `ReplayMetrics` and uses the configured
+LLM provider; it does not persist data, create cycles, access the broker, or
+submit orders. Unknown strategy versions return `422`, while malformed sample
+data is rejected by request validation.
+
+Example:
+
+```json
+{
+  "strategy_version": "S-002",
+  "samples": [
+    {
+      "symbols": ["AAPL"],
+      "bars_per_symbol": {
+        "AAPL": [
+          {
+            "timestamp": "2026-11-09T14:00:00+00:00",
+            "open": 100,
+            "high": 101,
+            "low": 99,
+            "close": 100.5,
+            "volume": 1000
+          }
+        ]
+      },
+      "account_info": {
+        "cash": "10000",
+        "equity": "10000",
+        "buying_power": "10000"
+      },
+      "next_prices": {"AAPL": 101}
+    }
+  ]
+}
+```
 
 ---
 

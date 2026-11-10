@@ -21,12 +21,20 @@ from sqlalchemy.orm import selectinload
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
+from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition
+from app.agent.replay import ReplaySample, evaluate_replay
 from app.agent.watchlist import normalize_watchlist
 from app.audit import record_audit_event
 from app.auth.dependencies import get_current_user, require_operator
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
-from app.core.constants import ALPACA_PROVIDER, DEFAULT_STRATEGY_VERSION, DEFAULT_WATCHLIST
+from app.core.constants import (
+    ACTIVE_CYCLE_STATUSES,
+    ALPACA_PROVIDER,
+    DEFAULT_STRATEGY_VERSION,
+    DEFAULT_WATCHLIST,
+    DYNAMIC_STRATEGY_VERSION,
+)
 from app.db.enums import (
     ApprovalStatus,
     BrokerOrderStatus,
@@ -47,6 +55,8 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
+from app.llm.base import LLMClient
+from app.llm.factory import get_llm_client
 from app.risk.kill_switch import (
     EnvironmentKillSwitchOverrideError,
     get_kill_switch_control,
@@ -57,16 +67,20 @@ from app.risk.kill_switch import (
 )
 from app.schemas import (
     AgentConfigDetailRead,
+    AgentConfigRead,
     AgentConfigUpdate,
     AgentScheduleRead,
     ApprovalAction,
     ApprovalRead,
     CycleListRead,
     CycleRead,
+    CycleTokenUsageRead,
     KillSwitchEventRead,
     KillSwitchRead,
     KillSwitchUpdate,
     PendingApprovalRead,
+    ReplayMetricsRead,
+    ReplayRequest,
     ScheduledCycleStatus,
     ScheduledOrderStatus,
     SchedulerLogsRead,
@@ -74,9 +88,86 @@ from app.schemas import (
     SchedulerTickLog,
     ScheduleStartRead,
     ScheduleStartRequest,
+    StrategyRead,
+    StrategyUpdate,
 )
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+@router.get(
+    "/strategies",
+    response_model=list[StrategyRead],
+    summary="List registered strategy prompts",
+)
+async def list_strategies(
+    _current_user: User = Depends(get_current_user),
+) -> list[StrategyRead]:
+    """Return strategy versions available for agent selection."""
+    strategies = [
+        StrategyRead(version=version, revision=definition.revision)
+        for version, definition in STRATEGY_REGISTRY.items()
+    ]
+    strategies.append(
+        StrategyRead(
+            version=DYNAMIC_STRATEGY_VERSION,
+            revision="runtime",
+            selectable_mode="DYNAMIC",
+        )
+    )
+    return strategies
+
+
+@router.put(
+    "/{agent_id}/strategy",
+    response_model=AgentConfigRead,
+    summary="Select an agent strategy prompt",
+)
+async def update_agent_strategy(
+    agent_id: uuid.UUID,
+    body: StrategyUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_operator),
+) -> AgentConfigRead:
+    """Update an owned agent's strategy when it has no active cycle."""
+    if body.strategy_version != DYNAMIC_STRATEGY_VERSION:
+        try:
+            get_prompt_definition(body.strategy_version)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+    result = await db.execute(
+        select(AgentConfig)
+        .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+        .where(
+            AgentConfig.id == agent_id,
+            TradingAccount.user_id == current_user.id,
+        )
+    )
+    agent = result.scalar_one_or_none()
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+    active_result = await db.execute(
+        select(AgentCycle.id).where(
+            AgentCycle.agent_id == agent.id,
+            AgentCycle.status.in_(ACTIVE_CYCLE_STATUSES),
+        )
+    )
+    if active_result.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot change strategy while the agent has an active cycle.",
+        )
+
+    agent.strategy_version = body.strategy_version
+    agent.version += 1
+    await db.commit()
+    await db.refresh(agent)
+    return AgentConfigRead.model_validate(agent)
 
 
 @router.get(
@@ -381,6 +472,48 @@ async def trigger_manual_cycle(
         ) from exc
 
 
+@router.post(
+    "/replay",
+    response_model=ReplayMetricsRead,
+    summary="Evaluate a strategy against historical samples without trading",
+)
+async def run_replay(
+    body: ReplayRequest,
+    _current_user: User = Depends(get_current_user),
+    llm_client: LLMClient = Depends(get_llm_client),
+) -> ReplayMetricsRead:
+    """Run offline strategy evaluation using the configured LLM provider.
+
+    The submitted bars are evaluated in memory. This endpoint never creates
+    cycles, reads broker state, submits orders, or changes portfolio state.
+    """
+    try:
+        samples = [
+            ReplaySample(
+                symbols=sample.symbols,
+                bars_per_symbol=sample.bars_per_symbol,
+                account_info=sample.account_info,
+                positions=sample.positions,
+                open_orders=sample.open_orders,
+                market_open=sample.market_open,
+                next_prices=sample.next_prices,
+            )
+            for sample in body.samples
+        ]
+        metrics = await evaluate_replay(
+            samples,
+            strategy_version=body.strategy_version,
+            llm_factory=lambda: llm_client,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    return ReplayMetricsRead.model_validate(metrics)
+
+
 @router.get(
     "/cycles",
     response_model=CycleListRead,
@@ -489,6 +622,63 @@ async def get_cycle_status(
             detail=f"AgentCycle '{cycle_id}' not found.",
         )
     return cycle
+
+
+@router.get(
+    "/cycles/{cycle_id}/token-usage",
+    response_model=CycleTokenUsageRead,
+    summary="Retrieve cycle token usage and remaining context capacity",
+)
+async def get_cycle_token_usage(
+    cycle_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> CycleTokenUsageRead:
+    """Return persisted model-context measurements for an owned cycle."""
+    stmt = (
+        select(AgentCycle)
+        .join(AgentConfig, AgentCycle.agent_id == AgentConfig.id)
+        .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+        .where(
+            AgentCycle.id == cycle_id,
+            TradingAccount.user_id == current_user.id,
+        )
+    )
+    result = await db.execute(stmt)
+    cycle = result.scalar_one_or_none()
+    if cycle is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"AgentCycle '{cycle_id}' not found.",
+        )
+
+    snapshot = cycle.snapshot_json or {}
+    observability = snapshot.get("observability")
+    if not isinstance(observability, dict):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Token usage is not available until the cycle builds model context.",
+        )
+
+    try:
+        return CycleTokenUsageRead(
+            cycle_id=cycle.id,
+            estimated_input_tokens=observability["estimated_input_tokens"],
+            model_window_tokens=observability["model_window_tokens"],
+            remaining_context_tokens=observability["remaining_context_tokens"],
+            context_over_limit=observability["context_over_limit"],
+            context_truncated=observability.get("context_truncated", False),
+            context_chars=observability["context_chars"],
+            system_prompt_chars=observability["system_prompt_chars"],
+            symbols=observability["symbols"],
+            bars_used=observability["bars_used"],
+            account_data_status=observability["account_data_status"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Cycle token usage data is malformed.",
+        ) from exc
 
 
 def _job_id(schedule_id: uuid.UUID) -> str:

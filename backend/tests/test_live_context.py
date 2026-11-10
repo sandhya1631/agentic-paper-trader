@@ -20,7 +20,7 @@ from app.agent import live_context, orchestrator
 from app.agent.context import build_agent_context
 from app.agent.live_context import LiveAccountData, fetch_live_account_data
 from app.agent.orchestrator import run_agent_cycle
-from app.agent.prompt import get_system_prompt
+from app.agent.prompt import get_prompt_definition, get_system_prompt
 from app.broker.alpaca import AlpacaClient
 
 REAL_ACCOUNT = {
@@ -106,6 +106,12 @@ def test_prompt_tells_the_model_to_hold_when_the_account_is_unavailable():
     assert '"UNAVAILABLE"' in prompt
     assert "output HOLD" in prompt
     assert "appears in `positions`" in prompt  # SELL only what is owned
+
+
+def test_s001_revision_is_bumped_for_the_combined_account_and_evidence_rules():
+    # 1.3.0 reconciles #64/#172's account-data HOLD rule with #174's data-quality/
+    # regime evidence rules (#156's merge note): each revision maps to one prompt text.
+    assert get_prompt_definition("S-001").revision == "1.3.0"
 
 
 # --- the live fetch ---
@@ -293,6 +299,24 @@ async def test_fetch_returns_none_when_the_broker_fails(monkeypatch):
     assert data is None
 
 
+@pytest.mark.asyncio
+async def test_a_failing_market_clock_does_not_make_the_account_unavailable(monkeypatch):
+    """The clock is informational only (#64/#172): if it fails, the account data is
+    still real and LIVE; the context just says market_status=UNKNOWN."""
+    _patch_broker(monkeypatch)
+    monkeypatch.setattr(
+        live_context,
+        "fetch_market_clock_for",
+        AsyncMock(side_effect=ConnectionError("clock down")),
+    )
+
+    data = await fetch_live_account_data(_db_with_account(), _agent())
+
+    assert data is not None
+    assert data.account == REAL_ACCOUNT  # the account data is still real
+    assert data.market_open is None
+
+
 # --- the orchestrator hands it to the model ---
 
 HOLD_ANSWER = json.dumps(
@@ -348,7 +372,16 @@ async def test_the_model_is_told_when_the_account_could_not_be_read(monkeypatch)
     context = await _run_and_capture_prompt(monkeypatch, None)
 
     assert context["account_data"] == "UNAVAILABLE"
-    assert context["account"] == {"status": "UNAVAILABLE"}
+    # The real cycle always passes a granular account_data_status (#174), so the
+    # account section keeps cash/equity/etc. as explicit nulls plus the reason,
+    # rather than main's minimal {"status": "UNAVAILABLE"} - no numbers are invented.
+    assert context["account"] == {
+        "cash": None,
+        "equity": None,
+        "buying_power": None,
+        "daily_pnl": None,
+        "data_status": "UNAVAILABLE",
+    }
     assert "100000" not in json.dumps(context)
 
 

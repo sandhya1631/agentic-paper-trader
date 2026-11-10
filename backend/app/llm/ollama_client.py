@@ -1,3 +1,5 @@
+from typing import Any
+
 import httpx
 
 from app.llm.base import LLMClient, LLMHealth
@@ -8,28 +10,46 @@ class OllamaClient(LLMClient):
 
     provider = "ollama"
 
-    def __init__(self, base_url: str, model: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        *,
+        temperature: float = 0.1,
+        num_ctx: int = 4096,
+        json_format: bool = True,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
+        self._temperature = temperature
+        self._num_ctx = num_ctx
+        self._json_format = json_format
 
     async def generate(
         self,
         prompt: str,
         *,
         system: str | None = None,
-        temperature: float = 0.2,
+        temperature: float | None = None,
     ) -> str:
         messages: list[dict[str, str]] = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
             "stream": False,
-            "options": {"temperature": temperature},
+            "options": {
+                "temperature": (
+                    temperature if temperature is not None else self._temperature
+                )
+            },
         }
+        payload["options"]["num_ctx"] = self._num_ctx
+        if self._json_format:
+            payload["format"] = "json"
         async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(f"{self._base_url}/api/chat", json=payload)
             response.raise_for_status()

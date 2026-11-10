@@ -144,6 +144,9 @@ def test_no_anthropic_credentials_does_not_affect_default_provider(
         openai_model="gpt-4o-mini",
         ollama_base_url="http://localhost:11434",
         ollama_model="llama3.1",
+        ollama_temperature=0.1,
+        ollama_num_ctx=4096,
+        ollama_json_format=True,
     )
 
     client = create_llm_client(settings)
@@ -468,6 +471,9 @@ async def test_ollama_client_generate_calls_chat_api():
     args, kwargs = mock_client.post.call_args
     assert args[0] == "http://localhost:11434/api/chat"
     assert kwargs["json"]["model"] == "llama3.1"
+    assert kwargs["json"]["format"] == "json"
+    assert kwargs["json"]["options"]["temperature"] == 0.1
+    assert kwargs["json"]["options"]["num_ctx"] == 4096
     assert kwargs["json"]["messages"] == [
         {"role": "system", "content": "be nice"},
         {"role": "user", "content": "hi"},

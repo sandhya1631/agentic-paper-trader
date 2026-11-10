@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     # Market data collector (app/market_data/alpaca_client.py)
     default_bar_limit: int = Field(default=50, ge=1)
     default_timeframe_minutes: int = Field(default=5, ge=1)
+    max_market_data_age_minutes: int = Field(default=15, ge=1)
     max_retry_attempts: int = Field(default=3, ge=1)
     retry_backoff_seconds: float = Field(default=1.0, gt=0)
 
@@ -65,6 +66,9 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-5-5"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
+    ollama_temperature: float = Field(default=0.1, ge=0, le=2)
+    ollama_num_ctx: int = Field(default=4096, ge=512)
+    ollama_json_format: bool = True
 
     # Encrypted Alpaca Credential Vault — Fernet key. No default: a working key
     # baked into source would make "encryption at rest" meaningless for any

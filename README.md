@@ -48,6 +48,9 @@ Each cycle's saved `snapshot_json` includes the selected strategy version and th
 deterministic risk-policy version (`POLICY_VERSION`). These are distinct: changing the prompt
 does not change risk rules. The policy version is a ruleset stamp, not evidence that the policy
 evaluator was run for that cycle; the current cycle runner does not invoke policy evaluation.
+Snapshots also record model-input observability: context and system-prompt character counts,
+approximate input tokens, symbols and bars used, and account-data status. These measurements
+support context-window tuning without adding bookkeeping fields to the model prompt.
 `AgentConfig.version` is not the strategy version and is not currently used for optimistic
 concurrency.
 

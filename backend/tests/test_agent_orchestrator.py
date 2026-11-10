@@ -18,8 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.approval import reconcile_uncertain_cycle
 from app.agent.context import build_agent_context
-from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
-from app.agent.prompt import get_prompt_definition, get_system_prompt
+from app.agent.knowledge import retrieve_knowledge
+from app.agent.orchestrator import (
+    CycleOverlapError,
+    _enforce_context_window,
+    _select_dynamic_strategy,
+    run_agent_cycle,
+)
+from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition, get_system_prompt
 from app.core.constants import DEFAULT_PROMPT_REVISION
 from app.db.enums import ApprovalMode, ApprovalStatus, CycleStatus, CycleTrigger, UserRole
 from app.db.models import (
@@ -93,6 +99,33 @@ def test_get_system_prompt_unknown_raises():
         get_system_prompt("INVALID_VERSION")
 
 
+def test_s002_is_short_json_focused_strategy():
+    prompt = get_system_prompt("S-002")
+
+    assert "STRATEGY VERSION: S-002" in prompt
+    assert "account_data is LIVE" in prompt
+    assert "Return only one valid JSON object" in prompt
+    assert len(prompt) < len(get_system_prompt("S-001"))
+
+
+def test_strategy_registry_contains_seven_evaluable_strategies():
+    assert set(STRATEGY_REGISTRY) == {
+        "S-001",
+        "S-002",
+        "S-003",
+        "S-004",
+        "S-005",
+        "S-006",
+        "S-007",
+    }
+    for version in STRATEGY_REGISTRY:
+        prompt = get_system_prompt(version)
+        assert f"STRATEGY VERSION: {version}" in prompt
+        assert "BUY" in prompt
+        assert "SELL" in prompt
+        assert "HOLD" in prompt
+
+
 def test_agent_config_rejects_unknown_strategy_version():
     agent = AgentConfig(strategy_version="S-001")
 
@@ -124,7 +157,186 @@ def test_build_agent_context():
     assert context["watchlist"] == ["AAPL", "NVDA"]
     assert context["market"]["AAPL"]["latest_price"] == 154.9
     assert context["market"]["AAPL"]["rsi_14"] is not None
+    assert len(context["market"]["AAPL"]["recent_bars"]) == 12
+    assert context["market"]["AAPL"]["recent_bars"][-1]["close"] == 154.9
+    assert context["market"]["AAPL"]["recent_bars"][-1]["change_pct"] > 0
+    assert context["market"]["AAPL"]["data_quality"]["freshness_status"] == "STALE"
     assert context["market"]["NVDA"]["status"] == "NO_DATA"
+    assert context["market"]["NVDA"]["data_quality"]["quality_status"] == "NO_DATA"
+    # No account_data_status passed: the simpler convention infers UNAVAILABLE from
+    # no account_info being given (#64/#172), not the richer NOT_PROVIDED placeholder.
+    assert context["account"] == {"status": "UNAVAILABLE"}
+    assert context["account_data"] == "UNAVAILABLE"
+
+
+def test_build_agent_context_reports_market_data_quality():
+    timestamp = datetime.now(timezone.utc).isoformat()
+    bars = [
+        {"timestamp": timestamp, "close": 100.0},
+        {"timestamp": timestamp, "close": None},
+        {"timestamp": timestamp, "close": 101.0},
+    ]
+
+    context = build_agent_context(
+        ["AAPL"],
+        {"AAPL": bars},
+        max_data_age_seconds=60,
+    )
+
+    quality = context["market"]["AAPL"]["data_quality"]
+    assert quality["freshness_status"] == "FRESH"
+    assert quality["quality_status"] == "DEGRADED"
+    assert quality["missing_close_count"] == 1
+    assert quality["duplicate_timestamp_count"] == 2
+
+
+def test_s001_requires_fresh_and_valid_market_data():
+    prompt = get_system_prompt("S-001")
+
+    assert "data_quality.freshness_status other than FRESH" in prompt
+    assert "data_quality.quality_status other than VALID" in prompt
+
+
+def test_build_agent_context_marks_unavailable_account_data():
+    context = build_agent_context(
+        ["AAPL"],
+        {"AAPL": []},
+        account_data_status="UNAVAILABLE_BROKER",
+    )
+
+    assert context["account"]["data_status"] == "UNAVAILABLE_BROKER"
+    assert context["account"]["cash"] is None
+    assert context["positions"] == []
+    assert context["open_orders"] == []
+
+
+def test_enforce_context_window_trims_payload_and_tracks_budget():
+    context = {
+        "watchlist": ["AAPL", "NVDA", "MSFT"],
+        "market": {
+            symbol: {
+                "recent_bars": [{"close": float(index)} for index in range(20)],
+                "extended_indicators": {"rsi_14": 60.0, "sma_20": 100.0, "noise": "x" * 200},
+            }
+            for symbol in ["AAPL", "NVDA", "MSFT"]
+        },
+        "account": {"data_status": "LIVE"},
+        "positions": [{"symbol": "AAPL", "qty": 10}],
+        "open_orders": [{"symbol": "AAPL", "qty": 1}],
+        "decision_target": "AAPL",
+    }
+
+    trimmed = _enforce_context_window(
+        context,
+        "system " * 200,
+        model_window_tokens=800,
+    )
+
+    assert trimmed["decision_target"] == "AAPL"
+    assert trimmed["watchlist"] == ["AAPL"]
+    assert trimmed["market"]["AAPL"]["recent_bars"][-1]["close"] == 19.0
+    assert trimmed["context_window_guard"]["remaining_tokens"] >= 0
+    assert trimmed["context_window_guard"]["model_window_tokens"] == 800
+
+
+def test_dynamic_strategy_selection_explains_degraded_data_choice():
+    selected, reason = _select_dynamic_strategy(
+        {"market": {"AAPL": {"data_quality": {"quality_status": "DEGRADED"}}}},
+        model_window_tokens=4096,
+    )
+
+    assert selected == "S-002"
+    assert "degraded" in reason
+
+
+def test_dynamic_strategy_selection_uses_regime_and_volume():
+    selected, reason = _select_dynamic_strategy(
+        {
+            "market": {
+                "AAPL": {
+                    "regime": "UPTREND",
+                    "relative_volume_20": 1.8,
+                    "data_quality": {"quality_status": "VALID"},
+                }
+            }
+        },
+        model_window_tokens=4096,
+    )
+
+    assert selected == "S-004"
+    assert "volume" in reason
+
+
+def test_knowledge_retrieval_is_small_and_relevant():
+    entries = retrieve_knowledge(
+        strategy_version="S-004",
+        market={
+            "AAPL": {
+                "regime": "UPTREND",
+                "relative_volume_20": 1.8,
+            }
+        },
+    )
+
+    assert len(entries) <= 3
+    assert {entry["topic"] for entry in entries} >= {"risk", "breakout"}
+
+
+def test_build_agent_context_sanitizes_live_portfolio_data():
+    context = build_agent_context(
+        ["AAPL"],
+        {"AAPL": []},
+        account_info={
+            "cash": "12000.00",
+            "equity": "25000.00",
+            "buying_power": "48000.00",
+            "daily_pnl": "-125.00",
+        },
+        positions=[
+            {
+                "symbol": "AAPL",
+                "qty": "10",
+                "market_value": "1800.00",
+                "unrealized_pl": "-25.00",
+            }
+        ],
+        open_orders=[
+            {
+                "id": "order-1",
+                "symbol": "AAPL",
+                "side": "buy",
+                "qty": "2",
+                "status": "new",
+            }
+        ],
+        account_data_status="LIVE",
+    )
+
+    assert context["account"] == {
+        "cash": "12000.00",
+        "equity": "25000.00",
+        "buying_power": "48000.00",
+        "daily_pnl": "-125.00",
+        "data_status": "LIVE",
+    }
+    assert context["positions"] == [
+        {
+            "symbol": "AAPL",
+            "qty": "10",
+            "market_value": "1800.00",
+            "unrealized_pnl": "-25.00",
+        }
+    ]
+    assert context["open_orders"] == [
+        {
+            "id": "order-1",
+            "symbol": "AAPL",
+            "side": "buy",
+            "qty": "2",
+            "status": "new",
+        }
+    ]
+    assert "encrypted_api_key" not in json.dumps(context)
 
 
 # --- Orchestrator Integration Tests ---
@@ -205,6 +417,10 @@ async def test_run_agent_cycle_success(db_session: AsyncSession):
         "policy": POLICY_VERSION,
     }
     assert cycle.snapshot_json["execution_status"] == "PENDING_APPROVAL"
+    assert cycle.snapshot_json["observability"]["symbols"] == 2
+    assert cycle.snapshot_json["observability"]["bars_used"] == 50
+    assert cycle.snapshot_json["observability"]["context_chars"] > 0
+    assert cycle.snapshot_json["observability"]["estimated_input_tokens"] > 0
     assert cycle.prompt_version == agent.strategy_version
     assert cycle.prompt_revision == DEFAULT_PROMPT_REVISION
     assert "S-001" in cycle.prompt_text

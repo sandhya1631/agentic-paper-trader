@@ -26,6 +26,7 @@ from app.core.constants import (
     ALPACA_PROVIDER,
     DEFAULT_PROMPT_REVISION,
     DEFAULT_STRATEGY_VERSION,
+    DYNAMIC_STRATEGY_VERSION,
 )
 from app.db.base import Base
 from app.db.enums import (
@@ -173,7 +174,8 @@ class AgentConfig(Base, UUIDPrimaryKey, Timestamped):
 
     @validates("strategy_version")
     def validate_strategy_version(self, _key: str, value: str) -> str:
-        get_system_prompt(value)
+        if value != DYNAMIC_STRATEGY_VERSION:
+            get_system_prompt(value)
         return value
 
     __table_args__ = (

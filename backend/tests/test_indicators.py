@@ -97,3 +97,21 @@ def test_rsi_wilder_calculation():
 
     # Expected RSI-14 using Wilder's smoothing
     assert result["rsi_14"] == pytest.approx(43.43, abs=0.01)
+
+
+def test_extended_indicators_include_trend_momentum_volatility_and_volume():
+    prices = list(range(100, 160))
+    result = calculate_indicators(
+        prices,
+        highs=[price + 1 for price in prices],
+        lows=[price - 1 for price in prices],
+        volumes=[1000 + index * 10 for index in range(60)],
+    )
+
+    assert result["atr_14"] is not None
+    assert result["macd"] is not None
+    assert result["macd_signal"] is not None
+    assert result["macd_histogram"] is not None
+    assert result["sma_20_slope_pct"] > 0
+    assert result["relative_volume_20"] > 1
+    assert result["regime"] == "UPTREND"

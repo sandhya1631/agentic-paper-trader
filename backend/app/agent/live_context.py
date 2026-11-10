@@ -76,7 +76,12 @@ async def fetch_live_account_data(db: AsyncSession, agent: AgentConfig) -> LiveA
             account = await client.get_account()
             positions = await client.get_positions()
             orders = await fetch_all_orders(client, status="open")
-            clock = await fetch_market_clock_for(client)
+            # The clock is informational only: if it fails, the account data is
+            # still real and LIVE, and the context just says market_status=UNKNOWN.
+            try:
+                clock_open: bool | None = bool((await fetch_market_clock_for(client)).is_open)
+            except Exception:
+                clock_open = None
 
         return LiveAccountData(
             account={
@@ -95,7 +100,7 @@ async def fetch_live_account_data(db: AsyncSession, agent: AgentConfig) -> LiveA
                 for position in positions
             ],
             open_orders=[_open_order_entry(order) for order in orders],
-            market_open=bool(clock.is_open),
+            market_open=clock_open,
         )
     except Exception as exc:
         # Log only the error type: never the message, which could echo request details.

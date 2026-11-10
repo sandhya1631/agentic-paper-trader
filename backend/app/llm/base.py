@@ -35,7 +35,7 @@ class LLMClient(ABC):
         prompt: str,
         *,
         system: str | None = None,
-        temperature: float = 0.2,
+        temperature: float | None = None,
     ) -> str:
         """Return the model's text completion for the given prompt."""
         raise NotImplementedError

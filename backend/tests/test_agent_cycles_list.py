@@ -8,7 +8,7 @@ from conftest import TestSessionLocal
 from httpx import AsyncClient
 from sqlalchemy import select
 
-from app.db.enums import CycleStatus, CycleTrigger
+from app.db.enums import CycleStatus, CycleTrigger, UserRole
 from app.db.models import AgentConfig, AgentCycle, PolicySet, TradingAccount, User
 
 
@@ -58,6 +58,7 @@ def _cycle(
     status: CycleStatus = CycleStatus.HOLD,
     action: str | None = None,
     policy_decision: str | None = None,
+    snapshot_json: dict | None = None,
 ) -> AgentCycle:
     started = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
     return AgentCycle(
@@ -71,6 +72,7 @@ def _cycle(
             else None
         ),
         policy_decision=policy_decision,
+        snapshot_json=snapshot_json,
     )
 
 
@@ -174,6 +176,130 @@ async def test_agent_cycles_list_rejects_out_of_range_limit(client: AsyncClient)
     headers = {"Authorization": f"Bearer {token}"}
     assert (await client.get("/agent/cycles?limit=0", headers=headers)).status_code == 422
     assert (await client.get("/agent/cycles?limit=101", headers=headers)).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_strategy_selection_lists_and_updates_owned_agent(client: AsyncClient):
+    token = await _register_and_login(client, "strategy@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "strategy@example.com")
+        user = (
+            await db.execute(select(User).where(User.email == "strategy@example.com"))
+        ).scalar_one()
+        user.role = UserRole.OPERATOR
+        await db.commit()
+        agent_id = agent.id
+
+    headers = {"Authorization": f"Bearer {token}"}
+    strategies = await client.get("/agent/strategies", headers=headers)
+    assert strategies.status_code == 200
+    assert {item["version"] for item in strategies.json()} >= {
+        "S-001",
+        "S-002",
+        "S-003",
+        "S-004",
+        "S-005",
+        "S-006",
+        "S-007",
+        "DYNAMIC",
+    }
+
+    response = await client.put(
+        f"/agent/{agent_id}/strategy",
+        headers=headers,
+        json={"strategy_version": "S-002"},
+    )
+    assert response.status_code == 200
+    assert response.json()["strategy_version"] == "S-002"
+
+
+@pytest.mark.asyncio
+async def test_strategy_selection_rejects_unknown_strategy(client: AsyncClient):
+    token = await _register_and_login(client, "invalid-strategy@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "invalid-strategy@example.com")
+        user = (
+            await db.execute(
+                select(User).where(User.email == "invalid-strategy@example.com")
+            )
+        ).scalar_one()
+        user.role = UserRole.OPERATOR
+        await db.commit()
+        agent_id = agent.id
+
+    response = await client.put(
+        f"/agent/{agent_id}/strategy",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"strategy_version": "S-999"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_cycle_token_usage_returns_persisted_context_budget(client: AsyncClient):
+    token = await _register_and_login(client, "tokens@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "tokens@example.com")
+        cycle = _cycle(
+            agent.id,
+            minutes_ago=1,
+            snapshot_json={
+                "observability": {
+                    "estimated_input_tokens": 900,
+                    "model_window_tokens": 4096,
+                    "remaining_context_tokens": 3196,
+                    "context_over_limit": False,
+                    "context_truncated": True,
+                    "context_chars": 3000,
+                    "system_prompt_chars": 600,
+                    "symbols": 1,
+                    "bars_used": 50,
+                    "account_data_status": "LIVE",
+                }
+            },
+        )
+        db.add(cycle)
+        await db.commit()
+        cycle_id = cycle.id
+
+    response = await client.get(
+        f"/agent/cycles/{cycle_id}/token-usage",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "cycle_id": str(cycle_id),
+        "estimated_input_tokens": 900,
+        "model_window_tokens": 4096,
+        "remaining_context_tokens": 3196,
+        "context_over_limit": False,
+        "context_truncated": True,
+        "context_chars": 3000,
+        "system_prompt_chars": 600,
+        "symbols": 1,
+        "bars_used": 50,
+        "account_data_status": "LIVE",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cycle_token_usage_requires_context_metrics(client: AsyncClient):
+    token = await _register_and_login(client, "no-tokens@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "no-tokens@example.com")
+        cycle = _cycle(agent.id, minutes_ago=1)
+        db.add(cycle)
+        await db.commit()
+        cycle_id = cycle.id
+
+    response = await client.get(
+        f"/agent/cycles/{cycle_id}/token-usage",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409
 
 
 @pytest.mark.asyncio
