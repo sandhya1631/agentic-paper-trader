@@ -7,7 +7,6 @@ orders are retrieved and parsed correctly, empty results are handled without
 error, and the protected endpoints require authentication.
 """
 
-import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -178,7 +177,7 @@ async def test_place_order_is_blocked_by_global_kill_switch(monkeypatch):
                 side="BUY",
                 client_order_id="blocked-order",
             ),
-            current_user=SimpleNamespace(id=uuid.uuid4()),
+            current_user=SimpleNamespace(id=None),  # an operator double
             client=SimpleNamespace(submit_order=submit_order),
             db=db,
         )
