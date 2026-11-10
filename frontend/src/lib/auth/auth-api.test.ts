@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { login, logout, register } from "./auth-api";
+import { forgotPassword, login, logout, register, resetPassword } from "./auth-api";
 import { getToken, setToken } from "./token-store";
 
 function jsonResponse(status: number, data: unknown): Response {
@@ -52,5 +52,34 @@ describe("auth-api", () => {
     logout();
 
     expect(getToken()).toBeNull();
+  });
+
+  it("forgotPassword posts the email without auth", async () => {
+    const spy = mockFetch(
+      jsonResponse(200, { detail: "If that email is registered, a password reset link has been sent." }),
+    );
+
+    const res = await forgotPassword("operator@example.com");
+
+    const [url, init] = spy.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/auth/forgot-password");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ email: "operator@example.com" });
+    expect(new Headers(init.headers).has("Authorization")).toBe(false);
+    expect(res.detail).toContain("If that email is registered");
+  });
+
+  it("resetPassword posts the token and new password without auth", async () => {
+    const spy = mockFetch(jsonResponse(200, { detail: "Password has been reset." }));
+
+    await resetPassword({ token: "abc123", new_password: "N3w-Password!!" });
+
+    const [url, init] = spy.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/auth/reset-password");
+    expect(JSON.parse(init.body as string)).toEqual({
+      token: "abc123",
+      new_password: "N3w-Password!!",
+    });
+    expect(new Headers(init.headers).has("Authorization")).toBe(false);
   });
 });

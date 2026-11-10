@@ -5,12 +5,15 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ApiError } from "@/lib/api/errors";
 
 vi.mock("@/lib/agent/cycles-api", () => ({ listCycles: vi.fn(), getCycle: vi.fn() }));
+vi.mock("@/lib/meta/meta-api", () => ({ getConstants: vi.fn() }));
 
 import { getCycle, listCycles, type AgentCycle } from "@/lib/agent/cycles-api";
+import { getConstants } from "@/lib/meta/meta-api";
 import { AuditTimeline } from "./audit-timeline";
 
 const mockList = vi.mocked(listCycles);
 const mockGet = vi.mocked(getCycle);
+const mockConstants = vi.mocked(getConstants);
 
 function baseCycle(overrides: Partial<AgentCycle> = {}): AgentCycle {
   return {
@@ -39,6 +42,17 @@ function baseCycle(overrides: Partial<AgentCycle> = {}): AgentCycle {
 beforeEach(() => {
   mockList.mockReset();
   mockGet.mockReset();
+  mockConstants.mockReset();
+  mockConstants.mockResolvedValue({
+    currency: "USD",
+    cycle_trigger: ["MANUAL", "SCHEDULED"],
+    cycle_status: ["COMPLETED", "HOLD", "REJECTED", "FAILED"],
+    decision_action: ["BUY", "SELL", "HOLD"],
+    policy_decision_type: ["ALLOW", "DENY", "RESIZE", "NOT_EVALUATED"],
+    approval_mode: ["AUTO", "REQUIRED", "OBSERVE_ONLY"],
+    approval_status: ["PENDING", "APPROVED", "REJECTED"],
+    max_watchlist_size: 20,
+  });
 });
 afterEach(() => cleanup());
 
@@ -196,5 +210,96 @@ describe("AuditTimeline", () => {
     fireEvent.click(await screen.findByRole("button", { name: /FAILED/ }));
 
     expect(await screen.findByText(/LLM_OUTPUT_INVALID: bad json/)).toBeTruthy();
+  });
+
+  it("populates the action/status/policy dropdowns from /meta/constants", async () => {
+    mockList.mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0, next_offset: null });
+    render(<AuditTimeline />);
+
+    await screen.findByText(/no agent cycles recorded yet/i);
+    const actionSelect = screen.getByLabelText(/^action$/i) as HTMLSelectElement;
+    const statusSelect = screen.getByLabelText(/^status$/i) as HTMLSelectElement;
+    const policySelect = screen.getByLabelText(/policy outcome/i) as HTMLSelectElement;
+
+    expect(Array.from(actionSelect.options).map((o) => o.value)).toEqual([
+      "", "BUY", "SELL", "HOLD",
+    ]);
+    expect(Array.from(statusSelect.options).map((o) => o.value)).toEqual([
+      "", "COMPLETED", "HOLD", "REJECTED", "FAILED",
+    ]);
+    expect(Array.from(policySelect.options).map((o) => o.value)).toEqual([
+      "", "ALLOW", "DENY", "RESIZE", "NOT_EVALUATED",
+    ]);
+  });
+
+  it("refetches with the selected filters and shows a matching-count line", async () => {
+    mockList.mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0, next_offset: null });
+    render(<AuditTimeline />);
+    await screen.findByText(/no agent cycles recorded yet/i);
+    mockList.mockClear();
+
+    mockList.mockResolvedValue({
+      items: [baseCycle()],
+      total: 3,
+      limit: 20,
+      offset: 0,
+      next_offset: null,
+    });
+    fireEvent.change(screen.getByLabelText(/^action$/i), { target: { value: "BUY" } });
+
+    expect(await screen.findByText(/3 matching cycles/i)).toBeTruthy();
+    expect(mockList).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 20, offset: 0, action: "BUY" }),
+    );
+  });
+
+  it("AND-combines multiple filters into one request", async () => {
+    mockList.mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0, next_offset: null });
+    render(<AuditTimeline />);
+    await screen.findByText(/no agent cycles recorded yet/i);
+    mockList.mockClear();
+
+    fireEvent.change(screen.getByLabelText(/^action$/i), { target: { value: "BUY" } });
+    fireEvent.change(screen.getByLabelText(/^status$/i), { target: { value: "FAILED" } });
+    fireEvent.change(screen.getByLabelText(/policy outcome/i), { target: { value: "DENY" } });
+    fireEvent.change(screen.getByLabelText(/^from$/i), { target: { value: "2026-11-01" } });
+    fireEvent.change(screen.getByLabelText(/^to$/i), { target: { value: "2026-11-05" } });
+
+    await screen.findByRole("button", { name: /clear filters/i });
+    expect(mockList).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        action: "BUY",
+        status: "FAILED",
+        policyDecision: "DENY",
+        startedAfter: "2026-11-01T00:00:00.000Z",
+        startedBefore: "2026-11-05T23:59:59.999Z",
+      }),
+    );
+  });
+
+  it("clears all filters and refetches the unfiltered list", async () => {
+    mockList.mockResolvedValue({ items: [], total: 0, limit: 20, offset: 0, next_offset: null });
+    render(<AuditTimeline />);
+    await screen.findByText(/no agent cycles recorded yet/i);
+
+    fireEvent.change(screen.getByLabelText(/^action$/i), { target: { value: "BUY" } });
+    const clearButton = await screen.findByRole("button", { name: /clear filters/i });
+    mockList.mockClear();
+
+    fireEvent.click(clearButton);
+
+    expect(await screen.findByText(/no agent cycles recorded yet/i)).toBeTruthy();
+    expect(mockList).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        limit: 20,
+        offset: 0,
+        startedAfter: undefined,
+        startedBefore: undefined,
+        action: undefined,
+        status: undefined,
+        policyDecision: undefined,
+      }),
+    );
+    expect(screen.queryByRole("button", { name: /clear filters/i })).toBeNull();
   });
 });

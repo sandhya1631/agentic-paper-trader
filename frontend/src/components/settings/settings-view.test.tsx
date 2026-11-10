@@ -9,6 +9,7 @@ vi.mock("@/lib/agent/controls-api", () => ({
   triggerCycle: vi.fn(),
   getKillSwitch: vi.fn(),
   setKillSwitch: vi.fn(),
+  getKillSwitchEvents: vi.fn(),
 }));
 vi.mock("@/lib/accounts/accounts-api", () => ({
   getAccountStatus: vi.fn(),
@@ -26,11 +27,12 @@ vi.mock("@/lib/agent/agent-config-api", () => ({
   getAgentConfig: vi.fn(),
   updateAgentConfig: vi.fn(),
 }));
-vi.mock("@/lib/meta/meta-api", () => ({ getMetaConstants: vi.fn() }));
+vi.mock("@/lib/meta/meta-api", () => ({ getConstants: vi.fn() }));
 
 import {
   getCurrentUser,
   getKillSwitch,
+  getKillSwitchEvents,
   setKillSwitch,
   triggerCycle,
 } from "@/lib/agent/controls-api";
@@ -43,13 +45,14 @@ import {
 import { getSchedulerStatus, startSchedule, stopSchedule } from "@/lib/agent/scheduler-api";
 import { listCycles } from "@/lib/agent/cycles-api";
 import { getAgentConfig } from "@/lib/agent/agent-config-api";
-import { getMetaConstants } from "@/lib/meta/meta-api";
+import { getConstants } from "@/lib/meta/meta-api";
 import { SettingsView } from "./settings-view";
 
 const mockMe = vi.mocked(getCurrentUser);
 const mockTrigger = vi.mocked(triggerCycle);
 const mockGetKs = vi.mocked(getKillSwitch);
 const mockSetKs = vi.mocked(setKillSwitch);
+const mockGetKsEvents = vi.mocked(getKillSwitchEvents);
 const mockAccountStatus = vi.mocked(getAccountStatus);
 const mockConnect = vi.mocked(connectAccount);
 const mockDisconnect = vi.mocked(disconnectAccount);
@@ -59,7 +62,7 @@ const mockStop = vi.mocked(stopSchedule);
 const mockCycles = vi.mocked(listCycles);
 const mockLogs = vi.mocked(getSchedulerLogs);
 const mockAgentConfig = vi.mocked(getAgentConfig);
-const mockConstants = vi.mocked(getMetaConstants);
+const mockConstants = vi.mocked(getConstants);
 
 function notFound() {
   return new ApiError(404, "Not Found", { detail: "No Alpaca account connected" }, "http://x");
@@ -116,6 +119,7 @@ beforeEach(() => {
   mockSchedStatus.mockResolvedValue(schedStatus());
   mockCycles.mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0, next_offset: null });
   mockLogs.mockResolvedValue([]);
+  mockGetKsEvents.mockResolvedValue([]);
   mockAgentConfig.mockResolvedValue({
     id: "a1",
     name: "Default agent",
@@ -318,5 +322,97 @@ describe("Scheduler controls", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /stop schedule/i }));
     await waitFor(() => expect(mockStop).toHaveBeenCalledWith("s1"));
+  });
+});
+
+describe("Kill-switch history", () => {
+  it("is not fetched or shown for non-admins", async () => {
+    render(<SettingsView />);
+    await screen.findByText(/administrators only/i);
+    expect(mockGetKsEvents).not.toHaveBeenCalled();
+    expect(screen.queryByText(/kill-switch history/i)).toBeNull();
+  });
+
+  it("shows GLOBAL and USER events, newest first as returned by the API", async () => {
+    mockMe.mockResolvedValue({ id: "u1", email: "a@example.com", role: "ADMIN" });
+    mockGetKsEvents.mockResolvedValue([
+      {
+        id: "e2",
+        occurred_at: "2026-11-05T19:13:42Z",
+        actor_id: "admin-1",
+        previous_enabled: false,
+        new_enabled: true,
+        outcome: "APPLIED",
+        reason: "global halt drill",
+        scope: "GLOBAL",
+        target_user_id: null,
+        actor_email: "admin@example.com",
+        target_user_email: null,
+      },
+      {
+        id: "e1",
+        occurred_at: "2026-11-05T19:00:09Z",
+        actor_id: "op-1",
+        previous_enabled: false,
+        new_enabled: true,
+        outcome: "APPLIED",
+        reason: null,
+        scope: "USER",
+        target_user_id: "op-1",
+        actor_email: "operator@example.com",
+        target_user_email: "operator@example.com",
+      },
+    ] as never);
+
+    render(<SettingsView />);
+
+    expect(await screen.findByText(/global halt drill/i)).toBeTruthy();
+    expect(screen.getByText("admin@example.com")).toBeTruthy();
+    expect(screen.getByText("operator@example.com")).toBeTruthy();
+    expect(screen.getAllByText("GLOBAL")).toHaveLength(1);
+    expect(screen.getAllByText("USER")).toHaveLength(1);
+  });
+
+  it("falls back to a neutral label when the actor has no email", async () => {
+    mockMe.mockResolvedValue({ id: "u1", email: "a@example.com", role: "ADMIN" });
+    mockGetKsEvents.mockResolvedValue([
+      {
+        id: "e1",
+        occurred_at: "2026-11-05T19:00:09Z",
+        actor_id: null,
+        previous_enabled: true,
+        new_enabled: false,
+        outcome: "APPLIED",
+        reason: null,
+        scope: "GLOBAL",
+        target_user_id: null,
+        actor_email: null,
+        target_user_email: null,
+      },
+    ] as never);
+
+    render(<SettingsView />);
+
+    expect(await screen.findByText("System")).toBeTruthy();
+  });
+
+  it("shows an empty state when there is no history yet", async () => {
+    mockMe.mockResolvedValue({ id: "u1", email: "a@example.com", role: "ADMIN" });
+    mockGetKsEvents.mockResolvedValue([]);
+
+    render(<SettingsView />);
+
+    expect(await screen.findByText(/no kill-switch changes yet/i)).toBeTruthy();
+  });
+
+  it("shows an error state when the history fails to load", async () => {
+    mockMe.mockResolvedValue({ id: "u1", email: "a@example.com", role: "ADMIN" });
+    mockGetKsEvents.mockRejectedValue(
+      new ApiError(403, "Forbidden", { detail: "Admin role required" }, "http://x"),
+    );
+
+    render(<SettingsView />);
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
   });
 });

@@ -10,7 +10,7 @@ The backend is a FastAPI application using:
 
 - PostgreSQL through async SQLAlchemy 2.0 and `asyncpg`.
 - Alpaca's paper-trading and market-data APIs.
-- Ollama or OpenAI for the language-model decision proposal.
+- Ollama, OpenAI or Anthropic (Claude) for the language-model decision proposal.
 - APScheduler for in-process schedule timing.
 - Celery and Redis for scheduled-cycle execution.
 - Fernet encryption for user Alpaca credentials.
@@ -45,7 +45,7 @@ HTTP request or scheduler tick
        |             |
        v             v
  Market data     LLM provider
- bars + TA       Ollama/OpenAI
+ bars + TA   Ollama/OpenAI/Claude
        |             |
        +------+------+
               v
@@ -118,9 +118,10 @@ Important settings:
 | `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_ISSUER`, `JWT_EXPIRATION_MINUTES` | JWT authentication settings. |
 | `ALPACA_API_KEY`, `ALPACA_API_SECRET` | Server-level credentials used by market-data and scheduler clock checks. |
 | `ALPACA_PAPER_BASE_URL` | Must be `https://paper-api.alpaca.markets` with optional `/v2`. |
-| `LLM_PROVIDER` | `ollama` or `openai`; defaults to `ollama`. |
+| `LLM_PROVIDER` | `ollama`, `openai` or `anthropic`; defaults to `ollama`. |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local LLM connection. |
-| `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI connection. |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI connection; `OPENAI_MODEL` (default `gpt-4o-mini`) must support strict structured output (`json_schema`) and `temperature`. |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Anthropic (Claude) connection; model defaults to `claude-opus-5-5`. |
 | `CREDENTIAL_ENCRYPTION_KEY` | Required Fernet key for user Alpaca credentials. |
 | `SCHEDULER_ENABLED` | Enables the global APScheduler job; defaults to false. |
 | `SCHEDULER_INTERVAL_MINUTES` | Global schedule interval; defaults to 15. |
@@ -411,7 +412,7 @@ reconciliation.
 | Scheduler tick history | Redis + `redis_data` volume in Compose | Up to 100 entries/key, 30-day expiry | Tick status, counts, reason, timestamps | Shared operational monitoring state |
 | Scheduler dispatch locks | Redis | Short-lived, about two interval lengths | `SET NX` slot keys preventing duplicate enqueueing | Distributed coordination lock, not history |
 | Scheduler fallback history | API process memory | Temporary | Recent tick summaries if Redis cannot be read/written | Best-effort fallback; lost on process restart |
-| LLM prompt and response | LLM provider during request; PostgreSQL after cycle | Provider runtime plus durable cycle record | Prompt sent to Ollama/OpenAI and returned text | Provider performs generation; PostgreSQL preserves the cycle evidence |
+| LLM prompt and response | LLM provider during request; PostgreSQL after cycle | Provider runtime plus durable cycle record | Prompt sent to Ollama/OpenAI/Anthropic and returned text | Provider performs generation; PostgreSQL preserves the cycle evidence |
 | Downloaded Ollama models | Ollama container filesystem | Durable in Compose | Pulled model files | `ollama_data` Docker volume; not PostgreSQL or Redis |
 | Logs and exceptions | Application process logging destination | Deployment-dependent | Operational messages and stack traces | Observability only; not a structured business-data store |
 
@@ -455,6 +456,22 @@ execution framework; its broker and result backend are configured to use Redis.
 Likewise, Alpaca is not a local database: it is the external authoritative
 system for market data, paper-account balances, positions, and broker orders.
 
+### 4.13 `password_reset_tokens`
+
+Stores one-time password reset tokens (Issue #166):
+
+- `id`
+- `user_id` (`ON DELETE CASCADE`)
+- `token_hash` (SHA-256 of the raw token; the raw token itself is never stored)
+- `created_at`, `expires_at`, `used_at`
+
+Only the hash is persisted, so reading this table alone cannot be used to reset
+a password - the caller must know the raw token, which is handed to them once
+(logged server-side in place of a real email, see 5.1) and never written to the
+database. A token is single-use (`used_at`) and expires after
+`PASSWORD_RESET_TOKEN_EXPIRY_MINUTES` (30). Requesting a new token invalidates
+any earlier unused one for that user.
+
 ---
 
 ## 5. Data and decision flow
@@ -469,6 +486,21 @@ system for market data, paper-account balances, positions, and broker orders.
 6. Protected endpoints call `get_current_user()`.
 7. The dependency validates the JWT, converts `sub` to UUID, and loads the
    corresponding user.
+
+**Password reset (Issue #166):**
+
+1. `POST /auth/forgot-password` looks up the email. The response is the same
+   generic message whether or not an account exists, so this endpoint cannot
+   be used to enumerate registered emails.
+2. If a user is found, a random token is generated, hashed, and stored in
+   `password_reset_tokens` with a 30-minute expiry; any earlier unused token
+   for that user is invalidated in the same step.
+3. The raw (unhashed) token is logged server-side (`log_password_reset_link`)
+   instead of emailed - real email delivery is out of scope for #166.
+4. `POST /auth/reset-password` hashes the submitted token, looks it up, and
+   rejects it (400) if missing, already used, or expired.
+5. On success the token is marked used and `users.password_hash` is updated;
+   the old password stops working immediately.
 
 ### 5.2 Credential flow
 
@@ -567,16 +599,21 @@ main sequence.
 
 ### Step 1: Load and gate the agent
 
+- Take the agent's cycle lock (`agent_cycle_lock`): a Postgres advisory try-lock
+  held on a dedicated connection for the whole run. If another cycle or sweep for
+  this agent already holds it, raise `CycleOverlapError` immediately.
 - Load `AgentConfig`.
 - Expire old pending approvals for this agent.
 - Search for a cycle in any active status.
 - If an active cycle is `RECONCILING`, try to reconcile its broker order first.
 - If an active cycle remains, raise `CycleOverlapError`.
 
-This prevents a new trigger from starting while the agent has a cycle in progress.
-Scheduled ticks use `run_watchlist_cycles()`, which runs one cycle per watchlist
-symbol (`target_symbol`) and checks this gate only on the first symbol, so the
-sweep's own per-symbol cycles may be active together.
+This prevents a new trigger from starting while the agent has a cycle in progress,
+including across processes: a manual run (API) and a scheduled sweep (Celery
+worker) for the same agent can never interleave (#156). Scheduled ticks use
+`run_watchlist_cycles()`, which holds the lock for the whole sweep, runs one cycle
+per de-duplicated watchlist symbol (`target_symbol`) and checks the status gate only
+on the first symbol, so the sweep's own per-symbol cycles may be active together.
 
 ### Step 2: Create the cycle
 
@@ -591,7 +628,9 @@ Insert an `AgentCycle` with:
 ### Step 3: Collect market context
 
 Set status to `COLLECTING`, fetch watchlist bars, calculate indicators where
-there are at least 50 closes, and build the sanitized context.
+there are at least 50 closes, and build the sanitized context. The watchlist is
+first normalized (trimmed, upper-cased, de-duplicated, blanks dropped), the same way
+for a manual cycle and a sweep, so each distinct symbol is collected exactly once.
 
 A collector construction or bar-fetch problem is logged and leaves the cycle
 with empty/missing market data, allowing the strategy's HOLD mandate to apply.
@@ -719,8 +758,8 @@ result contains complete evidence instead of stopping at the first failure.
 | P-003 | Market open | Requires Alpaca clock to report open. |
 | P-004 | Fresh data | Requires data age at most 600 seconds. |
 | P-005 | Symbol allowlist | Requires symbol in agent watchlist. |
-| P-007 | Maximum allocation | BUY projected symbol exposure must be at most configured max, default 10% of equity. |
-| P-008 | Available cash | BUY cost must fit cash minus configured reserve. |
+| P-007 | Maximum allocation | BUY projected exposure in that symbol must be at most configured max, default 10% of equity. Per symbol by design (#156), so the caps can add up across a watchlist. |
+| P-008 | Available cash | BUY cost must fit cash minus configured reserve. The aggregate backstop: total deployment stays at about (1 − reserve) of equity; unfilled orders are not counted. |
 | P-009 | Sell ownership | SELL quantity cannot exceed owned long position. |
 | P-010 | Open-order conflict | Rejects a symbol that already has an open order. |
 | P-011 | Daily loss | Rejects when daily P&L is at or below the configured loss limit. |
@@ -1154,14 +1193,19 @@ async context-manager methods. Function locations are relative to `backend`.
 |---|---|---|
 | `LLMClient.generate` | `app/llm/base.py` | Abstract provider-neutral text-generation contract. |
 | `LLMClient.health_check` | `app/llm/base.py` | Abstract provider/model availability contract. |
-| `create_llm_client` | `app/llm/factory.py` | Creates OpenAI or Ollama from settings. |
+| `create_llm_client` | `app/llm/factory.py` | Creates OpenAI, Ollama or Anthropic from settings (Anthropic imported lazily). |
+| `configured_model` | `app/llm/factory.py` | Returns the configured provider's model id without reading keys. |
 | `get_llm_client` | `app/llm/factory.py` | Returns a cached provider client. |
 | `OllamaClient.__init__` | `app/llm/ollama_client.py` | Stores Ollama URL and model. |
 | `OllamaClient.generate` | `app/llm/ollama_client.py` | Calls Ollama `/api/chat` without streaming. |
 | `OllamaClient.health_check` | `app/llm/ollama_client.py` | Checks Ollama reachability and installed model. |
-| `OpenAIClient.__init__` | `app/llm/openai_client.py` | Requires an API key and stores the model. |
-| `OpenAIClient.generate` | `app/llm/openai_client.py` | Calls OpenAI chat completions. |
-| `OpenAIClient.health_check` | `app/llm/openai_client.py` | Lists OpenAI models and checks availability. |
+| `DECISION_JSON_SCHEMA` | `app/llm/decision_schema.py` | Provider-neutral decision schema used for structured output by the OpenAI and Anthropic clients (imports no SDK). |
+| `OpenAIClient.__init__` | `app/llm/openai_client.py` | Requires an API key and stores it with the model; an SDK client is created per call. |
+| `OpenAIClient.generate` | `app/llm/openai_client.py` | Calls chat completions with strict structured JSON output; a refusal's text is returned as the (invalid) answer, so it is recorded in the cycle's raw response. An API error raises a `RuntimeError` naming only its type and HTTP status; the type, status, error code/type/param and request id are logged server-side, while the provider's message and body are never logged or returned. |
+| `OpenAIClient.health_check` | `app/llm/openai_client.py` | Lists OpenAI models and checks availability; on failure the detail names only the exception type. |
+| `AnthropicClient.__init__` | `app/llm/anthropic_client.py` | Requires an API key and stores the model. |
+| `AnthropicClient.generate` | `app/llm/anthropic_client.py` | Calls the Messages API with structured JSON output; returns the text blocks. An API error raises a `RuntimeError` naming only its type and HTTP status; the type, status and request id are logged server-side, while the provider's body is never logged or returned. |
+| `AnthropicClient.health_check` | `app/llm/anthropic_client.py` | Retrieves the model and checks reachability/availability. |
 | `llm_health` | `app/llm/router.py` | Echoes configuration or performs an active LLM probe. |
 
 ### Alpaca broker integration

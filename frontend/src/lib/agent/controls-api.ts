@@ -40,3 +40,25 @@ export function setKillSwitch(enabled: boolean, reason?: string): Promise<KillSw
   const trimmed = reason?.trim();
   return api.put<KillSwitch>("/agent/kill-switch", trimmed ? { enabled, reason: trimmed } : { enabled });
 }
+
+export type KillSwitchEventScope = "GLOBAL" | "USER";
+
+export interface KillSwitchEvent {
+  id: string;
+  occurred_at: string;
+  actor_id: string | null;
+  previous_enabled: boolean;
+  new_enabled: boolean;
+  outcome: string;
+  reason: string | null;
+  /** GLOBAL = admin halt, affects everyone. USER = one user pausing their own scheduler. */
+  scope: KillSwitchEventScope;
+  target_user_id: string | null;
+  actor_email: string | null;
+  target_user_email: string | null;
+}
+
+/** Admin-only audit trail of every kill-switch change, newest first (#169). */
+export function getKillSwitchEvents(limit = 50): Promise<KillSwitchEvent[]> {
+  return api.get<KillSwitchEvent[]>(`/agent/kill-switch/events?limit=${limit}`);
+}

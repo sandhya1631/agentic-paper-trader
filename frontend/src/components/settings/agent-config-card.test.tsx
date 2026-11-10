@@ -9,20 +9,20 @@ vi.mock("@/lib/agent/agent-config-api", () => ({
   getAgentConfig: vi.fn(),
   updateAgentConfig: vi.fn(),
 }));
-vi.mock("@/lib/meta/meta-api", () => ({ getMetaConstants: vi.fn() }));
+vi.mock("@/lib/meta/meta-api", () => ({ getConstants: vi.fn() }));
 vi.mock("@/lib/market-data/market-data-api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/market-data/market-data-api")>();
   return { ...actual, getBars: vi.fn(), getSnapshot: vi.fn() };
 });
 
 import { getAgentConfig, updateAgentConfig, type AgentConfig } from "@/lib/agent/agent-config-api";
-import { getMetaConstants, type MetaConstants } from "@/lib/meta/meta-api";
+import { getConstants, type Constants } from "@/lib/meta/meta-api";
 import { getBars, getSnapshot, type MarketSnapshot } from "@/lib/market-data/market-data-api";
 import { AgentConfigCard } from "./agent-config-card";
 
 const mockGetConfig = vi.mocked(getAgentConfig);
 const mockUpdate = vi.mocked(updateAgentConfig);
-const mockConstants = vi.mocked(getMetaConstants);
+const mockConstants = vi.mocked(getConstants);
 const mockBars = vi.mocked(getBars);
 const mockSnapshot = vi.mocked(getSnapshot);
 
@@ -43,7 +43,7 @@ function config(overrides: Partial<AgentConfig> = {}): AgentConfig {
   };
 }
 
-const CONSTANTS: MetaConstants = {
+const CONSTANTS: Constants = {
   currency: "USD",
   cycle_trigger: ["MANUAL", "SCHEDULED"],
   cycle_status: ["RUNNING", "COMPLETED", "FAILED"],

@@ -24,7 +24,7 @@ import {
   validateWatchlist,
   type SymbolPreview,
 } from "@/lib/agent/agent-config-view";
-import { getMetaConstants } from "@/lib/meta/meta-api";
+import { getConstants } from "@/lib/meta/meta-api";
 import { getBars, getSnapshot } from "@/lib/market-data/market-data-api";
 
 type Status = "loading" | "ready" | "no-agent" | "error";
@@ -69,7 +69,7 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
     setStatus("loading");
     setLoadError(null);
     // allSettled: constants are optional (the select falls back to the current mode).
-    const [cfg, meta] = await Promise.allSettled([getAgentConfig(), getMetaConstants()]);
+    const [cfg, meta] = await Promise.allSettled([getAgentConfig(), getConstants()]);
     const constants = meta.status === "fulfilled" ? meta.value : null;
     setMaxSize(constants?.max_watchlist_size ?? null);
     if (cfg.status === "fulfilled") {

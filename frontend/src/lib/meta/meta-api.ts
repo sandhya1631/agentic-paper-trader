@@ -1,11 +1,11 @@
 /**
- * Meta API seam — `GET /meta/constants` (#139): the backend enum values and limits the UI
- * renders (e.g. the approval modes and the watchlist size cap), so the frontend does not
- * hardcode values that could drift from the server.
+ * Backend constants/enums (#139): read these instead of hardcoding enum strings
+ * or limits (e.g. the approval modes and the watchlist size cap) that would
+ * silently go stale if the backend ever renames or adds a value.
  */
 import { api } from "@/lib/api/client";
 
-export interface MetaConstants {
+export interface Constants {
   currency: string;
   cycle_trigger: string[];
   cycle_status: string[];
@@ -17,6 +17,6 @@ export interface MetaConstants {
   max_watchlist_size: number;
 }
 
-export function getMetaConstants(): Promise<MetaConstants> {
-  return api.get<MetaConstants>("/meta/constants");
+export function getConstants(): Promise<Constants> {
+  return api.get<Constants>("/meta/constants");
 }

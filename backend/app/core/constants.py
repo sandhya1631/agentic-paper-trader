@@ -55,10 +55,12 @@ ALPACA_PROVIDER = "ALPACA"
 POLICY_VERSION = "POLICY-1.0"
 
 # --- LLM client factory ---
-SUPPORTED_PROVIDERS = ("openai", "ollama")
+SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")
 
 # --- Auth ---
 BCRYPT_MAX_PASSWORD_BYTES = 72
+# How long a /auth/forgot-password token stays valid (Issue #166).
+PASSWORD_RESET_TOKEN_EXPIRY_MINUTES = 30
 
 # --- Display ---
 # Alpaca paper accounts are USD-only; exposed via /meta/constants (Issue #139)

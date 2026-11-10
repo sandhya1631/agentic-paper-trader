@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # Override via .env as a JSON array, e.g.: CORS_ALLOWED_ORIGINS=["http://localhost:3000"]
     cors_allowed_origins: list[str] = ["http://localhost:3000"]
 
+    # Where the frontend's reset-password page lives, for the link sent by
+    # /auth/forgot-password (Issue #166). Override in production .env.
+    frontend_base_url: str = "http://localhost:3000"
+
     # Alpaca Trading API Credentials
     alpaca_api_key: str | None = None
     alpaca_api_secret: str | None = None
@@ -56,8 +60,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
 
     # LLM Client Factory — switch providers via .env, no code changes.
-    llm_provider: str = "ollama"  # "openai" | "ollama"
+    llm_provider: str = "ollama"  # "openai" | "ollama" | "anthropic"
     openai_model: str = "gpt-4o-mini"
+    anthropic_model: str = "claude-opus-5-5"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
 
