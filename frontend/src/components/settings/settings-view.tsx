@@ -316,7 +316,10 @@ function SchedulerCard({ canStart }: { canStart: boolean }) {
         </div>
       ) : (
         <p className="mt-2 text-sm text-muted">
-          Trigger a cycle first (above) to create your agent, then you can schedule it.
+          {/* A VIEWER can't trigger the first cycle, so don't point them at a disabled control. */}
+          {canStart
+            ? "Trigger a cycle first (above) to create your agent, then you can schedule it."
+            : "Only operators and admins can create and schedule the agent."}
         </p>
       )}
     </section>

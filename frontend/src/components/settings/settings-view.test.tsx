@@ -403,6 +403,24 @@ describe("Agent activity gating (#176)", () => {
     await findEnabledButton(/start schedule/i);
     expect(screen.queryByText(/only operators and admins/i)).toBeNull();
   });
+
+  it("doesn't send a viewer without an agent to the disabled Trigger Now", async () => {
+    render(<SettingsView />);
+
+    expect(
+      await screen.findByText(/only operators and admins can create and schedule the agent/i),
+    ).toBeTruthy();
+    await waitFor(() => expect(mockMe).toHaveBeenCalled());
+    expect(screen.queryByText(/trigger a cycle first/i)).toBeNull();
+  });
+
+  it("keeps the trigger-first hint for an operator without an agent", async () => {
+    asOperator();
+    render(<SettingsView />);
+
+    expect(await screen.findByText(/trigger a cycle first/i)).toBeTruthy();
+    expect(screen.queryByText(/create and schedule the agent/i)).toBeNull();
+  });
 });
 
 describe("Kill-switch history", () => {
