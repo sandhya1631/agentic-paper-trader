@@ -55,6 +55,12 @@ ALPACA_PROVIDER = "ALPACA"
 # --- Risk policies ---
 POLICY_VERSION = "POLICY-1.0"
 
+# --- Audit events (audit_events.event_type) ---
+# Manual override orders through POST /api/v1/broker/orders (#162): one row per attempt.
+MANUAL_ORDER_SUBMITTED = "MANUAL_ORDER_SUBMITTED"
+MANUAL_ORDER_BLOCKED = "MANUAL_ORDER_BLOCKED"  # the kill switch refused it (423)
+MANUAL_ORDER_FAILED = "MANUAL_ORDER_FAILED"  # the broker call raised (502)
+
 # --- LLM client factory ---
 SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")
 
