@@ -15,6 +15,8 @@ export interface Constants {
   approval_status: string[];
   /** Most symbols an agent's watchlist may hold (the backend rejects more with 422). */
   max_watchlist_size: number;
+  /** The watchlist a new agent starts with (the Market page's fallback with no agent yet). */
+  default_watchlist: string[];
 }
 
 export function getConstants(): Promise<Constants> {

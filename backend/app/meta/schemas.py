@@ -18,3 +18,6 @@ class ConstantsRead(APIModel):
     approval_status: list[str]
     # Largest watchlist PATCH /agent/config accepts (#141).
     max_watchlist_size: int
+    # The watchlist a new agent starts with; the Market page shows it until the user has
+    # an agent of their own (#165).
+    default_watchlist: list[str]

@@ -4,7 +4,8 @@ should read instead of hardcoding (#139)."""
 import pytest
 from httpx import AsyncClient
 
-from app.core.constants import MAX_WATCHLIST_SIZE
+from app.core import constants
+from app.core.constants import DEFAULT_WATCHLIST, MAX_WATCHLIST_SIZE
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -13,6 +14,7 @@ from app.db.enums import (
     DecisionAction,
     PolicyDecisionType,
 )
+from app.meta import router as meta_router
 
 
 @pytest.mark.asyncio
@@ -36,3 +38,11 @@ async def test_get_constants_matches_backend_enums(client: AsyncClient):
     assert set(body["approval_status"]) == {v.value for v in ApprovalStatus}
     # The watchlist cap the agent-config editor enforces (#141) - never hardcoded client-side.
     assert body["max_watchlist_size"] == MAX_WATCHLIST_SIZE
+    # The fallback watchlist the Market page uses before the user has an agent (#165).
+    assert body["default_watchlist"] == DEFAULT_WATCHLIST
+
+
+def test_default_watchlist_comes_from_the_one_constant():
+    """GET /meta/constants reads core.constants.DEFAULT_WATCHLIST (imported, never
+    re-typed), the #94 single-source pattern (#165)."""
+    assert meta_router.DEFAULT_WATCHLIST is constants.DEFAULT_WATCHLIST
