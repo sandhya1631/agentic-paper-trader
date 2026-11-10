@@ -1,7 +1,8 @@
 """Consolidated illegal-order test suite (Story 3.3.3 / Issue #78).
 
 For each of the seven illegal-order categories in the AC - allocation, cash,
-market hours, stale data, duplicates, daily limits, kill switch - this drives
+market hours, stale data, duplicates, daily limits, kill switch - plus a symbol
+outside the (normalized) watchlist (P-005, #179), this drives
 the REAL production path: app.agent.approval.evaluate_and_submit_cycle_trade,
 which (unlike test_cycle_approval.py / test_daily_limits_wiring.py) is allowed
 to call the REAL app.broker.gateway.submit_approved_order here instead of
@@ -81,6 +82,57 @@ def _real_gateway_fixtures(
 async def test_a_legal_order_does_reach_the_broker(monkeypatch):
     """Positive control: a clean proposal really does call client.submit_order."""
     db, agent, cycle, client = _real_gateway_fixtures(monkeypatch)
+
+    decision, order = await approval.evaluate_and_submit_cycle_trade(db, agent, cycle)
+
+    assert decision.decision == PolicyDecisionType.ALLOW
+    assert order is not None
+    client.submit_order.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_watchlist", "symbol"),
+    [
+        pytest.param(["aapl", "AAPL", "nvda"], "MSFT", id="lowercase-and-duplicates"),
+        pytest.param([" aapl ", "Nvda"], "SPY", id="whitespace-and-mixed-case"),
+        pytest.param([], "AAPL", id="empty-watchlist-fails-closed"),
+        pytest.param(["", "  "], "AAPL", id="blank-entries-only-fails-closed"),
+    ],
+)
+async def test_symbol_outside_the_normalized_watchlist_blocks_the_broker_call(
+    monkeypatch, stored_watchlist, symbol
+):
+    """P-005 (#179): the allowlist is the normalized stored watchlist. Normalizing
+    must never widen it: a symbol outside it, or any symbol when it is empty, is
+    still denied before the broker."""
+    db, agent, cycle, client = _real_gateway_fixtures(monkeypatch)
+    agent.watchlist = stored_watchlist
+    cycle.proposal_json["symbol"] = symbol
+
+    decision, order = await approval.evaluate_and_submit_cycle_trade(db, agent, cycle)
+
+    assert decision.decision == PolicyDecisionType.DENY
+    assert "P-005" in failed_ids(decision)
+    assert order is None
+    client.submit_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored_watchlist",
+    [
+        pytest.param(["aapl", "AAPL", "nvda"], id="lowercase-and-duplicates"),
+        pytest.param(["aapl", "nvda"], id="lowercase-only"),
+    ],
+)
+async def test_a_symbol_in_an_unnormalized_watchlist_does_reach_the_broker(
+    monkeypatch, stored_watchlist
+):
+    """Positive control for the case above: with the watchlist stored un-normalized,
+    a clean BUY AAPL passes P-005 and reaches client.submit_order once."""
+    db, agent, cycle, client = _real_gateway_fixtures(monkeypatch)
+    agent.watchlist = stored_watchlist
 
     decision, order = await approval.evaluate_and_submit_cycle_trade(db, agent, cycle)
 
