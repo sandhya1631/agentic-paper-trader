@@ -35,6 +35,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from app.agent.approval import (
     evaluate_and_submit_cycle_trade,
     expire_pending_approvals,
+    persistable_policy_result,
     reconcile_uncertain_cycle,
 )
 from app.agent.context import build_agent_context
@@ -401,9 +402,7 @@ async def _run_agent_cycle(
             # runs again at approval time, so this never weakens the execution gate.
             if policy_preview is not None:
                 cycle.policy_decision = policy_preview.decision
-                cycle.policy_result_json = policy_preview.model_dump(
-                    mode="json", exclude={"policy_token"}
-                )
+                cycle.policy_result_json = persistable_policy_result(policy_preview)
             else:
                 cycle.policy_decision = PolicyDecisionType.NOT_EVALUATED
             approval = CycleApproval(
@@ -413,9 +412,7 @@ async def _run_agent_cycle(
                 expires_at=utcnow() + timedelta(minutes=get_settings().approval_expiry_minutes),
                 policy_version=policy_preview.policy_version if policy_preview else None,
                 policy_result_json=(
-                    policy_preview.model_dump(mode="json", exclude={"policy_token"})
-                    if policy_preview
-                    else None
+                    persistable_policy_result(policy_preview) if policy_preview else None
                 ),
             )
             db.add(approval)
@@ -458,13 +455,12 @@ async def _run_agent_cycle(
                 await db.refresh(cycle)
                 set_committed_value(cycle, "approval", None)
                 return cycle
-            context["policy_evaluation"] = policy_decision.model_dump(mode="json")
+            # The signed policy token stays in memory only; it is never stored (#175).
+            context["policy_evaluation"] = persistable_policy_result(policy_decision)
             # Persist the same decision the execution gate just produced (#121) - this is
             # a read-only copy for audit/query, not a second evaluation.
             cycle.policy_decision = policy_decision.decision
-            cycle.policy_result_json = policy_decision.model_dump(
-                mode="json", exclude={"policy_token"}
-            )
+            cycle.policy_result_json = persistable_policy_result(policy_decision)
             if broker_order is None:
                 cycle.status = CycleStatus.REJECTED
                 cycle.failure_code = "POLICY_DENIED"
