@@ -13,6 +13,25 @@ export interface Refreshed<T> {
   kept: boolean;
 }
 
+/**
+ * How long a poll tick waits on an outstanding refresh before superseding it. The API
+ * client has no fetch timeout, so without a limit a request that never settles would
+ * stop the polling for good.
+ */
+export const MAX_REFRESH_AGE_MS = 45_000;
+
+/**
+ * Whether a poll tick should start a refresh: yes when none is outstanding, or when the
+ * outstanding one started at least `maxAgeMs` ago (the new one supersedes it).
+ */
+export function shouldStartPoll(
+  inFlightSince: number | null,
+  now: number,
+  maxAgeMs: number = MAX_REFRESH_AGE_MS,
+): boolean {
+  return inFlightSince === null || now - inFlightSince >= maxAgeMs;
+}
+
 /** One part of a refresh: take the new value, or keep the last good one on failure. */
 export function keepLastGood<T>(result: PromiseSettledResult<T>, previous: T | null): Refreshed<T> {
   if (result.status === "fulfilled") return { value: result.value, kept: false };

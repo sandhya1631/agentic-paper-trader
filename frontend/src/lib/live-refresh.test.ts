@@ -1,6 +1,30 @@
 import { describe, expect, it } from "vitest";
 
-import { formatClockTime, keepLastGood, staleDataMessage } from "./live-refresh";
+import {
+  MAX_REFRESH_AGE_MS,
+  formatClockTime,
+  keepLastGood,
+  shouldStartPoll,
+  staleDataMessage,
+} from "./live-refresh";
+
+describe("shouldStartPoll", () => {
+  it("starts a refresh when none is outstanding", () => {
+    expect(shouldStartPoll(null, 1_000)).toBe(true);
+  });
+
+  it("skips while the outstanding refresh is younger than the age limit", () => {
+    expect(shouldStartPoll(0, 15_000)).toBe(false);
+    expect(shouldStartPoll(0, MAX_REFRESH_AGE_MS - 1)).toBe(false);
+  });
+
+  it("supersedes an outstanding refresh once it reaches the age limit", () => {
+    expect(MAX_REFRESH_AGE_MS).toBe(45_000);
+    expect(shouldStartPoll(0, MAX_REFRESH_AGE_MS)).toBe(true);
+    expect(shouldStartPoll(10_000, 70_000)).toBe(true);
+    expect(shouldStartPoll(10_000, 20_000, 5_000)).toBe(true);
+  });
+});
 
 function fulfilled<T>(value: T): PromiseSettledResult<T> {
   return { status: "fulfilled", value };
