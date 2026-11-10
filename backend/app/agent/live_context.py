@@ -16,7 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.credential_vault import get_decrypted_alpaca_credentials
-from app.broker.alpaca import AlpacaClient
+from app.broker.alpaca import AlpacaClient, fetch_all_orders
+from app.broker.schemas import AlpacaOrderRead
 from app.core.config import get_settings
 from app.db.models import AgentConfig, TradingAccount
 from app.risk.market_hours import fetch_market_clock_for
@@ -41,6 +42,21 @@ class LiveAccountData:
     market_open: bool | None
 
 
+def _open_order_entry(order: AlpacaOrderRead) -> dict[str, Any]:
+    """One open order for the context. A notional order (#177) has no qty, so it is
+    listed with its dollar amount instead."""
+    entry: dict[str, Any] = {
+        "id": str(order.id),
+        "symbol": order.symbol,
+        "side": order.side,
+        "qty": str(order.qty) if order.qty is not None else None,
+        "status": order.status,
+    }
+    if order.notional is not None:
+        entry["notional"] = str(order.notional)
+    return entry
+
+
 async def fetch_live_account_data(db: AsyncSession, agent: AgentConfig) -> LiveAccountData | None:
     """Read the agent owner's real paper account. Returns None when it cannot be read."""
     try:
@@ -59,7 +75,7 @@ async def fetch_live_account_data(db: AsyncSession, agent: AgentConfig) -> LiveA
         ) as client:
             account = await client.get_account()
             positions = await client.get_positions()
-            orders = await client.get_orders(status="open")
+            orders = await fetch_all_orders(client, status="open")
             clock = await fetch_market_clock_for(client)
 
         return LiveAccountData(
@@ -78,16 +94,7 @@ async def fetch_live_account_data(db: AsyncSession, agent: AgentConfig) -> LiveA
                 }
                 for position in positions
             ],
-            open_orders=[
-                {
-                    "id": str(order.id),
-                    "symbol": order.symbol,
-                    "side": order.side,
-                    "qty": str(order.qty),
-                    "status": order.status,
-                }
-                for order in orders
-            ],
+            open_orders=[_open_order_entry(order) for order in orders],
             market_open=bool(clock.is_open),
         )
     except Exception as exc:

@@ -1,6 +1,6 @@
 """Fresh risk validation and paper-order submission for an approved cycle proposal."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from urllib.parse import urlparse
 from uuid import UUID
@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.credential_vault import get_decrypted_alpaca_credentials
-from app.broker.alpaca import AlpacaClient
+from app.broker.alpaca import AlpacaClient, fetch_all_orders
 from app.broker.gateway import submit_approved_order
 from app.broker.reconcile import reconcile_order
 from app.core.config import get_settings
@@ -103,19 +103,18 @@ async def evaluate_and_submit_cycle_trade(
             else Decimal("0")
         )
 
-        orders = await client.get_orders(status="all")
-        orders_today = daily_limits.count_orders_today(orders)
-        open_statuses = {
-            "new",
-            "accepted",
-            "pending_new",
-            "partially_filled",
-            "held",
-            "pending_replace",
-        }
-        open_order_symbols = {
-            order.symbol for order in orders if order.status.lower() in open_statuses
-        }
+        # P-010: EVERY open order, paged past Alpaca's per-request limit (#177). Whatever
+        # Alpaca lists as open counts as open (fail closed), whatever its status string.
+        open_orders = await fetch_all_orders(client, status="open")
+        open_order_symbols = {order.symbol for order in open_orders}
+
+        # P-012: every order (any status) submitted since the start of today's US/Eastern
+        # trading day, so the count is never cut short by a page limit. `after` is
+        # exclusive at Alpaca, so ask from one second earlier and let count_orders_today
+        # apply the exact day boundary.
+        day_start = daily_limits.trading_day_start() - timedelta(seconds=1)
+        orders_since_day_start = await fetch_all_orders(client, status="all", after=day_start)
+        orders_today = daily_limits.count_orders_today(orders_since_day_start)
 
         clock = await fetch_market_clock_for(client)
         equity = account_state.equity

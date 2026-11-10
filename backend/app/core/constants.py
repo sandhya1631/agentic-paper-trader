@@ -23,6 +23,10 @@ from app.db.enums import CycleStatus
 ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 ALPACA_DATA_FEED = "iex"
+# GET /v2/orders returns at most this many orders per request (Alpaca's maximum `limit`).
+ALPACA_ORDERS_PAGE_LIMIT = 500
+# Paging stops (and the read fails closed) after this many full pages, i.e. 10,000 orders.
+ALPACA_ORDERS_MAX_PAGES = 20
 
 # --- Market data ---
 DEFAULT_WATCHLIST = ["AAPL", "NVDA", "SPY"]
