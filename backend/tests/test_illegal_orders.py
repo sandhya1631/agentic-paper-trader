@@ -14,18 +14,20 @@ A positive control (test_a_legal_order_does_reach_the_broker) proves the
 harness isn't vacuously green: a clean proposal really does reach
 client.submit_order.
 """
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from alpaca_order_book import FakeOrderBook, make_order
 from test_cycle_approval import _open_order, _trade_fixtures
 from test_policies import failed_ids
 
 from app.agent import approval
 from app.broker import gateway as gateway_module
 from app.core.config import Settings
+from app.core.constants import ALPACA_ORDERS_PAGE_LIMIT
 from app.db.enums import PolicyDecisionType
 
 
@@ -211,6 +213,55 @@ async def test_duplicate_open_order_blocks_the_broker_call(monkeypatch):
 
     assert decision.decision == PolicyDecisionType.DENY
     assert "P-010" in failed_ids(decision)
+    assert order is None
+    client.submit_order.assert_not_awaited()
+
+
+def _book_with_an_old_open_order(recent_count: int, recent_status: str) -> FakeOrderBook:
+    """An open AAPL order older than ``recent_count`` later MSFT orders (#177)."""
+    now = datetime.now(UTC)
+    recent = [
+        make_order(
+            f"recent-{i}", symbol="MSFT", status=recent_status,
+            submitted_at=now - timedelta(seconds=i + 1),
+        )
+        for i in range(recent_count)
+    ]
+    old_open = make_order(
+        "old-open-aapl", symbol="AAPL", status="accepted",
+        submitted_at=now - timedelta(days=2),
+    )
+    return FakeOrderBook([*recent, old_open])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recent_count", "recent_status"),
+    [
+        (50, "filled"),     # cut off by the old query: the 50 most recent orders, any status
+        (1200, "accepted"),  # cut off by a single 500-order page of open orders
+    ],
+)
+async def test_open_order_beyond_the_most_recent_orders_blocks_the_broker_call(
+    monkeypatch, recent_count, recent_status
+):
+    """P-010 must see every open order, however many orders came after it."""
+    db, agent, cycle, client = _real_gateway_fixtures(monkeypatch)
+    monkeypatch.setattr(  # keep P-012 out of it: only the open order should deny
+        approval, "get_settings", lambda: Settings(_env_file=None, max_orders_per_day=5000)
+    )
+    book = _book_with_an_old_open_order(recent_count, recent_status)
+    client.get_orders = book.get_orders
+    old_window = await book.get_orders(status="all", limit=50)
+    one_open_page = await book.get_orders(status="open", limit=ALPACA_ORDERS_PAGE_LIMIT)
+    assert "AAPL" not in {order.symbol for order in old_window}
+    if recent_status == "accepted":
+        assert "AAPL" not in {order.symbol for order in one_open_page}
+
+    decision, order = await approval.evaluate_and_submit_cycle_trade(db, agent, cycle)
+
+    assert decision.decision == PolicyDecisionType.DENY
+    assert failed_ids(decision) == {"P-010"}
     assert order is None
     client.submit_order.assert_not_awaited()
 

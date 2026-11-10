@@ -5,8 +5,9 @@ Orchestrates automated and manual agent cycles:
      manual run and a scheduled watchlist sweep (`run_watchlist_cycles`) for the same
      agent never run concurrently; then rejects the request if this agent already has
      a non-terminal cycle in progress (`CycleOverlapError`). A sweep holds the lock for
-     all of its symbols and checks the status gate once, on its first symbol, so its own
-     per-symbol cycles can coexist (e.g. several PENDING_APPROVAL in REQUIRED mode).
+     all of its symbols and checks the status gate once, before any market-data or
+     broker read, so a busy agent's tick makes no such calls and its own per-symbol
+     cycles can coexist (e.g. several PENDING_APPROVAL in REQUIRED mode).
   2. Creates an `AgentCycle` record in PostgreSQL (`PENDING`).
   3. Collects OHLCV market bars for the watchlist and calculates indicators.
   4. Builds sanitized context via `build_agent_context`.
@@ -35,6 +36,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 from app.agent.approval import (
     evaluate_and_submit_cycle_trade,
     expire_pending_approvals,
+    persistable_policy_result,
     reconcile_uncertain_cycle,
 )
 from app.agent.context import build_agent_context
@@ -110,6 +112,41 @@ async def agent_cycle_lock(db: AsyncSession, agent_id: uuid.UUID) -> AsyncIterat
                 )
 
 
+async def _enforce_no_active_cycle(db: AsyncSession, agent: AgentConfig) -> None:
+    """The active-cycle gate: raise CycleOverlapError if the agent is already busy.
+
+    Expires stale approvals first, so a forgotten PENDING_APPROVAL cycle doesn't block
+    a fresh attempt forever, then looks for a non-terminal cycle. A RECONCILING cycle
+    is reconciled against the broker once; if that resolves it, the agent is free.
+    Shared by both entry points: a manual cycle runs it inside ``_run_agent_cycle``,
+    and a watchlist sweep runs it once before its bar prefetch and live-account read,
+    so a busy agent's tick makes no market-data or account calls (#178).
+    """
+    await expire_pending_approvals(db, agent.id)
+    active_stmt = select(AgentCycle).where(
+        AgentCycle.agent_id == agent.id,
+        AgentCycle.status.in_(ACTIVE_CYCLE_STATUSES),
+    )
+    active_res = await db.execute(active_stmt)
+    active_cycle = active_res.scalars().first()
+    if active_cycle is not None and active_cycle.status == CycleStatus.RECONCILING:
+        try:
+            resolved = await reconcile_uncertain_cycle(db, agent, active_cycle)
+        except Exception:
+            logger.exception(
+                "Could not reconcile uncertain cycle %s; keeping it active",
+                active_cycle.id,
+            )
+            resolved = False
+        if resolved:
+            active_cycle = None
+    if active_cycle is not None:
+        raise CycleOverlapError(
+            f"Agent '{agent.id}' already has an active cycle "
+            f"'{active_cycle.id}' (status={active_cycle.status})"
+        )
+
+
 async def run_agent_cycle(
     agent_id: uuid.UUID,
     db: AsyncSession,
@@ -160,8 +197,9 @@ async def _run_agent_cycle(
     coerced to HOLD (never act on a symbol this cycle did not evaluate). When
     ``bars_per_symbol`` is supplied those bars are used instead of fetching, so a
     watchlist sweep fetches once. ``enforce_no_overlap`` runs the active-cycle
-    gate; a sweep runs it once (first symbol) and skips it for the rest, so one
-    tick can produce a cycle per symbol without each blocking the next.
+    gate; a sweep runs that gate itself, once, before its broker reads, and skips it
+    for every symbol, so one tick can produce a cycle per symbol without each
+    blocking the next.
     ``account_data`` is the live paper account shown to the model; when omitted it is
     fetched here, and a sweep passes it in so the broker is read once per tick.
     ``None`` means "could not be read" and the context says UNAVAILABLE (never defaults).
@@ -180,36 +218,11 @@ async def _run_agent_cycle(
         raise ValueError(f"AgentConfig with id '{agent_id}' not found")
 
     # 2. Gate: reject if this agent already has an active cycle (no overlap).
-    # A watchlist sweep runs this gate once (first symbol) and skips it for the
-    # rest (enforce_no_overlap=False), so sequential per-symbol cycles in one
-    # tick don't block each other.
+    # A watchlist sweep runs this gate itself, once, before it reads the broker, and
+    # passes enforce_no_overlap=False for every symbol, so sequential per-symbol
+    # cycles in one tick don't block each other.
     if enforce_no_overlap:
-        # Expire stale approvals first so a forgotten PENDING_APPROVAL cycle
-        # doesn't block a fresh attempt forever - applies to every caller
-        # (manual trigger, scheduler tick), not just the scheduler's own tick.
-        await expire_pending_approvals(db, agent.id)
-        active_stmt = select(AgentCycle).where(
-            AgentCycle.agent_id == agent.id,
-            AgentCycle.status.in_(ACTIVE_CYCLE_STATUSES),
-        )
-        active_res = await db.execute(active_stmt)
-        active_cycle = active_res.scalars().first()
-        if active_cycle is not None and active_cycle.status == CycleStatus.RECONCILING:
-            try:
-                resolved = await reconcile_uncertain_cycle(db, agent, active_cycle)
-            except Exception:
-                logger.exception(
-                    "Could not reconcile uncertain cycle %s; keeping it active",
-                    active_cycle.id,
-                )
-                resolved = False
-            if resolved:
-                active_cycle = None
-        if active_cycle is not None:
-            raise CycleOverlapError(
-                f"Agent '{agent_id}' already has an active cycle "
-                f"'{active_cycle.id}' (status={active_cycle.status})"
-            )
+        await _enforce_no_active_cycle(db, agent)
 
     # 3. Create AgentCycle record (PENDING)
     prompt_definition = get_prompt_definition(agent.strategy_version)
@@ -390,9 +403,7 @@ async def _run_agent_cycle(
             # runs again at approval time, so this never weakens the execution gate.
             if policy_preview is not None:
                 cycle.policy_decision = policy_preview.decision
-                cycle.policy_result_json = policy_preview.model_dump(
-                    mode="json", exclude={"policy_token"}
-                )
+                cycle.policy_result_json = persistable_policy_result(policy_preview)
             else:
                 cycle.policy_decision = PolicyDecisionType.NOT_EVALUATED
             approval = CycleApproval(
@@ -402,9 +413,7 @@ async def _run_agent_cycle(
                 expires_at=utcnow() + timedelta(minutes=get_settings().approval_expiry_minutes),
                 policy_version=policy_preview.policy_version if policy_preview else None,
                 policy_result_json=(
-                    policy_preview.model_dump(mode="json", exclude={"policy_token"})
-                    if policy_preview
-                    else None
+                    persistable_policy_result(policy_preview) if policy_preview else None
                 ),
             )
             db.add(approval)
@@ -447,13 +456,12 @@ async def _run_agent_cycle(
                 await db.refresh(cycle)
                 set_committed_value(cycle, "approval", None)
                 return cycle
-            context["policy_evaluation"] = policy_decision.model_dump(mode="json")
+            # The signed policy token stays in memory only; it is never stored (#175).
+            context["policy_evaluation"] = persistable_policy_result(policy_decision)
             # Persist the same decision the execution gate just produced (#121) - this is
             # a read-only copy for audit/query, not a second evaluation.
             cycle.policy_decision = policy_decision.decision
-            cycle.policy_result_json = policy_decision.model_dump(
-                mode="json", exclude={"policy_token"}
-            )
+            cycle.policy_result_json = persistable_policy_result(policy_decision)
             if broker_order is None:
                 cycle.status = CycleStatus.REJECTED
                 cycle.failure_code = "POLICY_DENIED"
@@ -519,11 +527,12 @@ async def _run_watchlist_cycles(
     This is what makes the agent evaluate its whole watchlist instead of a single
     (historically AAPL-anchored) symbol. Market bars are fetched once for the
     watchlist and reused across the per-symbol cycles. The active-cycle gate runs
-    once (on the first symbol); if the agent already has a cycle in progress,
-    CycleOverlapError propagates and no symbols run - matching the previous
-    per-agent scheduled behaviour. A failing symbol is logged (its cycle is persisted
-    as FAILED) and the sweep continues; if every symbol fails, the last error is
-    re-raised so the scheduler counts the agent as failed.
+    once, before the bar prefetch and the live-account read; if the agent already has
+    a cycle in progress, CycleOverlapError propagates and no symbols run, without a
+    single market-data or broker call (#178). The per-symbol cycles skip the gate, so
+    an approval one symbol parks never blocks the next. A failing symbol is logged (its
+    cycle is persisted as FAILED) and the sweep continues; if every symbol fails, the
+    last error is re-raised so the scheduler counts the agent as failed.
     """
     agent_res = await db.execute(select(AgentConfig).where(AgentConfig.id == agent_id))
     agent = agent_res.scalar_one_or_none()
@@ -536,6 +545,10 @@ async def _run_watchlist_cycles(
     symbols = normalize_watchlist(agent.watchlist)
     if not symbols:
         return []
+
+    # Gate once per sweep, before any market-data or broker read: a busy agent (e.g.
+    # parked in PENDING_APPROVAL) raises CycleOverlapError here and costs no calls.
+    await _enforce_no_active_cycle(db, agent)
 
     # Fetch bars once for the whole watchlist; per-symbol cycles reuse them.
     bars_per_symbol: dict[str, list[Any]] = {}
@@ -558,7 +571,7 @@ async def _run_watchlist_cycles(
 
     cycles: list[AgentCycle] = []
     last_error: Exception | None = None
-    for index, symbol in enumerate(symbols):
+    for symbol in symbols:
         try:
             cycle = await _run_agent_cycle(
                 agent_id,
@@ -569,15 +582,11 @@ async def _run_watchlist_cycles(
                 target_symbol=symbol,
                 bars_per_symbol=bars_per_symbol,
                 account_data=live_account_data,
-                # Gate once on the first symbol; the rest are sequential and must not
-                # block on an approval/execution the first symbol may have left active.
-                enforce_no_overlap=(index == 0),
+                # The sweep already ran the gate; the symbols are sequential and must
+                # not block on an approval/execution an earlier symbol left active.
+                enforce_no_overlap=False,
             )
             cycles.append(cycle)
-        except CycleOverlapError:
-            # Only the first symbol runs the gate, so this means the agent is already
-            # busy: skip the whole tick, matching the previous per-agent behaviour.
-            raise
         except Exception as exc:
             # One symbol's transient failure (e.g. LLM timeout) must not drop the
             # rest of the watchlist for this tick.

@@ -90,6 +90,7 @@ describe("PositionsView", () => {
         client_order_id: "cid-1",
         symbol: "NVDA",
         qty: "5",
+        notional: null,
         filled_qty: "0",
         average_fill_price: null,
         side: "buy",
@@ -108,6 +109,33 @@ describe("PositionsView", () => {
     // #143) doesn't collide with the order row's side badge.
     const ordersTable = screen.getByRole("table");
     expect(within(ordersTable).getByText("BUY")).toBeTruthy();
+  });
+
+  it("shows a notional order's dollar amount when its qty is null (#177)", async () => {
+    mockPositions.mockResolvedValue([]);
+    mockOrders.mockResolvedValue([
+      {
+        id: "o2",
+        client_order_id: "cid-2",
+        symbol: "MSFT",
+        qty: null,
+        notional: "100",
+        filled_qty: "0",
+        average_fill_price: null,
+        side: "buy",
+        type: "market",
+        time_in_force: "day",
+        status: "accepted",
+        submitted_at: "2026-11-09T15:00:00Z",
+        filled_at: null,
+      },
+    ]);
+
+    render(<PositionsView />);
+
+    expect(await screen.findByText("MSFT")).toBeTruthy();
+    const ordersTable = screen.getByRole("table");
+    expect(within(ordersTable).getByText("$100.00 notional")).toBeTruthy();
   });
 });
 

@@ -41,6 +41,9 @@ export function SettingsView() {
       .catch(() => setUser(null));
   }, []);
 
+  // Running or scheduling cycles is OPERATOR/ADMIN only (#176); Stop stays open to the owner.
+  const canOperate = user?.role === "OPERATOR" || user?.role === "ADMIN";
+
   return (
     <div className="space-y-6">
       <section>
@@ -48,10 +51,10 @@ export function SettingsView() {
         <p className="text-sm text-muted">Agent controls and account configuration.</p>
       </section>
       <AccountCard />
-      {/* Mirrors the backend operator gate (off until the role loads); its 403 is authoritative. */}
-      <AgentConfigCard canEdit={user?.role === "OPERATOR" || user?.role === "ADMIN"} />
-      <TriggerNowCard />
-      <SchedulerCard />
+      {/* Mirror the backend operator gate (off until the role loads); its 403 is authoritative. */}
+      <AgentConfigCard canEdit={canOperate} />
+      <TriggerNowCard canRun={canOperate} />
+      <SchedulerCard canStart={canOperate} />
       <SchedulerActivity />
       <KillSwitchCard isAdmin={user?.role === "ADMIN"} />
       <KillSwitchAuditCard isAdmin={user?.role === "ADMIN"} />
@@ -188,7 +191,7 @@ function AccountCard() {
   );
 }
 
-function SchedulerCard() {
+function SchedulerCard({ canStart }: { canStart: boolean }) {
   const [schedule, setSchedule] = useState<SchedulerScheduleRow | null>(null);
   const [running, setRunning] = useState(false);
   const [agentId, setAgentId] = useState<string | null>(null);
@@ -205,6 +208,8 @@ function SchedulerCard() {
       setSchedule(status.schedules[0] ?? null);
       if (status.schedules[0]) {
         setAgentId(status.schedules[0].agent_id);
+        // Pre-fill the restart form with the last interval (#163).
+        setIntervalMinutes(status.schedules[0].interval_minutes);
       } else {
         // Derive the user's agent id from their latest cycle, if any.
         const cycles = await listCycles({ limit: 1 });
@@ -250,13 +255,15 @@ function SchedulerCard() {
     }
   }
 
+  // Branch on the scheduler's running state, not on whether a schedule row exists: Stop keeps
+  // the row (it only pauses the user), so a stopped schedule must offer Start again (#163).
+  const isRunning = Boolean(schedule?.enabled && running);
+
   return (
     <section className="rounded-xl border border-border bg-surface p-5">
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold">Autonomous schedule</h3>
-        <Badge tone={schedule?.enabled && running ? "positive" : "neutral"}>
-          {schedule?.enabled && running ? "Running" : "Stopped"}
-        </Badge>
+        <Badge tone={isRunning ? "positive" : "neutral"}>{isRunning ? "Running" : "Stopped"}</Badge>
       </div>
       <p className="mt-1 text-sm text-muted">
         Run the agent automatically on an interval. Scheduled ticks are skipped while the market is
@@ -271,7 +278,7 @@ function SchedulerCard() {
 
       {loading ? (
         <p className="mt-2 text-sm text-muted">Loading schedule...</p>
-      ) : schedule ? (
+      ) : schedule && isRunning ? (
         <div className="mt-2 space-y-2 text-sm">
           <p className="text-muted">
             Every {schedule.interval_minutes} min · next run {formatDateTime(schedule.next_run_time)}
@@ -302,22 +309,28 @@ function SchedulerCard() {
           <button
             type="button"
             onClick={() => void onStart()}
-            disabled={busy || interval < 1}
+            disabled={!canStart || busy || interval < 1}
             className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-brand-foreground disabled:opacity-50"
           >
             {busy ? "Starting..." : "Start schedule"}
           </button>
+          {!canStart && (
+            <p className="w-full text-muted">Only operators and admins can start the schedule.</p>
+          )}
         </div>
       ) : (
         <p className="mt-2 text-sm text-muted">
-          Trigger a cycle first (above) to create your agent, then you can schedule it.
+          {/* A VIEWER can't trigger the first cycle, so don't point them at a disabled control. */}
+          {canStart
+            ? "Trigger a cycle first (above) to create your agent, then you can schedule it."
+            : "Only operators and admins can create and schedule the agent."}
         </p>
       )}
     </section>
   );
 }
 
-function TriggerNowCard() {
+function TriggerNowCard({ canRun }: { canRun: boolean }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<AgentCycle | null>(null);
   const [message, setMessage] = useState<{ tone: "neutral" | "negative"; text: string } | null>(
@@ -355,11 +368,14 @@ function TriggerNowCard() {
       <button
         type="button"
         onClick={() => void onTrigger()}
-        disabled={busy}
+        disabled={!canRun || busy}
         className="mt-3 rounded-lg bg-brand px-4 py-2 text-sm font-medium text-brand-foreground disabled:opacity-50"
       >
         {busy ? "Running..." : "Trigger Now"}
       </button>
+      {!canRun && (
+        <p className="mt-2 text-sm text-muted">Only operators and admins can trigger cycles.</p>
+      )}
 
       {message && (
         <p

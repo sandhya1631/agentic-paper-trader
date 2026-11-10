@@ -1,13 +1,18 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from alpaca_order_book import NOTIONAL_ORDER_JSON, FakeOrderBook, make_order
+from test_broker_positions_orders import _mock_http_get
 
 from app.agent import approval
+from app.broker.alpaca import AlpacaClient
 from app.broker.gateway import submit_approved_order
+from app.core.config import Settings
+from app.core.constants import ALPACA_ORDERS_PAGE_LIMIT
 from app.db.enums import (
     ApprovalMode,
     BrokerOrderStatus,
@@ -16,6 +21,7 @@ from app.db.enums import (
     Symbol,
     TimeInForce,
 )
+from app.risk.daily_limits import trading_day_start
 from app.risk.market_hours import MarketClock
 from app.schemas import ApprovedOrder
 
@@ -118,7 +124,14 @@ async def test_approved_cycle_trade_uses_live_risk_data_before_submission(monkey
     client.get_account.assert_awaited_once()
     client.get_market_snapshot.assert_awaited_once_with("AAPL")
     client.get_positions.assert_awaited_once()
-    client.get_orders.assert_awaited_once_with(status="all")
+    # P-010 reads every open order; P-012 reads every order since the US/Eastern day began.
+    open_call, today_call = client.get_orders.await_args_list
+    assert open_call.kwargs["status"] == "open"
+    assert open_call.kwargs["after"] is None
+    assert open_call.kwargs["limit"] == ALPACA_ORDERS_PAGE_LIMIT
+    assert today_call.kwargs["status"] == "all"
+    assert today_call.kwargs["after"] < trading_day_start() <= datetime.now(UTC)
+    assert today_call.kwargs["limit"] == ALPACA_ORDERS_PAGE_LIMIT
     submit_order.assert_awaited_once()
     approved_order = submit_order.await_args.args[0]
     assert approved_order.decision_id == cycle.id
@@ -216,11 +229,22 @@ async def test_open_order_for_a_different_symbol_does_not_block(monkeypatch):
     submit_order.assert_awaited_once()
 
 
+def _orders_by_status(*, open_orders, all_orders):
+    """A get_orders double answering like Alpaca: ``status="open"`` lists open orders only."""
+
+    async def get_orders(status="all", **_kwargs):
+        return list(open_orders if status == "open" else all_orders)
+
+    return AsyncMock(side_effect=get_orders)
+
+
 @pytest.mark.asyncio
 async def test_filled_order_for_same_symbol_does_not_block(monkeypatch):
-    """A terminal-status order must not be treated as still open."""
+    """A terminal-status order (in the history, not the open list) must not block."""
     db, agent, cycle, client = _trade_fixtures(monkeypatch, market_open=True)
-    client.get_orders = AsyncMock(return_value=[_open_order("AAPL", status="filled")])
+    client.get_orders = _orders_by_status(
+        open_orders=[], all_orders=[_open_order("AAPL", status="filled")]
+    )
     order = SimpleNamespace(status=BrokerOrderStatus.SUBMITTED)
     submit_order = AsyncMock(return_value=order)
     monkeypatch.setattr(approval, "submit_approved_order", submit_order)
@@ -311,3 +335,89 @@ async def test_gateway_persists_broker_order_execution_state(
     assert order.status == expected_status
     assert order.filled_quantity == int(Decimal(filled_quantity))
     client.submit_order.assert_awaited_once()
+
+
+# --- notional orders and complete order lists (#177) ---
+
+
+def _real_order_parsing(order_json):
+    """AlpacaClient.get_orders itself (the real parser), over a mocked HTTP response."""
+    http_client = _mock_http_get([order_json])
+    return AlpacaClient(api_key="k", api_secret="s", client=http_client).get_orders
+
+
+@pytest.mark.asyncio
+async def test_a_notional_order_does_not_block_the_policy_evaluation(monkeypatch):
+    """Alpaca's `qty: null` used to raise inside get_orders, so no decision was ever made."""
+    db, agent, cycle, client = _trade_fixtures(monkeypatch, market_open=True)
+    notional_order = {**NOTIONAL_ORDER_JSON, "submitted_at": datetime.now(UTC).isoformat()}
+    client.get_orders = _real_order_parsing(notional_order)
+    submit_order = AsyncMock()
+    monkeypatch.setattr(approval, "submit_approved_order", submit_order)
+
+    decision, submitted = await approval.evaluate_and_submit_cycle_trade(
+        db, agent, cycle, submit=False
+    )
+
+    assert decision.decision == "ALLOW"  # the MSFT notional order doesn't touch AAPL
+    assert decision.evaluations  # every policy ran
+    assert submitted is None
+    submit_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_open_notional_order_for_the_symbol_still_trips_p010(monkeypatch):
+    db, agent, cycle, client = _trade_fixtures(monkeypatch, market_open=True)
+    client.get_orders = _real_order_parsing({**NOTIONAL_ORDER_JSON, "symbol": "AAPL"})
+    submit_order = AsyncMock()
+    monkeypatch.setattr(approval, "submit_approved_order", submit_order)
+
+    decision, submitted = await approval.evaluate_and_submit_cycle_trade(db, agent, cycle)
+
+    assert decision.decision == "DENY"
+    assert "P-010" in {e.policy_id for e in decision.evaluations if e.outcome == "FAIL"}
+    assert submitted is None
+    submit_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_orders_today_counts_beyond_the_old_50_order_window(monkeypatch):
+    """P-012 used to count only the 50 most recent orders; now it sees all of today's."""
+    db, agent, cycle, client = _trade_fixtures(monkeypatch, market_open=True)
+    monkeypatch.setattr(
+        approval, "get_settings", lambda: Settings(_env_file=None, max_orders_per_day=55)
+    )
+    now = datetime.now(UTC)
+    day_start = trading_day_start(now)
+    todays = [
+        make_order(
+            f"today-{i}",
+            symbol="MSFT",
+            status="filled",
+            submitted_at=now - (now - day_start) * (i + 1) / 62,
+        )
+        for i in range(60)
+    ]
+    yesterdays = [
+        make_order(
+            f"yesterday-{i}",
+            symbol="MSFT",
+            status="filled",
+            submitted_at=day_start - timedelta(hours=i + 1),
+        )
+        for i in range(5)
+    ]
+    book = FakeOrderBook(todays + yesterdays)
+    client.get_orders = book.get_orders
+    submit_order = AsyncMock()
+    monkeypatch.setattr(approval, "submit_approved_order", submit_order)
+
+    assert len(await book.get_orders(status="all", limit=50)) == 50  # the old, capped view
+    decision, submitted = await approval.evaluate_and_submit_cycle_trade(db, agent, cycle)
+
+    p012 = next(e for e in decision.evaluations if e.policy_id == "P-012")
+    assert p012.outcome == "FAIL"
+    assert p012.evidence["orders_today"] == 60  # yesterday's 5 are not counted
+    assert decision.decision == "DENY"
+    assert submitted is None
+    submit_order.assert_not_awaited()

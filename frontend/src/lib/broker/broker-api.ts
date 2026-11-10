@@ -40,7 +40,9 @@ export interface AlpacaOrder {
   id: string;
   client_order_id: string;
   symbol: string;
-  qty: string;
+  /** Null for a notional (dollar-amount) order, which has `notional` instead (#177). */
+  qty: string | null;
+  notional: string | null;
   filled_qty: string;
   average_fill_price: string | null;
   side: string;

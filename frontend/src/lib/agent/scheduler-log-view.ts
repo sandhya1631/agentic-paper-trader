@@ -31,6 +31,7 @@ const REASON_TEXT: Record<string, string> = {
   kill_switch_enabled: "Kill switch enabled",
   kill_switch_check_failed: "Kill-switch check failed",
   no_enabled_agents: "No enabled agents",
+  owner_not_operator: "Owner isn't an operator or admin",
   agent_query_failed: "Agent lookup failed",
   market_clock_check_failed: "Market-clock check failed",
   market_closed: "Market closed",

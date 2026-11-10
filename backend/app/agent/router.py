@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.agent import scheduler as scheduler_service
-from app.agent.approval import evaluate_and_submit_cycle_trade
+from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.agent.watchlist import normalize_watchlist
 from app.audit import record_audit_event
@@ -296,15 +296,19 @@ async def update_agent_config(
     return _agent_config_detail(agent)
 
 
-@router.post("/cycles/run", response_model=CycleRead, summary="Trigger manual agent cycle")
+@router.post(
+    "/cycles/run", response_model=CycleRead, summary="Trigger manual agent cycle (operator)"
+)
 async def trigger_manual_cycle(
     agent_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator),
 ) -> Any:
     """Manually trigger one execution cycle for an agent.
 
-    Auto-creates a default agent if none exists.
+    Auto-creates a default agent if none exists. OPERATOR/ADMIN only (#176): a cycle can
+    trade, and the role dependency rejects a VIEWER before any provisioning, LLM or
+    broker call.
     """
     if agent_id is None:
         agent = await _get_owned_agent(db, current_user.id)
@@ -647,17 +651,19 @@ async def approve_cycle_trade(
         ) from exc
 
     approval.policy_version = policy_decision.policy_version
-    approval.policy_result_json = policy_decision.model_dump(mode="json")
+    # The signed policy token is never stored or returned; only the gateway receives it,
+    # in memory (#175).
+    approval.policy_result_json = persistable_policy_result(policy_decision)
     approval.acted_at = now
     approval.actor_id = current_user.id
     approval.comment = body.comment
     cycle.completed_at = now
     snapshot = dict(cycle.snapshot_json or {})
-    snapshot["policy_evaluation"] = policy_decision.model_dump(mode="json")
+    snapshot["policy_evaluation"] = persistable_policy_result(policy_decision)
     # Record the fresh binding decision as the cycle's queryable policy result (#121),
     # overwriting the earlier pending-approval preview. The signed token is excluded.
     cycle.policy_decision = policy_decision.decision
-    cycle.policy_result_json = policy_decision.model_dump(mode="json", exclude={"policy_token"})
+    cycle.policy_result_json = persistable_policy_result(policy_decision)
     if broker_order is None:
         approval.status = ApprovalStatus.REJECTED
         approval.comment = (
@@ -724,15 +730,19 @@ async def reject_cycle_trade(
     "/scheduler/start",
     response_model=ScheduleStartRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Start a recurring schedule and resume scheduling for this user",
+    summary="Start a recurring schedule and resume scheduling for this user (operator)",
 )
 async def start_agent_schedule(
     body: ScheduleStartRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator),
 ) -> ScheduleStartRead:
-    """Persist one schedule, resume this user, and restore all their enabled schedules."""
+    """Persist one schedule, resume this user, and restore all their enabled schedules.
+
+    OPERATOR/ADMIN only (#176). Stopping stays open to the owner, since pausing only
+    reduces risk; scheduled ticks skip owners who are no longer OPERATOR/ADMIN.
+    """
     scheduler_instance = getattr(request.app.state, "scheduler", None)
     if scheduler_instance is None or not scheduler_instance.running:
         raise HTTPException(
@@ -823,7 +833,10 @@ async def stop_agent_schedule(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> AgentScheduleRead:
-    """Pause all scheduled cycles for the owning user; in-flight cycles may finish."""
+    """Pause all scheduled cycles for the owning user; in-flight cycles may finish.
+
+    Open to any owner, VIEWER included (#176): pausing only reduces risk.
+    """
     result = await db.execute(
         select(AgentSchedule).where(
             AgentSchedule.id == schedule_id,
