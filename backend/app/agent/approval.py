@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -42,6 +43,18 @@ from app.schemas import (
     PolicyDecision,
     PolicyInput,
 )
+
+
+def persistable_policy_result(decision: PolicyDecision) -> dict[str, Any]:
+    """The policy decision as a dict that is safe to store or return (#175).
+
+    The signed ``policy_token`` exists only in memory, between the policy engine and
+    the broker gateway (``ApprovedOrder.policy_token``). Every write of a decision to
+    the database (a cycle's ``snapshot_json`` / ``policy_result_json``, an approval's
+    ``policy_result_json``) goes through here, so the token is never persisted and
+    therefore never returned by the API.
+    """
+    return decision.model_dump(mode="json", exclude={"policy_token"})
 
 
 async def evaluate_and_submit_cycle_trade(

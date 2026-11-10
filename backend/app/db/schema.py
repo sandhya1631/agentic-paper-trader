@@ -68,3 +68,38 @@ async def ensure_kill_switch_event_scope_columns(conn: AsyncConnection) -> None:
             "REFERENCES users(id) ON DELETE SET NULL"
         )
     )
+
+
+async def ensure_policy_token_scrubbed(conn: AsyncConnection) -> None:
+    """Remove signed policy tokens that older code stored with policy decisions (#175).
+
+    The token must exist only in memory between the policy engine and the broker
+    gateway. Rows written before the fix kept it in a cycle's
+    ``snapshot_json -> 'policy_evaluation'`` and an approval's ``policy_result_json``;
+    a cycle's own ``policy_result_json`` is scrubbed too, for completeness. The key is
+    removed whatever its value (a DENY stored ``null``). Idempotent: only rows that
+    still carry the key are updated. The columns are ``JSON``, so each statement goes
+    through ``jsonb`` and back. Runs at startup, in ``main.py``'s lifespan.
+    """
+    await conn.execute(
+        text(
+            "UPDATE agent_cycles "
+            "SET snapshot_json = "
+            "(snapshot_json::jsonb #- '{policy_evaluation,policy_token}')::json "
+            "WHERE snapshot_json::jsonb #> '{policy_evaluation,policy_token}' IS NOT NULL"
+        )
+    )
+    await conn.execute(
+        text(
+            "UPDATE agent_cycles "
+            "SET policy_result_json = (policy_result_json::jsonb - 'policy_token')::json "
+            "WHERE policy_result_json::jsonb -> 'policy_token' IS NOT NULL"
+        )
+    )
+    await conn.execute(
+        text(
+            "UPDATE cycle_approvals "
+            "SET policy_result_json = (policy_result_json::jsonb - 'policy_token')::json "
+            "WHERE policy_result_json::jsonb -> 'policy_token' IS NOT NULL"
+        )
+    )

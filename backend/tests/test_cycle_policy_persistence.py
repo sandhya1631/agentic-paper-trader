@@ -146,8 +146,9 @@ async def test_auto_cycle_still_evaluates_and_submits(monkeypatch):
     assert cycle.status == CycleStatus.COMPLETED
     assert cycle.policy_decision == PolicyDecisionType.ALLOW
     assert cycle.policy_result_json is not None
-    # The signed token is never persisted in the audit record.
+    # The signed token is never persisted in the audit record or the snapshot (#175).
     assert "policy_token" not in cycle.policy_result_json
+    assert "policy_token" not in cycle.snapshot_json["policy_evaluation"]
     assert cycle.policy_result_json["evaluations"][0]["policy_id"] == "P-001"
 
 
