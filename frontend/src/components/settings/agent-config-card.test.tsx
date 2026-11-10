@@ -214,6 +214,25 @@ describe("AgentConfigCard", () => {
     await waitFor(() => expect(mockUpdate).toHaveBeenCalledWith({ approval_mode: "OBSERVE_ONLY" }));
   });
 
+  it("loads clean for a watchlist stored un-normalized (#179)", async () => {
+    // A row stored as ["aapl", "AAPL", "nvda"] comes back from GET /agent/config normalized.
+    mockGetConfig.mockResolvedValue(config({ watchlist: ["AAPL", "NVDA"] }));
+    render(<AgentConfigCard canEdit />);
+    await screen.findByText("AAPL");
+
+    expect(screen.getByText("Watchlist (2/20)")).toBeTruthy();
+    expect(saveButton().disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /^reset$/i }) as HTMLButtonElement).disabled).toBe(true);
+
+    // Editing still makes it dirty and saves the de-duplicated list.
+    mockUpdate.mockResolvedValue(config({ watchlist: ["AAPL"] }));
+    fireEvent.click(screen.getByRole("button", { name: /remove nvda/i }));
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledWith({ watchlist: ["AAPL"] }));
+    await waitFor(() => expect(saveButton().disabled).toBe(true));
+  });
+
   it("shows a loading state", () => {
     mockGetConfig.mockReturnValue(new Promise(() => {}));
     render(<AgentConfigCard canEdit />);
