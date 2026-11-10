@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { ApiError } from "@/lib/api/errors";
 
@@ -309,6 +309,41 @@ describe("MarketView watchlist tabs (#165)", () => {
     expect(selectedTab()).toBe("SPY");
     await waitFor(() => expect(mockSnapshot).toHaveBeenCalledWith("SPY"));
     expect(mockGetConfig).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears the old symbol's data when a Refresh leaves no symbols, ignoring a late answer", async () => {
+    mockGetConfig.mockResolvedValue(agentConfig(["MSFT"]));
+    mockSnapshot.mockResolvedValue(snapshot({ symbol: "MSFT", latest_close: "123.45" }));
+    render(<MarketView />);
+    expect(await screen.findByText("123.45")).toBeTruthy();
+    expect(screen.getByText("FRESH")).toBeTruthy();
+
+    // A Refresh that keeps MSFT starts a reload whose answer is still pending...
+    let resolveBars!: (value: Awaited<ReturnType<typeof getBars>>) => void;
+    let resolveSnapshot!: (value: MarketSnapshot) => void;
+    mockBars.mockReturnValueOnce(new Promise((resolve) => (resolveBars = resolve)));
+    mockSnapshot.mockReturnValueOnce(new Promise((resolve) => (resolveSnapshot = resolve)));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText(/loading msft market data/i)).toBeTruthy();
+
+    // ...then the next Refresh finds the watchlist empty.
+    mockGetConfig.mockResolvedValue(agentConfig([]));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText(/watchlist is empty/i)).toBeTruthy();
+    expect(tabNames()).toEqual([]);
+    expect(screen.queryByText("123.45")).toBeNull();
+    expect(screen.queryByText("FRESH")).toBeNull();
+    expect(screen.getByText("No data")).toBeTruthy();
+    expect(screen.queryByText(/loading msft market data/i)).toBeNull();
+
+    // The late MSFT answer is ignored.
+    await act(async () => {
+      resolveBars({ MSFT: bars(new Date().toISOString()) });
+      resolveSnapshot(snapshot({ symbol: "MSFT", latest_close: "500.00" }));
+    });
+    expect(screen.queryByText("500.00")).toBeNull();
+    expect(screen.queryByText("FRESH")).toBeNull();
+    expect(screen.getByText("No data")).toBeTruthy();
   });
 
   it("renders a full watchlist of max_watchlist_size symbols in a wrapping tab row", async () => {

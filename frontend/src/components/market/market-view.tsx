@@ -68,6 +68,12 @@ export function MarketView() {
     const [config, constants] = await Promise.allSettled([getAgentConfig(), getConstants()]);
     if (request !== watchlistRequest.current) return; // a newer Refresh superseded this one
     const next = resolveMarketWatchlist(config, constants);
+    if (next.symbols.length === 0) {
+      // No symbol left to select: drop the previous symbol's bars and snapshot, and
+      // ignore any load for it still in flight.
+      dataRequest.current++;
+      setState(INITIAL);
+    }
     setWatchlist(next);
     setSymbol((current) => selectSymbol(next.symbols, current));
     setReloadKey((key) => key + 1);
