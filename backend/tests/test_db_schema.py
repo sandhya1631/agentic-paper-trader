@@ -194,3 +194,102 @@ async def test_existing_policy_tokens_are_scrubbed(db_session: AsyncSession):
         )
     )
     assert all("policy_token" not in (value or "") for row in raw for value in row)
+
+
+# Raw JSON text, stored as-is in the JSON columns. A jsonb round trip would reorder
+# keys and normalize spacing, so comparing the text proves a row was never rewritten.
+# "\\u0000" (Python source) is the 6-character JSON escape \u0000: valid json, but
+# jsonb rejects it.
+UNTOUCHED_SNAPSHOTS = {
+    "ordinary": '{"execution_status": "HOLD",   "b": 1, "a": [2, 3]}',
+    "nul_escape": '{"note": "nul \\u0000 here",  "execution_status": "HOLD"}',
+    # Can't be parsed as jsonb, so it is skipped (left as is) rather than abort startup.
+    "nul_escape_and_token": '{"note": "\\u0000",  "policy_evaluation": {"policy_token": "t"}}',
+    "array": '["policy_token",  1]',
+    "scalar": '"policy_token"',
+    "json_null": "null",
+    "sql_null": None,
+}
+
+
+async def test_policy_token_scrub_leaves_other_rows_untouched(db_session: AsyncSession):
+    """Rows without the key (or that jsonb can't parse) are never cast or rewritten, so
+    the startup patch stays cheap and can't fail; a token row in the same run is still
+    scrubbed, and a second run changes nothing."""
+    agent = await _seed_agent(db_session)
+    names = [*UNTOUCHED_SNAPSHOTS, "token"]
+    cycles = {
+        name: AgentCycle(
+            agent_id=agent.id,
+            trigger=CycleTrigger.SCHEDULED,
+            status=CycleStatus.COMPLETED,
+            started_at=datetime.now(UTC),
+        )
+        for name in names
+    }
+    db_session.add_all(cycles.values())
+    await db_session.flush()
+    approval = CycleApproval(
+        cycle_id=cycles["ordinary"].id,
+        status=ApprovalStatus.APPROVED,
+        proposal_hash="0" * 64,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    db_session.add(approval)
+    await db_session.flush()
+
+    set_cycle = text(
+        "UPDATE agent_cycles SET snapshot_json = CAST(:snapshot AS json), "
+        "policy_result_json = CAST(:policy AS json) WHERE id = :id"
+    )
+    for name, raw in UNTOUCHED_SNAPSHOTS.items():
+        # The same raw text in both columns, so both cycle statements are exercised.
+        await db_session.execute(set_cycle, {"snapshot": raw, "policy": raw, "id": cycles[name].id})
+    token_snapshot = '{"z": 1,  "policy_evaluation": {"policy_token": "t", "decision": "ALLOW"}}'
+    await db_session.execute(
+        set_cycle,
+        {
+            "snapshot": token_snapshot,
+            "policy": '{"policy_token": "t",  "decision": "ALLOW"}',
+            "id": cycles["token"].id,
+        },
+    )
+    await db_session.execute(
+        text(
+            "UPDATE cycle_approvals SET policy_result_json = CAST(:policy AS json) "
+            "WHERE id = :id"
+        ),
+        {"policy": '{"note": "\\u0000",  "policy_token": "t"}', "id": approval.id},
+    )
+    await db_session.commit()
+
+    read_cycles = text(
+        "SELECT id, snapshot_json::text AS snapshot, policy_result_json::text AS policy "
+        "FROM agent_cycles"
+    )
+    by_id = {cycle.id: name for name, cycle in cycles.items()}
+    before = {by_id[row.id]: row for row in await db_session.execute(read_cycles)}
+    assert before["nul_escape"].snapshot == UNTOUCHED_SNAPSHOTS["nul_escape"]  # stored as-is
+
+    connection = await db_session.connection()
+    await ensure_policy_token_scrubbed(connection)
+    await ensure_policy_token_scrubbed(connection)  # idempotent
+
+    after = {by_id[row.id]: row for row in await db_session.execute(read_cycles)}
+    for name in UNTOUCHED_SNAPSHOTS:
+        assert after[name].snapshot == before[name].snapshot, name
+        assert after[name].policy == before[name].policy, name
+    token_row = (
+        await db_session.execute(
+            select(AgentCycle.snapshot_json, AgentCycle.policy_result_json).where(
+                AgentCycle.id == cycles["token"].id
+            )
+        )
+    ).one()
+    assert token_row.snapshot_json == {"z": 1, "policy_evaluation": {"decision": "ALLOW"}}
+    assert token_row.policy_result_json == {"decision": "ALLOW"}
+    approval_text = await db_session.scalar(
+        text("SELECT policy_result_json::text FROM cycle_approvals WHERE id = :id"),
+        {"id": approval.id},
+    )
+    assert approval_text == '{"note": "\\u0000",  "policy_token": "t"}'  # skipped, not fatal
