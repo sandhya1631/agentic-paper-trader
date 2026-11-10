@@ -4,10 +4,12 @@ import { useCallback, useEffect, useState } from "react";
 import {
   getCurrentUser,
   getKillSwitch,
+  getKillSwitchEvents,
   setKillSwitch,
   triggerCycle,
   type CurrentUser,
   type KillSwitch,
+  type KillSwitchEvent,
 } from "@/lib/agent/controls-api";
 import type { AgentCycle } from "@/lib/agent/cycles-api";
 import { listCycles } from "@/lib/agent/cycles-api";
@@ -49,6 +51,7 @@ export function SettingsView() {
       <SchedulerCard />
       <SchedulerActivity />
       <KillSwitchCard isAdmin={user?.role === "ADMIN"} />
+      <KillSwitchAuditCard isAdmin={user?.role === "ADMIN"} />
     </div>
   );
 }
@@ -513,6 +516,70 @@ function KillSwitchCard({ isAdmin }: { isAdmin: boolean }) {
             Cancel
           </button>
         </div>
+      )}
+    </section>
+  );
+}
+
+function describeActor(event: KillSwitchEvent): string {
+  if (event.actor_email) return event.actor_email;
+  return event.actor_id ? "Deleted user" : "System";
+}
+
+function KillSwitchAuditCard({ isAdmin }: { isAdmin: boolean }) {
+  const [events, setEvents] = useState<KillSwitchEvent[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    setLoading(true);
+    getKillSwitchEvents()
+      .then((rows) => {
+        setEvents(rows);
+        setError(null);
+      })
+      .catch((e) => setError(getErrorMessage(e, "Could not read the kill-switch history.")))
+      .finally(() => setLoading(false));
+  }, [isAdmin]);
+
+  if (!isAdmin) return null;
+
+  return (
+    <section className="rounded-xl border border-border bg-surface p-5">
+      <h3 className="text-sm font-semibold">Kill-switch history</h3>
+      <p className="mt-1 text-sm text-muted">
+        Every GLOBAL halt (everyone) and USER pause (one person&apos;s own scheduler), newest first.
+      </p>
+
+      {error && (
+        <p role="alert" className="mt-2 text-sm text-negative">
+          {error}
+        </p>
+      )}
+
+      {loading ? (
+        <p className="mt-2 text-sm text-muted">Loading history...</p>
+      ) : !events || events.length === 0 ? (
+        <p className="mt-2 text-sm text-muted">No kill-switch changes yet.</p>
+      ) : (
+        <ul className="mt-3 divide-y divide-border text-sm">
+          {events.map((event) => (
+            <li key={event.id} className="flex flex-wrap items-center gap-2 py-2">
+              <Badge tone={event.scope === "GLOBAL" ? "negative" : "neutral"}>{event.scope}</Badge>
+              <Badge tone={event.new_enabled ? "negative" : "positive"}>
+                {event.new_enabled ? "ON" : "OFF"}
+              </Badge>
+              <span className="text-muted">{formatDateTime(event.occurred_at)}</span>
+              <span>{describeActor(event)}</span>
+              {event.scope === "USER" && event.target_user_email && (
+                <span className="text-muted">({event.target_user_email}&apos;s scheduler)</span>
+              )}
+              {event.outcome !== "APPLIED" && <Badge tone="neutral">{event.outcome}</Badge>}
+              {event.reason && <span className="text-muted">&ldquo;{event.reason}&rdquo;</span>}
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );

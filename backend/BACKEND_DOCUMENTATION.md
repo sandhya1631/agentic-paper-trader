@@ -418,6 +418,22 @@ execution framework; its broker and result backend are configured to use Redis.
 Likewise, Alpaca is not a local database: it is the external authoritative
 system for market data, paper-account balances, positions, and broker orders.
 
+### 4.13 `password_reset_tokens`
+
+Stores one-time password reset tokens (Issue #166):
+
+- `id`
+- `user_id` (`ON DELETE CASCADE`)
+- `token_hash` (SHA-256 of the raw token; the raw token itself is never stored)
+- `created_at`, `expires_at`, `used_at`
+
+Only the hash is persisted, so reading this table alone cannot be used to reset
+a password - the caller must know the raw token, which is handed to them once
+(logged server-side in place of a real email, see 5.1) and never written to the
+database. A token is single-use (`used_at`) and expires after
+`PASSWORD_RESET_TOKEN_EXPIRY_MINUTES` (30). Requesting a new token invalidates
+any earlier unused one for that user.
+
 ---
 
 ## 5. Data and decision flow
@@ -432,6 +448,21 @@ system for market data, paper-account balances, positions, and broker orders.
 6. Protected endpoints call `get_current_user()`.
 7. The dependency validates the JWT, converts `sub` to UUID, and loads the
    corresponding user.
+
+**Password reset (Issue #166):**
+
+1. `POST /auth/forgot-password` looks up the email. The response is the same
+   generic message whether or not an account exists, so this endpoint cannot
+   be used to enumerate registered emails.
+2. If a user is found, a random token is generated, hashed, and stored in
+   `password_reset_tokens` with a 30-minute expiry; any earlier unused token
+   for that user is invalidated in the same step.
+3. The raw (unhashed) token is logged server-side (`log_password_reset_link`)
+   instead of emailed - real email delivery is out of scope for #166.
+4. `POST /auth/reset-password` hashes the submitted token, looks it up, and
+   rejects it (400) if missing, already used, or expired.
+5. On success the token is marked used and `users.password_hash` is updated;
+   the old password stops working immediately.
 
 ### 5.2 Credential flow
 
@@ -530,16 +561,21 @@ main sequence.
 
 ### Step 1: Load and gate the agent
 
+- Take the agent's cycle lock (`agent_cycle_lock`): a Postgres advisory try-lock
+  held on a dedicated connection for the whole run. If another cycle or sweep for
+  this agent already holds it, raise `CycleOverlapError` immediately.
 - Load `AgentConfig`.
 - Expire old pending approvals for this agent.
 - Search for a cycle in any active status.
 - If an active cycle is `RECONCILING`, try to reconcile its broker order first.
 - If an active cycle remains, raise `CycleOverlapError`.
 
-This prevents a new trigger from starting while the agent has a cycle in progress.
-Scheduled ticks use `run_watchlist_cycles()`, which runs one cycle per watchlist
-symbol (`target_symbol`) and checks this gate only on the first symbol, so the
-sweep's own per-symbol cycles may be active together.
+This prevents a new trigger from starting while the agent has a cycle in progress,
+including across processes: a manual run (API) and a scheduled sweep (Celery
+worker) for the same agent can never interleave (#156). Scheduled ticks use
+`run_watchlist_cycles()`, which holds the lock for the whole sweep, runs one cycle
+per de-duplicated watchlist symbol (`target_symbol`) and checks the status gate only
+on the first symbol, so the sweep's own per-symbol cycles may be active together.
 
 ### Step 2: Create the cycle
 
@@ -554,7 +590,9 @@ Insert an `AgentCycle` with:
 ### Step 3: Collect market context
 
 Set status to `COLLECTING`, fetch watchlist bars, calculate indicators where
-there are at least 50 closes, and build the sanitized context.
+there are at least 50 closes, and build the sanitized context. The watchlist is
+first normalized (trimmed, upper-cased, de-duplicated, blanks dropped), the same way
+for a manual cycle and a sweep, so each distinct symbol is collected exactly once.
 
 A collector construction or bar-fetch problem is logged and leaves the cycle
 with empty/missing market data, allowing the strategy's HOLD mandate to apply.
@@ -682,8 +720,8 @@ result contains complete evidence instead of stopping at the first failure.
 | P-003 | Market open | Requires Alpaca clock to report open. |
 | P-004 | Fresh data | Requires data age at most 600 seconds. |
 | P-005 | Symbol allowlist | Requires symbol in agent watchlist. |
-| P-007 | Maximum allocation | BUY projected symbol exposure must be at most configured max, default 10% of equity. |
-| P-008 | Available cash | BUY cost must fit cash minus configured reserve. |
+| P-007 | Maximum allocation | BUY projected exposure in that symbol must be at most configured max, default 10% of equity. Per symbol by design (#156), so the caps can add up across a watchlist. |
+| P-008 | Available cash | BUY cost must fit cash minus configured reserve. The aggregate backstop: total deployment stays at about (1 − reserve) of equity; unfilled orders are not counted. |
 | P-009 | Sell ownership | SELL quantity cannot exceed owned long position. |
 | P-010 | Open-order conflict | Rejects a symbol that already has an open order. |
 | P-011 | Daily loss | Rejects when daily P&L is at or below the configured loss limit. |

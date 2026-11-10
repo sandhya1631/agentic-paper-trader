@@ -6,7 +6,13 @@ import { useRouter } from "next/navigation";
 import { login } from "@/lib/auth/auth-api";
 import { getErrorMessage } from "@/lib/api/error-message";
 
-export function LoginForm({ registered }: { registered?: boolean }) {
+export function LoginForm({
+  registered,
+  passwordReset,
+}: {
+  registered?: boolean;
+  passwordReset?: boolean;
+}) {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -42,6 +48,12 @@ export function LoginForm({ registered }: { registered?: boolean }) {
         </p>
       )}
 
+      {passwordReset && (
+        <p className="rounded-lg border border-positive/30 bg-positive/10 px-3 py-2 text-sm text-positive">
+          Password reset — sign in with your new password.
+        </p>
+      )}
+
       {error && (
         <p role="alert" className="rounded-lg border border-negative/30 bg-negative/10 px-3 py-2 text-sm text-negative">
           {error}
@@ -65,9 +77,14 @@ export function LoginForm({ registered }: { registered?: boolean }) {
       </div>
 
       <div className="space-y-1.5">
-        <label htmlFor="password" className="text-sm font-medium">
-          Password
-        </label>
+        <div className="flex items-center justify-between">
+          <label htmlFor="password" className="text-sm font-medium">
+            Password
+          </label>
+          <Link href="/forgot-password" className="text-sm text-brand hover:underline">
+            Forgot password?
+          </Link>
+        </div>
         <input
           id="password"
           name="password"

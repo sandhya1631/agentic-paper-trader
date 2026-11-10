@@ -4,7 +4,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
+from app.auth.password_reset import (
+    consume_password_reset_token,
+    create_password_reset_token,
+    log_password_reset_link,
+)
 from app.auth.schemas import (
+    ForgotPasswordRequest,
+    ForgotPasswordResponse,
+    ResetPasswordRequest,
+    ResetPasswordResponse,
     Token,
     UserCreate,
     UserLogin,
@@ -12,6 +21,7 @@ from app.auth.schemas import (
     _ensure_within_bcrypt_limit,
 )
 from app.auth.security import hash_password, issue_token, verify_password
+from app.core.config import get_settings
 from app.db.models import User
 from app.db.session import get_db
 
@@ -90,6 +100,48 @@ async def login_for_access_token(
         )
 
     return Token(access_token=issue_token(str(user.id)))
+
+
+@router.post(
+    "/forgot-password",
+    response_model=ForgotPasswordResponse,
+    summary="Request a password reset link",
+    description=(
+        "Always returns the same generic message, whether or not the email is "
+        "registered, so this endpoint cannot be used to enumerate accounts. In "
+        "development the reset link is logged server-side rather than emailed."
+    ),
+)
+async def forgot_password(
+    payload: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)
+) -> ForgotPasswordResponse:
+    result = await db.execute(select(User).where(User.email == payload.email))
+    user = result.scalar_one_or_none()
+    if user is not None:
+        raw_token = await create_password_reset_token(db, user)
+        await db.commit()
+        log_password_reset_link(user.email, raw_token, get_settings().frontend_base_url)
+    return ForgotPasswordResponse()
+
+
+@router.post(
+    "/reset-password",
+    response_model=ResetPasswordResponse,
+    summary="Reset a password using a /auth/forgot-password token",
+    description="Consumes a one-time reset token and sets a new password.",
+)
+async def reset_password(
+    payload: ResetPasswordRequest, db: AsyncSession = Depends(get_db)
+) -> ResetPasswordResponse:
+    user = await consume_password_reset_token(db, payload.token)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset link",
+        )
+    user.hashed_password = hash_password(payload.new_password)
+    await db.commit()
+    return ResetPasswordResponse()
 
 
 @router.get(

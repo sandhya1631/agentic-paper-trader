@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # Override via .env as a JSON array, e.g.: CORS_ALLOWED_ORIGINS=["http://localhost:3000"]
     cors_allowed_origins: list[str] = ["http://localhost:3000"]
 
+    # Where the frontend's reset-password page lives, for the link sent by
+    # /auth/forgot-password (Issue #166). Override in production .env.
+    frontend_base_url: str = "http://localhost:3000"
+
     # Alpaca Trading API Credentials
     alpaca_api_key: str | None = None
     alpaca_api_secret: str | None = None

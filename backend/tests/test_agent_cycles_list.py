@@ -55,13 +55,22 @@ def _cycle(
     *,
     minutes_ago: int,
     trigger: CycleTrigger = CycleTrigger.MANUAL,
+    status: CycleStatus = CycleStatus.HOLD,
+    action: str | None = None,
+    policy_decision: str | None = None,
 ) -> AgentCycle:
     started = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
     return AgentCycle(
         agent_id=agent_id,
         trigger=trigger,
-        status=CycleStatus.HOLD,
+        status=status,
         started_at=started,
+        proposal_json=(
+            {"symbol": "AAPL", "action": action, "quantity": 1, "reasoning": "x"}
+            if action
+            else None
+        ),
+        policy_decision=policy_decision,
     )
 
 
@@ -165,3 +174,168 @@ async def test_agent_cycles_list_rejects_out_of_range_limit(client: AsyncClient)
     headers = {"Authorization": f"Bearer {token}"}
     assert (await client.get("/agent/cycles?limit=0", headers=headers)).status_code == 422
     assert (await client.get("/agent/cycles?limit=101", headers=headers)).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_agent_cycles_list_filters_by_action(client: AsyncClient):
+    """#82: filter by the LLM's proposed action."""
+    token = await _register_and_login(client, "filter-action@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "filter-action@example.com")
+        db.add_all(
+            [
+                _cycle(agent.id, minutes_ago=1, action="BUY"),
+                _cycle(agent.id, minutes_ago=2, action="SELL"),
+                _cycle(agent.id, minutes_ago=3, action="HOLD"),
+            ]
+        )
+        await db.commit()
+
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = await client.get("/agent/cycles?action=BUY", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["proposal_json"]["action"] == "BUY"
+
+
+@pytest.mark.asyncio
+async def test_agent_cycles_list_filters_by_status(client: AsyncClient):
+    """#82: filter by cycle status."""
+    token = await _register_and_login(client, "filter-status@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "filter-status@example.com")
+        db.add_all(
+            [
+                _cycle(agent.id, minutes_ago=1, status=CycleStatus.COMPLETED),
+                _cycle(agent.id, minutes_ago=2, status=CycleStatus.FAILED),
+            ]
+        )
+        await db.commit()
+
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = await client.get("/agent/cycles?status=FAILED", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["status"] == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_agent_cycles_list_filters_by_policy_decision(client: AsyncClient):
+    """#82: filter by the cycle's overall policy outcome."""
+    token = await _register_and_login(client, "filter-policy@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "filter-policy@example.com")
+        db.add_all(
+            [
+                _cycle(agent.id, minutes_ago=1, policy_decision="DENY"),
+                _cycle(agent.id, minutes_ago=2, policy_decision="ALLOW"),
+                _cycle(agent.id, minutes_ago=3, policy_decision=None),
+            ]
+        )
+        await db.commit()
+
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = await client.get("/agent/cycles?policy_decision=DENY", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["policy_decision"] == "DENY"
+
+
+@pytest.mark.asyncio
+async def test_agent_cycles_list_filters_by_date_range(client: AsyncClient):
+    """#82: started_after/started_before, inclusive, AND together."""
+    token = await _register_and_login(client, "filter-date@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "filter-date@example.com")
+        db.add_all(
+            [
+                _cycle(agent.id, minutes_ago=5),
+                _cycle(agent.id, minutes_ago=50),
+                _cycle(agent.id, minutes_ago=500),
+            ]
+        )
+        await db.commit()
+
+    headers = {"Authorization": f"Bearer {token}"}
+    lower = (datetime.now(timezone.utc) - timedelta(minutes=100)).isoformat()
+    upper = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    resp = await client.get(
+        "/agent/cycles",
+        params={"started_after": lower, "started_before": upper},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 1  # only the 50-minutes-ago cycle is in range
+
+
+@pytest.mark.asyncio
+async def test_agent_cycles_list_combines_filters_with_and(client: AsyncClient):
+    """#82: multiple filters AND together, not OR."""
+    token = await _register_and_login(client, "filter-and@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "filter-and@example.com")
+        db.add_all(
+            [
+                _cycle(agent.id, minutes_ago=1, action="BUY", status=CycleStatus.FAILED),
+                _cycle(agent.id, minutes_ago=2, action="BUY", status=CycleStatus.COMPLETED),
+                _cycle(agent.id, minutes_ago=3, action="SELL", status=CycleStatus.FAILED),
+            ]
+        )
+        await db.commit()
+
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = await client.get("/agent/cycles?action=BUY&status=FAILED", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["proposal_json"]["action"] == "BUY"
+    assert body["items"][0]["status"] == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_agent_cycles_list_filters_scoped_to_user_too(client: AsyncClient):
+    """A filter must not leak another user's matching cycles into the result."""
+    token_a = await _register_and_login(client, "filter-scope-a@example.com")
+    await _register_and_login(client, "filter-scope-b@example.com")
+    async with TestSessionLocal() as db:
+        agent_a = await _create_agent_for(db, "filter-scope-a@example.com")
+        agent_b = await _create_agent_for(db, "filter-scope-b@example.com")
+        db.add(_cycle(agent_a.id, minutes_ago=1, action="BUY"))
+        db.add(_cycle(agent_b.id, minutes_ago=1, action="BUY"))
+        await db.commit()
+
+    resp = await client.get(
+        "/agent/cycles?action=BUY", headers={"Authorization": f"Bearer {token_a}"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_cycles_list_rejects_inverted_date_range(client: AsyncClient):
+    """started_after after started_before is a clean 422, not an empty/wrong result."""
+    token = await _register_and_login(client, "filter-bad-range@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    later = datetime.now(timezone.utc).isoformat()
+    earlier = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    resp = await client.get(
+        "/agent/cycles",
+        params={"started_after": later, "started_before": earlier},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_agent_cycles_list_rejects_invalid_enum_filters(client: AsyncClient):
+    """An unknown action/status/policy_decision value is a 422, not a 500 or silent no-op."""
+    token = await _register_and_login(client, "filter-bad-enum@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    assert (await client.get("/agent/cycles?action=NOPE", headers=headers)).status_code == 422
+    assert (await client.get("/agent/cycles?status=NOPE", headers=headers)).status_code == 422
+    assert (
+        await client.get("/agent/cycles?policy_decision=NOPE", headers=headers)
+    ).status_code == 422

@@ -238,6 +238,14 @@ class KillSwitchEventRead(APIModel):
     new_enabled: bool
     outcome: str
     reason: str | None = None
+    # GLOBAL (admin, affects everyone) or USER (a user pausing only their own scheduler).
+    scope: str
+    # The user affected by a USER-scope event; None for GLOBAL.
+    target_user_id: UUID | None = None
+    # Denormalized for the audit UI (#169), so it never has to resolve a UUID itself.
+    # None if the acting/affected user has since been deleted.
+    actor_email: str | None = None
+    target_user_email: str | None = None
 
 
 class SchedulerTickStatus(APIModel):

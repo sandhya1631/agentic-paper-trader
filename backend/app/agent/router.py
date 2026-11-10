@@ -30,6 +30,8 @@ from app.db.enums import (
     BrokerOrderStatus,
     CycleStatus,
     CycleTrigger,
+    DecisionAction,
+    PolicyDecisionType,
     UserRole,
 )
 from app.db.models import (
@@ -49,6 +51,7 @@ from app.risk.kill_switch import (
     get_latest_activation_reason,
     list_kill_switch_events,
     set_kill_switch,
+    set_user_scheduler_switch,
 )
 from app.schemas import (
     AgentScheduleRead,
@@ -108,7 +111,36 @@ async def list_kill_switch_audit(
     if current_user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Admin role required")
     events = await list_kill_switch_events(db, limit)
-    return [KillSwitchEventRead.model_validate(event) for event in events]
+
+    # Denormalize emails for the UI (#169) in one extra query, rather than making
+    # it resolve actor_id/target_user_id itself. None for a user who no longer
+    # exists (both columns are ON DELETE SET NULL).
+    user_ids = {e.actor_id for e in events if e.actor_id} | {
+        e.target_user_id for e in events if e.target_user_id
+    }
+    emails_by_id: dict[uuid.UUID, str] = {}
+    if user_ids:
+        rows = await db.execute(select(User.id, User.email).where(User.id.in_(user_ids)))
+        emails_by_id = {row.id: row.email for row in rows}
+
+    return [
+        KillSwitchEventRead(
+            id=event.id,
+            occurred_at=event.occurred_at,
+            actor_id=event.actor_id,
+            previous_enabled=event.previous_enabled,
+            new_enabled=event.new_enabled,
+            outcome=event.outcome,
+            reason=event.reason,
+            scope=event.scope,
+            target_user_id=event.target_user_id,
+            actor_email=emails_by_id.get(event.actor_id) if event.actor_id else None,
+            target_user_email=(
+                emails_by_id.get(event.target_user_id) if event.target_user_id else None
+            ),
+        )
+        for event in events
+    ]
 
 
 @router.put(
@@ -249,6 +281,11 @@ async def trigger_manual_cycle(
 async def list_agent_cycles(
     limit: int = 20,
     offset: int = 0,
+    started_after: datetime | None = None,
+    started_before: datetime | None = None,
+    action: DecisionAction | None = None,
+    status_filter: CycleStatus | None = Query(default=None, alias="status"),
+    policy_decision: PolicyDecisionType | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> CycleListRead:
@@ -257,11 +294,21 @@ async def list_agent_cycles(
     Shared read surface for the dashboard cycle-history (#79), decision timeline
     (#81), and audit history (#82). Covers both MANUAL and SCHEDULED cycles and is
     ownership-scoped: a user only ever sees cycles belonging to their own agents.
+
+    Every filter is optional and they AND together. ``action`` matches the LLM's
+    proposed action (``proposal_json.action``); ``policy_decision`` matches the
+    cycle's overall, first-class outcome (ALLOW/DENY/RESIZE/NOT_EVALUATED) rather
+    than any single policy's result, which would need a slower, unindexed JSON
+    search over ``policy_result_json.evaluations`` (#82's noted follow-up).
     """
     if not 1 <= limit <= 100:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
     if offset < 0:
         raise HTTPException(status_code=422, detail="offset must be >= 0")
+    if started_after is not None and started_before is not None and started_after > started_before:
+        raise HTTPException(
+            status_code=422, detail="started_after must not be after started_before"
+        )
 
     owned_cycles = (
         select(AgentCycle)
@@ -269,6 +316,21 @@ async def list_agent_cycles(
         .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
         .where(TradingAccount.user_id == current_user.id)
     )
+    if started_after is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.started_at >= started_after)
+    if started_before is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.started_at <= started_before)
+    if action is not None:
+        # proposal_json is a plain JSON column (not JSONB), so comparing it to a
+        # string needs the explicit as_string() cast - Postgres has no json = text
+        # operator (confirmed: raises UndefinedFunctionError without this).
+        owned_cycles = owned_cycles.where(
+            AgentCycle.proposal_json["action"].as_string() == action.value
+        )
+    if status_filter is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.status == status_filter)
+    if policy_decision is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.policy_decision == policy_decision.value)
 
     total = await db.scalar(
         select(func.count()).select_from(owned_cycles.subquery())
@@ -609,7 +671,7 @@ async def start_agent_schedule(
     else:
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
-    current_user.scheduler_enabled = True
+    await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=True)
     try:
         await db.commit()
     except IntegrityError:
@@ -625,7 +687,7 @@ async def start_agent_schedule(
             raise
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
-        current_user.scheduler_enabled = True
+        await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=True)
         await db.commit()
     await db.refresh(schedule)
     schedules_result = await db.execute(
@@ -667,7 +729,7 @@ async def stop_agent_schedule(
     schedule = result.scalar_one_or_none()
     if schedule is None:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    current_user.scheduler_enabled = False
+    await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=False)
     await db.commit()
     await db.refresh(schedule)
 
