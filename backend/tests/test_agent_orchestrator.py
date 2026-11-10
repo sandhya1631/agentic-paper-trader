@@ -18,7 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.approval import reconcile_uncertain_cycle
 from app.agent.context import build_agent_context
-from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
+from app.agent.orchestrator import (
+    CycleOverlapError,
+    _enforce_context_window,
+    run_agent_cycle,
+)
 from app.agent.prompt import get_prompt_definition, get_system_prompt
 from app.core.constants import DEFAULT_PROMPT_REVISION
 from app.db.enums import ApprovalMode, ApprovalStatus, CycleStatus, CycleTrigger, UserRole
@@ -181,6 +185,35 @@ def test_build_agent_context_marks_unavailable_account_data():
     assert context["account"]["cash"] is None
     assert context["positions"] == []
     assert context["open_orders"] == []
+
+
+def test_enforce_context_window_trims_payload_and_tracks_budget():
+    context = {
+        "watchlist": ["AAPL", "NVDA", "MSFT"],
+        "market": {
+            symbol: {
+                "recent_bars": [{"close": float(index)} for index in range(20)],
+                "extended_indicators": {"rsi_14": 60.0, "sma_20": 100.0, "noise": "x" * 200},
+            }
+            for symbol in ["AAPL", "NVDA", "MSFT"]
+        },
+        "account": {"data_status": "LIVE"},
+        "positions": [{"symbol": "AAPL", "qty": 10}],
+        "open_orders": [{"symbol": "AAPL", "qty": 1}],
+        "decision_target": "AAPL",
+    }
+
+    trimmed = _enforce_context_window(
+        context,
+        "system " * 200,
+        model_window_tokens=800,
+    )
+
+    assert trimmed["decision_target"] == "AAPL"
+    assert trimmed["watchlist"] == ["AAPL"]
+    assert trimmed["market"]["AAPL"]["recent_bars"][-1]["close"] == 19.0
+    assert trimmed["context_window_guard"]["remaining_tokens"] >= 0
+    assert trimmed["context_window_guard"]["model_window_tokens"] == 800
 
 
 def test_build_agent_context_sanitizes_live_portfolio_data():

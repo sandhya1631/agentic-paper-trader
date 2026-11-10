@@ -63,6 +63,100 @@ from app.schemas import DecisionProposal
 logger = logging.getLogger(__name__)
 
 
+def _estimate_prompt_tokens(prompt_text: str, context_json: str) -> int:
+    return (len(context_json) + len(prompt_text) + 3) // 4
+
+
+def _enforce_context_window(
+    context: dict[str, Any],
+    system_prompt: str,
+    *,
+    model_window_tokens: int,
+) -> dict[str, Any]:
+    """Trim the model payload to fit the configured context window.
+
+    The orchestrator tracks token usage for observability, but the model input is
+    still bounded by the provider's configured context window. If the payload is too
+    large, we progressively reduce bar evidence while keeping the key decision
+    metadata intact.
+    """
+    if model_window_tokens <= 0:
+        return context
+
+    def snapshot() -> tuple[int, str]:
+        payload = json.dumps(context, separators=(",", ":"))
+        return _estimate_prompt_tokens(system_prompt, payload), payload
+
+    estimated_tokens, _ = snapshot()
+    if estimated_tokens <= model_window_tokens:
+        context["context_window_guard"] = {
+            "model_window_tokens": model_window_tokens,
+            "estimated_input_tokens": estimated_tokens,
+            "remaining_tokens": max(model_window_tokens - estimated_tokens, 0),
+            "truncated": False,
+        }
+        return context
+
+    market = context.get("market", {})
+    decision_target = context.get("decision_target")
+    if decision_target and decision_target in market:
+        context["market"] = {decision_target: market[decision_target]}
+        context["watchlist"] = [decision_target]
+
+    for symbol, symbol_context in list(market.items()):
+        if decision_target and symbol != decision_target:
+            continue
+        if not isinstance(symbol_context, dict):
+            continue
+        recent_bars = symbol_context.get("recent_bars")
+        if isinstance(recent_bars, list) and len(recent_bars) > 6:
+            symbol_context["recent_bars"] = recent_bars[-6:]
+        if isinstance(symbol_context.get("extended_indicators"), dict):
+            indicators = symbol_context["extended_indicators"]
+            allowed = {
+                "rsi_14",
+                "sma_20",
+                "sma_50",
+                "macd",
+                "macd_signal",
+                "macd_histogram",
+            }
+            for key in list(indicators):
+                if key not in allowed:
+                    indicators.pop(key, None)
+
+    if len(context.get("watchlist", [])) > 3:
+        context["watchlist"] = context["watchlist"][:3]
+
+    # If the payload is still above the configured window, keep the target-only
+    # market summary and lose the least critical non-decision metadata.
+    estimated_tokens, _ = snapshot()
+    if estimated_tokens > model_window_tokens:
+        context["market"] = {
+            decision_target: context["market"].get(decision_target, {})
+        } if decision_target else {}
+        context["watchlist"] = [decision_target] if decision_target else []
+        context["account"] = {
+            "data_status": context.get("account", {}).get("data_status", "NOT_PROVIDED")
+        }
+        context["positions"] = []
+        context["open_orders"] = []
+        context["notes"] = (
+            "Context truncated to fit the model window; default to HOLD on "
+            "uncertainty."
+        )
+
+    estimated_tokens, payload = snapshot()
+    context["context_window_guard"] = {
+        "model_window_tokens": model_window_tokens,
+        "estimated_input_tokens": estimated_tokens,
+        "remaining_tokens": max(model_window_tokens - estimated_tokens, 0),
+        "truncated": estimated_tokens > model_window_tokens,
+        "payload_chars": len(payload),
+    }
+    return context
+
+
 class CycleOverlapError(Exception):
     """Raised when the agent already has a non-terminal cycle in progress."""
 
@@ -258,7 +352,16 @@ async def run_agent_cycle(
             context["decision_target"] = target_symbol
 
         system_prompt = prompt_definition.text
-        prompt_input = json.dumps(context, indent=2)
+        settings = get_settings()
+        model_window_tokens = (
+            settings.ollama_num_ctx if settings.llm_provider.lower() == "ollama" else 128000
+        )
+        context = _enforce_context_window(
+            context,
+            system_prompt,
+            model_window_tokens=model_window_tokens,
+        )
+        prompt_input = json.dumps(context, separators=(",", ":"))
         market_context = context.get("market", {})
         bars_used = sum(
             int(symbol_context.get("bar_count", 0))
@@ -266,20 +369,28 @@ async def run_agent_cycle(
         )
         context_chars = len(prompt_input)
         system_chars = len(system_prompt)
+        estimated_tokens = (context_chars + system_chars + 3) // 4
         context["observability"] = {
             "context_chars": context_chars,
             "system_prompt_chars": system_chars,
-            "estimated_input_tokens": (context_chars + system_chars + 3) // 4,
+            "estimated_input_tokens": estimated_tokens,
+            "model_window_tokens": model_window_tokens,
+            "remaining_context_tokens": max(model_window_tokens - estimated_tokens, 0),
+            "context_over_limit": estimated_tokens > model_window_tokens,
             "symbols": len(agent.watchlist),
             "bars_used": bars_used,
             "account_data_status": context["account"]["data_status"],
+            "context_truncated": bool(
+                context.get("context_window_guard", {}).get("truncated")
+            ),
         }
         logger.info(
-            "Prepared agent context for cycle %s: %s chars, ~%s tokens, %s bars",
+            "Prepared agent context for cycle %s: %s chars, ~%s tokens, %s bars, model window=%s",
             cycle.id,
             context_chars + system_chars,
             context["observability"]["estimated_input_tokens"],
             bars_used,
+            model_window_tokens,
         )
 
         # 6. Execute LLM Call

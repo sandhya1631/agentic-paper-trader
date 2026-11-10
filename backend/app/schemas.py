@@ -239,6 +239,22 @@ class CycleRead(APIModel):
     approval: ApprovalRead | None = None
 
 
+class CycleTokenUsageRead(APIModel):
+    """Context-window usage captured for one completed reasoning cycle."""
+
+    cycle_id: UUID
+    estimated_input_tokens: int = Field(ge=0)
+    model_window_tokens: int = Field(ge=0)
+    remaining_context_tokens: int = Field(ge=0)
+    context_over_limit: bool
+    context_truncated: bool
+    context_chars: int = Field(ge=0)
+    system_prompt_chars: int = Field(ge=0)
+    symbols: int = Field(ge=0)
+    bars_used: int = Field(ge=0)
+    account_data_status: str
+
+
 class CycleListRead(APIModel):
     """Paginated envelope for a user's agent cycles (Story: GET /agent/cycles, #119)."""
 

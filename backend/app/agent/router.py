@@ -60,6 +60,7 @@ from app.schemas import (
     ApprovalRead,
     CycleListRead,
     CycleRead,
+    CycleTokenUsageRead,
     KillSwitchEventRead,
     KillSwitchRead,
     KillSwitchUpdate,
@@ -396,6 +397,63 @@ async def get_cycle_status(
             detail=f"AgentCycle '{cycle_id}' not found.",
         )
     return cycle
+
+
+@router.get(
+    "/cycles/{cycle_id}/token-usage",
+    response_model=CycleTokenUsageRead,
+    summary="Retrieve cycle token usage and remaining context capacity",
+)
+async def get_cycle_token_usage(
+    cycle_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> CycleTokenUsageRead:
+    """Return persisted model-context measurements for an owned cycle."""
+    stmt = (
+        select(AgentCycle)
+        .join(AgentConfig, AgentCycle.agent_id == AgentConfig.id)
+        .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+        .where(
+            AgentCycle.id == cycle_id,
+            TradingAccount.user_id == current_user.id,
+        )
+    )
+    result = await db.execute(stmt)
+    cycle = result.scalar_one_or_none()
+    if cycle is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"AgentCycle '{cycle_id}' not found.",
+        )
+
+    snapshot = cycle.snapshot_json or {}
+    observability = snapshot.get("observability")
+    if not isinstance(observability, dict):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Token usage is not available until the cycle builds model context.",
+        )
+
+    try:
+        return CycleTokenUsageRead(
+            cycle_id=cycle.id,
+            estimated_input_tokens=observability["estimated_input_tokens"],
+            model_window_tokens=observability["model_window_tokens"],
+            remaining_context_tokens=observability["remaining_context_tokens"],
+            context_over_limit=observability["context_over_limit"],
+            context_truncated=observability.get("context_truncated", False),
+            context_chars=observability["context_chars"],
+            system_prompt_chars=observability["system_prompt_chars"],
+            symbols=observability["symbols"],
+            bars_used=observability["bars_used"],
+            account_data_status=observability["account_data_status"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Cycle token usage data is malformed.",
+        ) from exc
 
 
 def _job_id(schedule_id: uuid.UUID) -> str:

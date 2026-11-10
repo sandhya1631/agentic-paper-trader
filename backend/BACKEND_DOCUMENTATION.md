@@ -529,10 +529,21 @@ data.
 
 The orchestrator adds strategy and policy versions, serializes the context as
 JSON, and sends it with the versioned system prompt to the selected LLM client.
-The persisted snapshot also contains an `observability` object with context and
-system-prompt character counts, approximate input tokens, symbol count, bars
-used, and account-data status. These fields are audit measurements and are not
-included in the model input.
+Before sending the payload, it checks the configured model window (`OLLAMA_NUM_CTX`
+for Ollama; a safe default ceiling for OpenAI) and trims the least critical
+market evidence when the request would exceed the limit. This keeps the
+model-facing payload under the provider window while preserving decision-critical
+fields like the target symbol, the latest bars, and the account status. The
+persisted snapshot also contains an `observability` object with context and
+system-prompt character counts, approximate input tokens, remaining context,
+forward model-window capacity, symbol count, bars used, and account-data status.
+These fields are audit measurements and are not included in the model input.
+Use `GET /agent/cycles/{cycle_id}/token-usage` to retrieve these measurements
+without downloading the full cycle response. The endpoint is authenticated and
+ownership-scoped. It returns estimated input tokens, model-window capacity,
+remaining tokens, truncation status, character counts, symbol/bar counts, and
+account-data status. It returns `409` when the cycle has not yet built model
+context and `404` when the cycle does not belong to the caller.
 
 The default prompt (`S-001`, revision `1.2.0`) describes a technical-momentum
 strategy:

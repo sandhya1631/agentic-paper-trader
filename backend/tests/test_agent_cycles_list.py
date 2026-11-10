@@ -55,6 +55,7 @@ def _cycle(
     *,
     minutes_ago: int,
     trigger: CycleTrigger = CycleTrigger.MANUAL,
+    snapshot_json: dict | None = None,
 ) -> AgentCycle:
     started = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
     return AgentCycle(
@@ -62,6 +63,7 @@ def _cycle(
         trigger=trigger,
         status=CycleStatus.HOLD,
         started_at=started,
+        snapshot_json=snapshot_json,
     )
 
 
@@ -165,3 +167,69 @@ async def test_agent_cycles_list_rejects_out_of_range_limit(client: AsyncClient)
     headers = {"Authorization": f"Bearer {token}"}
     assert (await client.get("/agent/cycles?limit=0", headers=headers)).status_code == 422
     assert (await client.get("/agent/cycles?limit=101", headers=headers)).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_cycle_token_usage_returns_persisted_context_budget(client: AsyncClient):
+    token = await _register_and_login(client, "tokens@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "tokens@example.com")
+        cycle = _cycle(
+            agent.id,
+            minutes_ago=1,
+            snapshot_json={
+                "observability": {
+                    "estimated_input_tokens": 900,
+                    "model_window_tokens": 4096,
+                    "remaining_context_tokens": 3196,
+                    "context_over_limit": False,
+                    "context_truncated": True,
+                    "context_chars": 3000,
+                    "system_prompt_chars": 600,
+                    "symbols": 1,
+                    "bars_used": 50,
+                    "account_data_status": "LIVE",
+                }
+            },
+        )
+        db.add(cycle)
+        await db.commit()
+        cycle_id = cycle.id
+
+    response = await client.get(
+        f"/agent/cycles/{cycle_id}/token-usage",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "cycle_id": str(cycle_id),
+        "estimated_input_tokens": 900,
+        "model_window_tokens": 4096,
+        "remaining_context_tokens": 3196,
+        "context_over_limit": False,
+        "context_truncated": True,
+        "context_chars": 3000,
+        "system_prompt_chars": 600,
+        "symbols": 1,
+        "bars_used": 50,
+        "account_data_status": "LIVE",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cycle_token_usage_requires_context_metrics(client: AsyncClient):
+    token = await _register_and_login(client, "no-tokens@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "no-tokens@example.com")
+        cycle = _cycle(agent.id, minutes_ago=1)
+        db.add(cycle)
+        await db.commit()
+        cycle_id = cycle.id
+
+    response = await client.get(
+        f"/agent/cycles/{cycle_id}/token-usage",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409
