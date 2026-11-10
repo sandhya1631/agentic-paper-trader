@@ -438,6 +438,8 @@ describe("Schedule card states (#163)", () => {
     });
 
   it("asks for a cycle first when there is no agent yet", async () => {
+    // Someone who can trigger the first cycle (a VIEWER can't, so gets another message).
+    mockMe.mockResolvedValue({ id: "u1", email: "o@example.com", role: "OPERATOR" });
     render(<SettingsView />);
 
     expect(await screen.findByText(/trigger a cycle first/i)).toBeTruthy();
