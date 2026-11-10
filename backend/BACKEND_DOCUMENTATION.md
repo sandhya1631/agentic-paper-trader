@@ -350,8 +350,8 @@ schema (#141):
 - `occurred_at`
 - `actor_type` (`USER`, `SYSTEM`, or `SCHEDULER`, stored as text)
 - `actor_id` (foreign key to `users.id`, set to null if the user is deleted)
-- `event_type` (for example `AGENT_CONFIG_UPDATED`)
-- `entity_type` (for example `agent_config`)
+- `event_type` (see [Audit event types](#audit-event-types))
+- `entity_type` (for example `agent_config` or `manual_order`)
 - `entity_id`
 - `correlation_id`
 - `details` as JSON
@@ -361,9 +361,33 @@ only stages the row; the caller commits it together with the change, so a
 committed change always has its audit row. The first producer is
 `PATCH /agent/config`, which writes one `AGENT_CONFIG_UPDATED` event per real
 change with `details = {"changes": {field: {"from": ..., "to": ...}}}` and none
-for a no-op request. There is no read endpoint yet. Because it is a new table,
-startup `create_all` creates it on existing databases. Kill-switch changes keep
-their own `kill_switch_events` table.
+for a no-op request. `POST /api/v1/broker/orders` (the manual override ticket
+and Close button) writes one `MANUAL_ORDER_*` event per authorized attempt
+(#162). There is no read endpoint yet. Because it is a new table, startup
+`create_all` creates it on existing databases. Kill-switch changes keep their
+own `kill_switch_events` table.
+
+#### Audit event types
+
+Event-type names live in `app/core/constants.py` (except
+`AGENT_CONFIG_UPDATED`, which is written inline by the agent router).
+
+| `event_type` | Written by | `entity_type` / `entity_id` | `details` |
+|---|---|---|---|
+| `AGENT_CONFIG_UPDATED` | `PATCH /agent/config`, once per real change | `agent_config` / the agent id | `{"changes": {field: {"from": ..., "to": ...}}}` |
+| `MANUAL_ORDER_SUBMITTED` | `POST /api/v1/broker/orders` when Alpaca accepts the order (201) | `manual_order` / null | order fields (below), `outcome: "SUBMITTED"`, `broker_order_id`, `broker_status` |
+| `MANUAL_ORDER_BLOCKED` | `POST /api/v1/broker/orders` refused by the kill switch (423) | `manual_order` / null | order fields, `outcome: "BLOCKED"`, `reason` |
+| `MANUAL_ORDER_FAILED` | `POST /api/v1/broker/orders` when the Alpaca call raises (502) | `manual_order` / null | order fields, `outcome: "FAILED"`, `broker_error` (the Alpaca key and secret are redacted if echoed) |
+
+The manual-order fields are `symbol`, `side`, `quantity`, `order_type`,
+`time_in_force`, `limit_price` (null for market orders) and `client_order_id`.
+`actor_type` is `USER` and `actor_id` is the caller. Each manual-order row is
+committed before the response, so blocked and failed attempts are kept even
+though the request returns an error. A 403 (role below OPERATOR), a 401 and a
+credential failure in `get_alpaca_client` happen before the handler and write
+no row. The order itself lives at Alpaca, so if the audit commit fails the
+error is logged and the response is unchanged (a placed order is still
+reported as placed). Rows never contain credentials or tokens.
 
 ### 4.11 Data stored outside PostgreSQL
 
@@ -392,7 +416,7 @@ reconciliation.
 | User identity and role | PostgreSQL `users` | Durable | Email, bcrypt hash, role, active flag, scheduler flag | Backend source of truth |
 | User Alpaca credentials | PostgreSQL `trading_accounts` | Durable | Fernet-encrypted API key and secret plus connection metadata | Backend vault copy; plaintext exists only during an immediate broker call |
 | Agent configuration | PostgreSQL `agent_configs` | Durable | Watchlist, strategy, risk thresholds, model, approval mode, enabled flag | Backend source of truth; watchlist and approval mode editable via `PATCH /agent/config` |
-| Configuration audit trail | PostgreSQL `audit_events` | Durable, append-only | Actor, event type, entity, before/after changes | Backend audit record, written in the same commit as the change |
+| Configuration and manual-order audit trail | PostgreSQL `audit_events` | Durable, append-only | Actor, event type, entity, before/after changes or manual-order outcome | Backend audit record; config changes in the same commit, manual orders committed right after the Alpaca call |
 | Policy-set metadata | PostgreSQL `policy_sets` | Durable | Policy version, JSON limits, active flag | Stored configuration; current evaluator uses Python policy definitions |
 | Agent cycle history | PostgreSQL `agent_cycles` | Durable | Status, trigger, timestamps, context snapshot, prompt, raw LLM response, proposal, errors | Backend decision/audit history |
 | Market context used by a cycle | PostgreSQL `agent_cycles.snapshot_json` | Durable snapshot | Latest prices, indicators, account summary, positions, open-order summary, execution metadata | Historical snapshot only; not a raw market-data archive |
@@ -1029,7 +1053,10 @@ Mounted under `/api/v1`:
 - `GET /api/v1/broker/orders`
 
 The direct order endpoint checks the kill switch, but it does not create the
-`BrokerOrder` cycle-linked record used by the agent gateway.
+`BrokerOrder` cycle-linked record used by the agent gateway. Each authorized
+attempt is recorded in `audit_events` as `MANUAL_ORDER_SUBMITTED`,
+`MANUAL_ORDER_BLOCKED` or `MANUAL_ORDER_FAILED` (see
+[Audit event types](#audit-event-types)).
 
 ### Agent operations
 
@@ -1233,7 +1260,9 @@ async context-manager methods. Function locations are relative to `backend`.
 | `get_account_summary` | `app/broker/router.py` | Returns Alpaca account data. |
 | `get_open_positions` | `app/broker/router.py` | Returns Alpaca positions. |
 | `get_market_snapshot` | `app/broker/router.py` | Returns price and technical indicators. |
-| `place_paper_order` | `app/broker/router.py` | Directly submits a paper order after kill-switch check. |
+| `place_paper_order` | `app/broker/router.py` | Directly submits a paper order after kill-switch check; audits every attempt. |
+| `_audit_manual_order` | `app/broker/router.py` | Writes and commits one `MANUAL_ORDER_*` audit event. |
+| `_without_credentials` | `app/broker/router.py` | Redacts the Alpaca key and secret from a broker error message. |
 | `get_orders_list` | `app/broker/router.py` | Returns Alpaca order history. |
 
 ### Market data and indicators
@@ -1308,9 +1337,11 @@ async context-manager methods. Function locations are relative to `backend`.
 3. **No dedicated decision table:** `AgentCycle.proposal_json` is the current
    decision record.
 4. **Audit events are write-only so far:** `audit_events` records agent-config
-   changes, but no endpoint or UI reads it yet; the audit page reads cycles.
+   changes and manual override orders, but no endpoint or UI reads it yet; the
+   audit page reads cycles.
 5. **Direct broker orders differ from agent orders:** The direct broker endpoint
-   checks the kill switch but does not create a cycle-linked `BrokerOrder`.
+   checks the kill switch but does not create a cycle-linked `BrokerOrder`;
+   it records each attempt in `audit_events` instead.
 6. **Scheduler market-clock credentials:** Scheduler clock checks use server
    `ALPACA_*` settings, while user-triggered order execution uses the user's
    encrypted account credentials.
