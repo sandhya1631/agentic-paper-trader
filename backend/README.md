@@ -124,6 +124,12 @@ LLM_PROVIDER=ollama   # or "openai"
 - Agents may opt into the shorter local-model prompt `S-002`; existing agents remain on
   `S-001` until their strategy version is explicitly changed. Strategy prompts are immutable
   versions and are saved with each cycle for auditability.
+- Agents can also use the `DYNAMIC` strategy mode. In that mode, each cycle selects
+  seven registered strategies (`S-001` through `S-007`) from market regime, data quality,
+  relative volume, and context-window budget, and records the selected strategy and
+  explanation in the cycle snapshot. Use `GET /agent/strategies` to
+  list options and `PUT /agent/{agent_id}/strategy` with `{"strategy_version":"DYNAMIC"}`
+  or a fixed version to configure an agent.
 - `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
 
 #### Offline strategy replay

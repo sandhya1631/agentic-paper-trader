@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
-from app.core.constants import DEFAULT_STRATEGY_VERSION
+from app.core.constants import DEFAULT_STRATEGY_VERSION, DYNAMIC_STRATEGY_VERSION
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -51,6 +51,22 @@ class AgentConfigRead(APIModel):
     daily_loss_limit: Decimal = Decimal("0.02")
     approval_mode: ApprovalMode = ApprovalMode.REQUIRED
     enabled: bool = False
+
+
+class StrategyRead(APIModel):
+    """A registered strategy prompt that can be selected for an agent."""
+
+    version: str
+    revision: str
+    selectable_mode: str = "FIXED"
+
+
+class StrategyUpdate(APIModel):
+    """Request to select a registered strategy for an owned agent."""
+
+    strategy_version: str = Field(
+        default=DYNAMIC_STRATEGY_VERSION, min_length=1, max_length=30
+    )
 
 
 class ReplaySampleRequest(APIModel):

@@ -41,6 +41,7 @@ ACTIVE_CYCLE_STATUSES = (
     CycleStatus.RECONCILING,
 )
 DEFAULT_STRATEGY_VERSION = "S-001"
+DYNAMIC_STRATEGY_VERSION = "DYNAMIC"
 # Bump whenever the S-001 prompt text changes, so each cycle's audit record names the
 # exact prompt it ran. 1.1.0 (#153): per-symbol `decision_target`, no hardcoded tickers.
 # 1.2.0 (#172): account-data rules (HOLD unless data_status is LIVE, SELL only owned).

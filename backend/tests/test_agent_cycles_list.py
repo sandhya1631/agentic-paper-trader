@@ -8,7 +8,7 @@ from conftest import TestSessionLocal
 from httpx import AsyncClient
 from sqlalchemy import select
 
-from app.db.enums import CycleStatus, CycleTrigger
+from app.db.enums import CycleStatus, CycleTrigger, UserRole
 from app.db.models import AgentConfig, AgentCycle, PolicySet, TradingAccount, User
 
 
@@ -167,6 +167,64 @@ async def test_agent_cycles_list_rejects_out_of_range_limit(client: AsyncClient)
     headers = {"Authorization": f"Bearer {token}"}
     assert (await client.get("/agent/cycles?limit=0", headers=headers)).status_code == 422
     assert (await client.get("/agent/cycles?limit=101", headers=headers)).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_strategy_selection_lists_and_updates_owned_agent(client: AsyncClient):
+    token = await _register_and_login(client, "strategy@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "strategy@example.com")
+        user = (
+            await db.execute(select(User).where(User.email == "strategy@example.com"))
+        ).scalar_one()
+        user.role = UserRole.OPERATOR
+        await db.commit()
+        agent_id = agent.id
+
+    headers = {"Authorization": f"Bearer {token}"}
+    strategies = await client.get("/agent/strategies", headers=headers)
+    assert strategies.status_code == 200
+    assert {item["version"] for item in strategies.json()} >= {
+        "S-001",
+        "S-002",
+        "S-003",
+        "S-004",
+        "S-005",
+        "S-006",
+        "S-007",
+        "DYNAMIC",
+    }
+
+    response = await client.put(
+        f"/agent/{agent_id}/strategy",
+        headers=headers,
+        json={"strategy_version": "S-002"},
+    )
+    assert response.status_code == 200
+    assert response.json()["strategy_version"] == "S-002"
+
+
+@pytest.mark.asyncio
+async def test_strategy_selection_rejects_unknown_strategy(client: AsyncClient):
+    token = await _register_and_login(client, "invalid-strategy@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "invalid-strategy@example.com")
+        user = (
+            await db.execute(
+                select(User).where(User.email == "invalid-strategy@example.com")
+            )
+        ).scalar_one()
+        user.role = UserRole.OPERATOR
+        await db.commit()
+        agent_id = agent.id
+
+    response = await client.put(
+        f"/agent/{agent_id}/strategy",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"strategy_version": "S-999"},
+    )
+
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio

@@ -44,7 +44,12 @@ from app.agent.tool_validation import ToolValidationError, validate_decision_pro
 from app.broker.alpaca import AlpacaClient
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
-from app.core.constants import ACTIVE_CYCLE_STATUSES, POLICY_VERSION
+from app.core.constants import (
+    ACTIVE_CYCLE_STATUSES,
+    DEFAULT_STRATEGY_VERSION,
+    DYNAMIC_STRATEGY_VERSION,
+    POLICY_VERSION,
+)
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -159,6 +164,64 @@ def _enforce_context_window(
 
 class CycleOverlapError(Exception):
     """Raised when the agent already has a non-terminal cycle in progress."""
+
+
+def _select_dynamic_strategy(
+    context: dict[str, Any],
+    *,
+    model_window_tokens: int,
+) -> tuple[str, str]:
+    """Choose a registered prompt and explain the choice for cycle audit."""
+    market = context.get("market", {})
+    market_values = [item for item in market.values() if isinstance(item, dict)]
+    quality_values = [
+        item.get("data_quality", {}).get("quality_status") for item in market_values
+    ]
+    if not quality_values or all(value in {"NO_DATA", "DEGRADED"} for value in quality_values):
+        return (
+            "S-002",
+            "Selected the concise safety-focused strategy because market evidence "
+            "is missing or degraded.",
+        )
+
+    regimes = {item.get("regime") for item in market_values}
+    relative_volumes = [
+        float(item["relative_volume_20"])
+        for item in market_values
+        if item.get("relative_volume_20") is not None
+    ]
+    if "DOWNTREND" in regimes:
+        return "S-007", "Selected the capital-preservation strategy because a downtrend is present."
+    if "RANGE" in regimes and all(value == "VALID" for value in quality_values):
+        return (
+            "S-005",
+            "Selected the mean-reversion strategy because the market regime is "
+            "range-bound.",
+        )
+    if relative_volumes and max(relative_volumes) >= 1.5:
+        return (
+            "S-004",
+            "Selected the breakout strategy because relative volume confirms "
+            "unusual activity.",
+        )
+    if "UPTREND" in regimes:
+        return "S-003", "Selected the trend-following strategy because an uptrend is present."
+
+    estimated_s001_tokens = _estimate_prompt_tokens(
+        get_prompt_definition("S-006").text,
+        json.dumps(context, separators=(",", ":")),
+    )
+    if estimated_s001_tokens > int(model_window_tokens * 0.7):
+        return (
+            "S-002",
+            "Selected the concise strategy because the full technical prompt "
+            "would consume more than 70% of the model context window.",
+        )
+    return (
+        "S-006",
+        "Selected the momentum-continuation strategy because multiple signals "
+        "are available.",
+    )
 
 
 async def _load_portfolio_context(
@@ -290,14 +353,19 @@ async def run_agent_cycle(
             )
 
     # 3. Create AgentCycle record (PENDING)
-    prompt_definition = get_prompt_definition(agent.strategy_version)
+    initial_strategy = (
+        DEFAULT_STRATEGY_VERSION
+        if agent.strategy_version == DYNAMIC_STRATEGY_VERSION
+        else agent.strategy_version
+    )
+    prompt_definition = get_prompt_definition(initial_strategy)
     cycle = AgentCycle(
         agent_id=agent.id,
         trigger=trigger,
         status=CycleStatus.PENDING,
         started_at=utcnow(),
         correlation_id=uuid.uuid4(),
-        prompt_version=agent.strategy_version,
+        prompt_version=initial_strategy,
         prompt_revision=prompt_definition.revision,
     )
     db.add(cycle)
@@ -351,11 +419,28 @@ async def run_agent_cycle(
         if target_symbol is not None:
             context["decision_target"] = target_symbol
 
-        system_prompt = prompt_definition.text
         settings = get_settings()
         model_window_tokens = (
             settings.ollama_num_ctx if settings.llm_provider.lower() == "ollama" else 128000
         )
+        selected_strategy = agent.strategy_version
+        selection_reason = "User selected this fixed strategy."
+        if agent.strategy_version == DYNAMIC_STRATEGY_VERSION:
+            selected_strategy, selection_reason = _select_dynamic_strategy(
+                context,
+                model_window_tokens=model_window_tokens,
+            )
+        prompt_definition = get_prompt_definition(selected_strategy)
+        system_prompt = prompt_definition.text
+        context["strategy_selection"] = {
+            "mode": "DYNAMIC" if agent.strategy_version == DYNAMIC_STRATEGY_VERSION else "FIXED",
+            "selected_strategy": selected_strategy,
+            "reason": selection_reason,
+        }
+        context["strategy_version"] = selected_strategy
+        context["versions"]["strategy"] = selected_strategy
+        cycle.prompt_version = selected_strategy
+        cycle.prompt_revision = prompt_definition.revision
         context = _enforce_context_window(
             context,
             system_prompt,

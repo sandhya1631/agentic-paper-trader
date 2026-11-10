@@ -21,9 +21,10 @@ from app.agent.context import build_agent_context
 from app.agent.orchestrator import (
     CycleOverlapError,
     _enforce_context_window,
+    _select_dynamic_strategy,
     run_agent_cycle,
 )
-from app.agent.prompt import get_prompt_definition, get_system_prompt
+from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition, get_system_prompt
 from app.core.constants import DEFAULT_PROMPT_REVISION
 from app.db.enums import ApprovalMode, ApprovalStatus, CycleStatus, CycleTrigger, UserRole
 from app.db.models import (
@@ -104,6 +105,24 @@ def test_s002_is_short_json_focused_strategy():
     assert "account data_status is LIVE" in prompt
     assert "Return only one valid JSON object" in prompt
     assert len(prompt) < len(get_system_prompt("S-001"))
+
+
+def test_strategy_registry_contains_seven_evaluable_strategies():
+    assert set(STRATEGY_REGISTRY) == {
+        "S-001",
+        "S-002",
+        "S-003",
+        "S-004",
+        "S-005",
+        "S-006",
+        "S-007",
+    }
+    for version in STRATEGY_REGISTRY:
+        prompt = get_system_prompt(version)
+        assert f"STRATEGY VERSION: {version}" in prompt
+        assert "BUY" in prompt
+        assert "SELL" in prompt
+        assert "HOLD" in prompt
 
 
 def test_agent_config_rejects_unknown_strategy_version():
@@ -214,6 +233,34 @@ def test_enforce_context_window_trims_payload_and_tracks_budget():
     assert trimmed["market"]["AAPL"]["recent_bars"][-1]["close"] == 19.0
     assert trimmed["context_window_guard"]["remaining_tokens"] >= 0
     assert trimmed["context_window_guard"]["model_window_tokens"] == 800
+
+
+def test_dynamic_strategy_selection_explains_degraded_data_choice():
+    selected, reason = _select_dynamic_strategy(
+        {"market": {"AAPL": {"data_quality": {"quality_status": "DEGRADED"}}}},
+        model_window_tokens=4096,
+    )
+
+    assert selected == "S-002"
+    assert "degraded" in reason
+
+
+def test_dynamic_strategy_selection_uses_regime_and_volume():
+    selected, reason = _select_dynamic_strategy(
+        {
+            "market": {
+                "AAPL": {
+                    "regime": "UPTREND",
+                    "relative_volume_20": 1.8,
+                    "data_quality": {"quality_status": "VALID"},
+                }
+            }
+        },
+        model_window_tokens=4096,
+    )
+
+    assert selected == "S-004"
+    assert "volume" in reason
 
 
 def test_build_agent_context_sanitizes_live_portfolio_data():

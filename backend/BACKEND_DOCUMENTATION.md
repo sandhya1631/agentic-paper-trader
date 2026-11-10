@@ -563,6 +563,32 @@ decisions, and requests concise evidence-based JSON output. Strategy prompts
 are immutable and each cycle stores the exact prompt version, revision, and
 text used.
 
+Authenticated users can call `GET /agent/strategies` to list registered
+strategy versions. Operators and administrators can select one for an owned
+agent with `PUT /agent/{agent_id}/strategy` and a body such as
+`{"strategy_version": "S-002"}`. Unknown versions return `422`, and updates
+are rejected with `409` while the agent has an active cycle. The selected
+version is used by subsequent cycles; existing cycle records retain the
+strategy version and prompt text that they used.
+
+The special `DYNAMIC` selection lets the agent choose between seven registered
+strategies at the start of each cycle:
+
+- `S-001`: RSI and moving-average technical confluence.
+- `S-002`: concise safety-focused strategy for constrained Ollama contexts.
+- `S-003`: conservative trend following for confirmed uptrends.
+- `S-004`: breakout confirmation using unusual relative volume.
+- `S-005`: mean reversion for valid range-bound markets.
+- `S-006`: momentum continuation requiring multiple agreeing signals.
+- `S-007`: capital preservation with a strong HOLD default.
+
+Dynamic mode prefers `S-002` when evidence is missing/degraded or the full
+prompt would consume more than 70% of the configured context window. Otherwise
+it uses regime, relative volume, and data quality to choose among the other
+strategies. The cycle snapshot
+contains `strategy_selection.mode`, `selected_strategy`, and `reason`, and the
+cycle record stores the actual selected prompt version for auditability.
+
 The prompt is guidance only. The Pydantic proposal validator and deterministic
 policies are authoritative.
 

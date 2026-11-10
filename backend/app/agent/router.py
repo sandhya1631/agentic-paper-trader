@@ -21,11 +21,18 @@ from sqlalchemy.orm import selectinload
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
+from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition
 from app.agent.replay import ReplaySample, evaluate_replay
 from app.auth.dependencies import get_current_user, require_operator
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
-from app.core.constants import ALPACA_PROVIDER, DEFAULT_STRATEGY_VERSION, DEFAULT_WATCHLIST
+from app.core.constants import (
+    ACTIVE_CYCLE_STATUSES,
+    ALPACA_PROVIDER,
+    DEFAULT_STRATEGY_VERSION,
+    DEFAULT_WATCHLIST,
+    DYNAMIC_STRATEGY_VERSION,
+)
 from app.db.enums import (
     ApprovalStatus,
     BrokerOrderStatus,
@@ -55,6 +62,7 @@ from app.risk.kill_switch import (
     set_user_scheduler_switch,
 )
 from app.schemas import (
+    AgentConfigRead,
     AgentScheduleRead,
     ApprovalAction,
     ApprovalRead,
@@ -74,9 +82,86 @@ from app.schemas import (
     SchedulerTickLog,
     ScheduleStartRead,
     ScheduleStartRequest,
+    StrategyRead,
+    StrategyUpdate,
 )
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+@router.get(
+    "/strategies",
+    response_model=list[StrategyRead],
+    summary="List registered strategy prompts",
+)
+async def list_strategies(
+    _current_user: User = Depends(get_current_user),
+) -> list[StrategyRead]:
+    """Return strategy versions available for agent selection."""
+    strategies = [
+        StrategyRead(version=version, revision=definition.revision)
+        for version, definition in STRATEGY_REGISTRY.items()
+    ]
+    strategies.append(
+        StrategyRead(
+            version=DYNAMIC_STRATEGY_VERSION,
+            revision="runtime",
+            selectable_mode="DYNAMIC",
+        )
+    )
+    return strategies
+
+
+@router.put(
+    "/{agent_id}/strategy",
+    response_model=AgentConfigRead,
+    summary="Select an agent strategy prompt",
+)
+async def update_agent_strategy(
+    agent_id: uuid.UUID,
+    body: StrategyUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_operator),
+) -> AgentConfigRead:
+    """Update an owned agent's strategy when it has no active cycle."""
+    if body.strategy_version != DYNAMIC_STRATEGY_VERSION:
+        try:
+            get_prompt_definition(body.strategy_version)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+    result = await db.execute(
+        select(AgentConfig)
+        .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+        .where(
+            AgentConfig.id == agent_id,
+            TradingAccount.user_id == current_user.id,
+        )
+    )
+    agent = result.scalar_one_or_none()
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+    active_result = await db.execute(
+        select(AgentCycle.id).where(
+            AgentCycle.agent_id == agent.id,
+            AgentCycle.status.in_(ACTIVE_CYCLE_STATUSES),
+        )
+    )
+    if active_result.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot change strategy while the agent has an active cycle.",
+        )
+
+    agent.strategy_version = body.strategy_version
+    agent.version += 1
+    await db.commit()
+    await db.refresh(agent)
+    return AgentConfigRead.model_validate(agent)
 
 
 @router.get(
