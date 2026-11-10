@@ -23,6 +23,11 @@ vi.mock("@/lib/agent/scheduler-api", () => ({
 }));
 vi.mock("@/lib/agent/cycles-api", () => ({ listCycles: vi.fn() }));
 vi.mock("@/lib/agent/observability-api", () => ({ getSchedulerLogs: vi.fn() }));
+vi.mock("@/lib/agent/agent-config-api", () => ({
+  getAgentConfig: vi.fn(),
+  updateAgentConfig: vi.fn(),
+}));
+vi.mock("@/lib/meta/meta-api", () => ({ getConstants: vi.fn() }));
 
 import {
   getCurrentUser,
@@ -39,6 +44,8 @@ import {
 } from "@/lib/accounts/accounts-api";
 import { getSchedulerStatus, startSchedule, stopSchedule } from "@/lib/agent/scheduler-api";
 import { listCycles } from "@/lib/agent/cycles-api";
+import { getAgentConfig } from "@/lib/agent/agent-config-api";
+import { getConstants } from "@/lib/meta/meta-api";
 import { SettingsView } from "./settings-view";
 
 const mockMe = vi.mocked(getCurrentUser);
@@ -54,6 +61,8 @@ const mockStart = vi.mocked(startSchedule);
 const mockStop = vi.mocked(stopSchedule);
 const mockCycles = vi.mocked(listCycles);
 const mockLogs = vi.mocked(getSchedulerLogs);
+const mockAgentConfig = vi.mocked(getAgentConfig);
+const mockConstants = vi.mocked(getConstants);
 
 function notFound() {
   return new ApiError(404, "Not Found", { detail: "No Alpaca account connected" }, "http://x");
@@ -111,8 +120,45 @@ beforeEach(() => {
   mockCycles.mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0, next_offset: null });
   mockLogs.mockResolvedValue([]);
   mockGetKsEvents.mockResolvedValue([]);
+  mockAgentConfig.mockResolvedValue({
+    id: "a1",
+    name: "Default agent",
+    strategy_version: "S-001",
+    cadence_minutes: 15,
+    target_allocation: "0.05",
+    max_symbol_allocation: "0.10",
+    cash_reserve: "0.05",
+    daily_loss_limit: "0.02",
+    approval_mode: "REQUIRED",
+    enabled: true,
+    watchlist: ["AAPL", "NVDA", "SPY"],
+  });
+  mockConstants.mockResolvedValue({
+    approval_mode: ["OBSERVE_ONLY", "REQUIRED", "AUTO"],
+    max_watchlist_size: 20,
+  } as never);
 });
 afterEach(() => cleanup());
+
+describe("Agent configuration gating", () => {
+  it("is read-only for viewers", async () => {
+    render(<SettingsView />);
+    const remove = (await screen.findByRole("button", { name: /remove aapl/i })) as HTMLButtonElement;
+    expect(remove.disabled).toBe(true);
+    expect(screen.getByText(/only operators and admins/i)).toBeTruthy();
+  });
+
+  it("is editable for operators", async () => {
+    mockMe.mockResolvedValue({ id: "u1", email: "o@example.com", role: "OPERATOR" });
+    render(<SettingsView />);
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: /remove aapl/i }) as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    expect(screen.queryByText(/only operators and admins/i)).toBeNull();
+  });
+});
 
 describe("Trigger Now", () => {
   it("runs a cycle and shows the result", async () => {

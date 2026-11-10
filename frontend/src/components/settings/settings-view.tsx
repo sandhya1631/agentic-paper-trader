@@ -30,6 +30,7 @@ import { getErrorMessage } from "@/lib/api/error-message";
 import { formatDateTime } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { SchedulerActivity } from "@/components/observability/scheduler-activity";
+import { AgentConfigCard } from "@/components/settings/agent-config-card";
 
 export function SettingsView() {
   const [user, setUser] = useState<CurrentUser | null>(null);
@@ -47,6 +48,8 @@ export function SettingsView() {
         <p className="text-sm text-muted">Agent controls and account configuration.</p>
       </section>
       <AccountCard />
+      {/* Mirrors the backend operator gate (off until the role loads); its 403 is authoritative. */}
+      <AgentConfigCard canEdit={user?.role === "OPERATOR" || user?.role === "ADMIN"} />
       <TriggerNowCard />
       <SchedulerCard />
       <SchedulerActivity />

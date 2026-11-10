@@ -51,6 +51,7 @@ beforeEach(() => {
     policy_decision_type: ["ALLOW", "DENY", "RESIZE", "NOT_EVALUATED"],
     approval_mode: ["AUTO", "REQUIRED", "OBSERVE_ONLY"],
     approval_status: ["PENDING", "APPROVED", "REJECTED"],
+    max_watchlist_size: 20,
   });
 });
 afterEach(() => cleanup());
