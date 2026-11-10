@@ -247,6 +247,14 @@ change increments `version` and writes one `audit_events` row in the same commit
 Each cycle re-reads the row, so the next manual or scheduled cycle uses the new
 watchlist and approval mode. P-005 still enforces the watchlist at policy time.
 
+`GET` and `PATCH /agent/config` both return the normalized watchlist
+(`normalize_watchlist` in `app/agent/watchlist.py`: trimmed, upper-cased,
+de-duplicated in order, blanks dropped), the same list the cycles and P-005 use
+(#179). A row stored un-normalized by an earlier SQL edit, e.g.
+`["aapl", "AAPL", "nvda"]`, reads back as `["AAPL", "NVDA"]`, so the Settings card
+doesn't load with unsaved changes. The stored row isn't rewritten on read; it
+changes only when a `PATCH` saves a new watchlist.
+
 `cadence_minutes` has no runtime effect: no scheduler or policy reads it. The
 real run interval is the per-agent `agent_schedules.interval_minutes` (1 to 1440,
 set by `POST /agent/scheduler/start`, the Settings "Autonomous schedule" card) or
@@ -631,8 +639,9 @@ Insert an `AgentCycle` with:
 
 Set status to `COLLECTING`, fetch watchlist bars, calculate indicators where
 there are at least 50 closes, and build the sanitized context. The watchlist is
-first normalized (trimmed, upper-cased, de-duplicated, blanks dropped), the same way
-for a manual cycle and a sweep, so each distinct symbol is collected exactly once.
+first normalized (`normalize_watchlist`: trimmed, upper-cased, de-duplicated, blanks
+dropped), the same way for a manual cycle and a sweep, so each distinct symbol is
+collected exactly once.
 
 A collector construction or bar-fetch problem is logged and leaves the cycle
 with empty/missing market data, allowing the strategy's HOLD mandate to apply.
@@ -759,7 +768,7 @@ result contains complete evidence instead of stopping at the first failure.
 | P-002 | Kill switch | Fails if global/environment kill switch is enabled. |
 | P-003 | Market open | Requires Alpaca clock to report open. |
 | P-004 | Fresh data | Requires data age at most 600 seconds. |
-| P-005 | Symbol allowlist | Requires symbol in agent watchlist. |
+| P-005 | Symbol allowlist | Requires symbol in the agent's normalized watchlist (`normalize_watchlist` in `app/agent/watchlist.py`, #179), so a stored `aapl` allows `AAPL`. Normalizing never widens the list: any other symbol is denied, and an empty list denies every symbol. |
 | P-007 | Maximum allocation | BUY projected exposure in that symbol must be at most configured max, default 10% of equity. Per symbol by design (#156), so the caps can add up across a watchlist. |
 | P-008 | Available cash | BUY cost must fit cash minus configured reserve. The aggregate backstop: total deployment stays at about (1 − reserve) of equity; unfilled orders are not counted. |
 | P-009 | Sell ownership | SELL quantity cannot exceed owned long position. |
@@ -1037,8 +1046,8 @@ The direct order endpoint checks the kill switch, but it does not create the
 
 - `GET /agent/kill-switch`
 - `PUT /agent/kill-switch`
-- `GET /agent/config` (optional `?agent_id=`; `404` when the caller has no agent, never auto-provisions; a named `agent_id` the caller doesn't own is `404 "Agent not found"`)
-- `PATCH /agent/config` (optional `?agent_id=`; `watchlist` and/or `approval_mode` only)
+- `GET /agent/config` (optional `?agent_id=`; `404` when the caller has no agent, never auto-provisions; a named `agent_id` the caller doesn't own is `404 "Agent not found"`; returns the normalized watchlist)
+- `PATCH /agent/config` (optional `?agent_id=`; `watchlist` and/or `approval_mode` only; returns the normalized watchlist)
 - `POST /agent/cycles/run`
 - `GET /agent/cycles/{cycle_id}`
 - `GET /agent/approvals/pending`
@@ -1144,6 +1153,7 @@ async context-manager methods. Function locations are relative to `backend`.
 | `get_system_prompt` | `app/agent/prompt.py` | Returns only the rendered prompt text. |
 | `decision_proposal_json_schema` | `app/agent/tool_validation.py` | Exports the Pydantic JSON schema for structured LLM output. |
 | `validate_decision_proposal` | `app/agent/tool_validation.py` | Parses and validates raw LLM output as a proposal. |
+| `normalize_watchlist` | `app/agent/watchlist.py` | Returns the canonical watchlist (trimmed, upper-cased, de-duplicated, blanks dropped) used by the cycles, `GET`/`PATCH /agent/config` and P-005. |
 | `run_agent_cycle` | `app/agent/orchestrator.py` | Runs the complete collect, reason, validate, persist, approve/execute sequence. |
 | `evaluate_and_submit_cycle_trade` | `app/agent/approval.py` | Refreshes live state, evaluates policies, and submits an allowed order. |
 | `reconcile_uncertain_cycle` | `app/agent/approval.py` | Resolves a cycle whose broker result was uncertain. |
@@ -1156,7 +1166,8 @@ async context-manager methods. Function locations are relative to `backend`.
 | `get_kill_switch` | `app/agent/router.py` | Returns effective kill-switch state for an admin. |
 | `update_kill_switch` | `app/agent/router.py` | Changes database kill-switch state for an admin. |
 | `_get_owned_agent` | `app/agent/router.py` | Loads the caller's agent (oldest first, optionally by id and locked); shared by config and manual-cycle routes. |
-| `get_agent_config` | `app/agent/router.py` | Returns the caller's agent config, or `404` when there is none. |
+| `_agent_config_detail` | `app/agent/router.py` | Builds the `/agent/config` response with the normalized watchlist. |
+| `get_agent_config` | `app/agent/router.py` | Returns the caller's agent config (normalized watchlist), or `404` when there is none. |
 | `update_agent_config` | `app/agent/router.py` | Applies watchlist/approval-mode changes and audits them in one commit. |
 | `trigger_manual_cycle` | `app/agent/router.py` | Finds or provisions a default agent and runs a manual cycle. |
 | `get_cycle_status` | `app/agent/router.py` | Loads an owned cycle and its approval. |
