@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { ConnectAccountNotice } from "@/components/ui/connect-account-notice";
 import { AutoRefreshToggle } from "@/components/ui/auto-refresh-toggle";
 import { usePolling } from "@/lib/hooks/use-polling";
-import { keepLastGood, staleDataMessage } from "@/lib/live-refresh";
+import { keepLastGood, shouldStartPoll, staleDataMessage } from "@/lib/live-refresh";
 import { ManualOrderTicket, describeOrderError } from "./manual-order-ticket";
 
 const REFRESH_SECONDS = 15;
@@ -48,20 +48,21 @@ export function PositionsView() {
   const [live, setLive] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const latestLoad = useRef(0);
-  // True while a refresh is outstanding: a poll tick then skips instead of superseding it,
-  // so a refresh slower than the interval still lands.
-  const inFlight = useRef(false);
+  // When the outstanding refresh started (null when none): a poll tick skips while it is
+  // younger than the age limit, so a refresh slower than the interval still lands, and
+  // supersedes it after that, so a request that never settles cannot stop the polling.
+  const inFlightSince = useRef<number | null>(null);
 
   // Refreshes (the poll, or the reload after a manual order or Close) keep the page
   // mounted: values are swapped in place, so the ticket and Close confirmations survive.
   const load = useCallback(async () => {
     const request = ++latestLoad.current;
-    inFlight.current = true;
+    inFlightSince.current = Date.now();
     setRefreshing(true);
     const [positions, orders] = await Promise.allSettled([getPositions(), getOrders("open")]);
     // A newer refresh (an explicit reload after a manual order or Close) supersedes this one.
     if (request !== latestLoad.current) return;
-    inFlight.current = false;
+    inFlightSince.current = null;
     setRefreshing(false);
     const now = Date.now();
 
@@ -94,7 +95,7 @@ export function PositionsView() {
 
   usePolling(
     () => {
-      if (!inFlight.current) void load();
+      if (shouldStartPoll(inFlightSince.current, Date.now())) void load();
     },
     REFRESH_SECONDS * 1000,
     live,

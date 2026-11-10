@@ -214,6 +214,25 @@ describe("PositionsView live refresh in place (#164)", () => {
     expect(mockPositions).toHaveBeenCalledTimes(3);
   });
 
+  it("supersedes a refresh that never settles once it passes the age limit", async () => {
+    render(<PositionsView />);
+    await screen.findByText("$335.00");
+
+    mockPositions.mockReturnValueOnce(new Promise(() => {})); // never settles
+    await advancePoll(); // t = 15 s: the stuck refresh starts
+    expect(mockPositions).toHaveBeenCalledTimes(2);
+
+    await advancePoll(); // t = 30 s: 15 s old, skipped
+    await advancePoll(); // t = 45 s: 30 s old, skipped
+    expect(mockPositions).toHaveBeenCalledTimes(2);
+
+    mockPositions.mockResolvedValueOnce([position({ current_price: "340", market_value: "3400" })]);
+    await advancePoll(); // t = 60 s: 45 s old, superseded by a new refresh
+    expect(mockPositions).toHaveBeenCalledTimes(3);
+    expect(await screen.findByText("$340.00")).toBeTruthy();
+    expect(livePill().getAttribute("aria-busy")).toBeNull();
+  });
+
   it("lets a reload after a manual order supersede a poll still in flight", async () => {
     mockCreateOrder.mockResolvedValue({ id: "o9", status: "accepted" } as AlpacaOrder);
     render(<PositionsView />);

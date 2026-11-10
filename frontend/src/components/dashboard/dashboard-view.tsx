@@ -25,7 +25,7 @@ import { Badge } from "@/components/ui/badge";
 import { ConnectAccountNotice } from "@/components/ui/connect-account-notice";
 import { AutoRefreshToggle } from "@/components/ui/auto-refresh-toggle";
 import { usePolling } from "@/lib/hooks/use-polling";
-import { keepLastGood, staleDataMessage } from "@/lib/live-refresh";
+import { keepLastGood, shouldStartPoll, staleDataMessage } from "@/lib/live-refresh";
 
 const REFRESH_SECONDS = 15;
 
@@ -61,14 +61,15 @@ export function DashboardView() {
   const [live, setLive] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const latestLoad = useRef(0);
-  // True while a refresh is outstanding: a poll tick then skips instead of superseding it,
-  // so a refresh slower than the interval still lands.
-  const inFlight = useRef(false);
+  // When the outstanding refresh started (null when none): a poll tick skips while it is
+  // younger than the age limit, so a refresh slower than the interval still lands, and
+  // supersedes it after that, so a request that never settles cannot stop the polling.
+  const inFlightSince = useRef<number | null>(null);
 
   // Refreshes keep the page mounted and swap the values in place (#164).
   const load = useCallback(async () => {
     const request = ++latestLoad.current;
-    inFlight.current = true;
+    inFlightSince.current = Date.now();
     setRefreshing(true);
     const [account, positions, cycles, scheduler] = await Promise.allSettled([
       getAccount(),
@@ -78,7 +79,7 @@ export function DashboardView() {
     ]);
     // Defensive: if a newer refresh was started meanwhile, its answer wins.
     if (request !== latestLoad.current) return;
-    inFlight.current = false;
+    inFlightSince.current = null;
     setRefreshing(false);
     const now = Date.now();
 
@@ -117,7 +118,7 @@ export function DashboardView() {
 
   usePolling(
     () => {
-      if (!inFlight.current) void load();
+      if (shouldStartPoll(inFlightSince.current, Date.now())) void load();
     },
     REFRESH_SECONDS * 1000,
     live,

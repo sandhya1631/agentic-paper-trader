@@ -228,6 +228,24 @@ describe("DashboardView live refresh in place (#164)", () => {
     expect(mockAccount).toHaveBeenCalledTimes(3);
   });
 
+  it("supersedes a refresh that never settles once it passes the age limit", async () => {
+    render(<DashboardView />);
+    await screen.findByText("$100,000.00");
+
+    mockAccount.mockReturnValueOnce(new Promise(() => {})); // never settles
+    await advancePoll(); // t = 15 s: the stuck refresh starts
+    expect(mockAccount).toHaveBeenCalledTimes(2);
+
+    await advancePoll(); // t = 30 s: 15 s old, skipped
+    await advancePoll(); // t = 45 s: 30 s old, skipped
+    expect(mockAccount).toHaveBeenCalledTimes(2);
+
+    mockAccount.mockResolvedValueOnce(account({ portfolio_value: "101500" }) as Account);
+    await advancePoll(); // t = 60 s: 45 s old, superseded by a new refresh
+    expect(mockAccount).toHaveBeenCalledTimes(3);
+    expect(await screen.findByText("$101,500.00")).toBeTruthy();
+  });
+
   it("keeps the last good data with a non-blocking note when a refresh fails", async () => {
     render(<DashboardView />);
     await screen.findByText("$100,000.00");
