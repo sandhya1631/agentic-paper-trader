@@ -224,7 +224,8 @@ async def run_scheduled_cycles(
                 attempted_agents += 1
                 # Evaluate the whole watchlist this tick (one cycle per symbol).
                 # The sweep expires stale approvals and runs the active-cycle gate
-                # itself (on its first symbol), so scheduled ticks get it for free.
+                # itself (once, before any broker read), so scheduled ticks get it
+                # for free.
                 await run_watchlist_cycles(
                     agent_id,
                     db,
