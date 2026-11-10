@@ -20,6 +20,7 @@ from httpx import AsyncClient
 from sqlalchemy import func, select
 
 from app.agent.orchestrator import run_watchlist_cycles
+from app.agent.watchlist import normalize_watchlist
 from app.core.constants import DEFAULT_WATCHLIST, MAX_WATCHLIST_SIZE
 from app.db.enums import ApprovalMode, CycleStatus, CycleTrigger, PolicyDecisionType, UserRole
 from app.db.models import (
@@ -195,6 +196,61 @@ async def test_get_agent_config_returns_fields(client: AsyncClient):
     explicit = await client.get(f"/agent/config?agent_id={agent_id}", headers=_auth(token))
     assert explicit.status_code == 200
     assert explicit.json() == body
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        pytest.param(["aapl", "AAPL", "nvda"], ["AAPL", "NVDA"], id="case-and-duplicates"),
+        pytest.param([" spy ", "", "  ", "Msft"], ["SPY", "MSFT"], id="whitespace-and-blanks"),
+        pytest.param(["NVDA", "AAPL"], ["NVDA", "AAPL"], id="already-canonical-keeps-order"),
+        pytest.param([], [], id="empty"),
+        pytest.param(None, [], id="none"),
+    ],
+)
+def test_normalize_watchlist(stored: list[str] | None, expected: list[str]):
+    assert normalize_watchlist(stored) == expected
+
+
+@pytest.mark.asyncio
+async def test_get_agent_config_returns_normalized_watchlist(client: AsyncClient):
+    """#179: a stored list from an earlier SQL edit (mixed case, duplicates) comes back
+    in the canonical form the cycles use, so the Settings card does not load dirty.
+    The stored row itself is not rewritten."""
+    email = "cfg-get-norm@example.com"
+    token = await _register_and_login(client, email)
+    agent_id = await _seed_agent_for(email, watchlist=["aapl", "AAPL", "nvda"])
+
+    response = await client.get("/agent/config", headers=_auth(token))
+
+    assert response.status_code == 200
+    assert response.json()["watchlist"] == ["AAPL", "NVDA"]
+    agent = await _load_agent(agent_id)
+    assert agent.watchlist == ["aapl", "AAPL", "nvda"]
+    assert agent.version == 1
+    assert await _audit_events() == []
+
+
+@pytest.mark.asyncio
+async def test_patch_approval_mode_returns_normalized_watchlist(client: AsyncClient):
+    """#179: a PATCH that leaves the watchlist alone also answers with the normalized
+    list, so the card is not dirty again right after saving; only the mode changes."""
+    email = "cfg-patch-norm@example.com"
+    token = await _operator(client, email)
+    agent_id = await _seed_agent_for(email, watchlist=["aapl", "AAPL", "nvda"])
+
+    response = await client.patch(
+        "/agent/config", json={"approval_mode": "OBSERVE_ONLY"}, headers=_auth(token)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["watchlist"] == ["AAPL", "NVDA"]
+    assert response.json()["approval_mode"] == "OBSERVE_ONLY"
+    agent = await _load_agent(agent_id)
+    assert agent.watchlist == ["aapl", "AAPL", "nvda"]
+    events = await _audit_events()
+    assert len(events) == 1
+    assert set(events[0].details["changes"]) == {"approval_mode"}
 
 
 @pytest.mark.asyncio

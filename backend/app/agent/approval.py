@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.credential_vault import get_decrypted_alpaca_credentials
+from app.agent.watchlist import normalize_watchlist
 from app.broker.alpaca import AlpacaClient, fetch_all_orders
 from app.broker.gateway import submit_approved_order
 from app.broker.reconcile import reconcile_order
@@ -165,7 +166,10 @@ async def evaluate_and_submit_cycle_trade(
             data_age_seconds=data_age_seconds,
             daily_pnl_pct=daily_pnl_pct,
             is_paper=account.is_paper,
-            watchlist=set(agent.watchlist),
+            # P-005 compares the upper-case Ticker against the same canonical list the
+            # prompt and the sweep use (#179), so a stored ["aapl"] still allows AAPL. An
+            # empty list stays an empty set: P-005 then denies every symbol.
+            watchlist=set(normalize_watchlist(agent.watchlist)),
             max_orders_per_day=settings.max_orders_per_day,
         )
         decision = evaluate_policies(policy_context)

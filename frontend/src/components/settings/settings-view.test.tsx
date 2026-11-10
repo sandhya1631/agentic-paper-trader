@@ -147,6 +147,7 @@ beforeEach(() => {
   mockConstants.mockResolvedValue({
     approval_mode: ["OBSERVE_ONLY", "REQUIRED", "AUTO"],
     max_watchlist_size: 20,
+    default_watchlist: ["AAPL", "NVDA", "SPY"],
   } as never);
 });
 afterEach(() => cleanup());

@@ -43,6 +43,7 @@ from app.agent.context import build_agent_context
 from app.agent.live_context import UNSET, LiveAccountData, Unset, fetch_live_account_data
 from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
+from app.agent.watchlist import normalize_watchlist
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
 from app.core.constants import ACTIVE_CYCLE_STATUSES, POLICY_VERSION
@@ -70,18 +71,6 @@ class CycleOverlapError(Exception):
 _AGENT_LOCK_SQL = text("SELECT pg_try_advisory_xact_lock(:key)").bindparams(
     bindparam("key", type_=BigInteger)
 )
-
-
-def _normalized_watchlist(watchlist: list[str] | None) -> list[str]:
-    """The watchlist in the canonical form the Ticker type produces: trimmed, upper-case,
-    de-duplicated (first occurrence kept) and without blanks.
-
-    Used by both entry points (a manual cycle and a scheduled sweep), so a cycle collects
-    market data and builds its context for each distinct symbol exactly once, and one
-    sweep never evaluates (or orders) the same symbol twice.
-    """
-    symbols = (str(s).strip().upper() for s in (watchlist or []))
-    return list(dict.fromkeys(s for s in symbols if s))
 
 
 def _agent_lock_key(agent_id: uuid.UUID) -> int:
@@ -255,7 +244,7 @@ async def _run_agent_cycle(
         await db.commit()
 
         # 4. Collect Market Data (reuse caller-provided bars for a watchlist sweep)
-        symbols = _normalized_watchlist(agent.watchlist)
+        symbols = normalize_watchlist(agent.watchlist)
         if bars_per_symbol is None:
             if collector is None:
                 try:
@@ -553,7 +542,7 @@ async def _run_watchlist_cycles(
     # Canonical, de-duplicated symbols (the same helper the per-symbol cycle uses), so
     # the scope guard compares one consistent form and one sweep never evaluates (or
     # orders) the same symbol twice.
-    symbols = _normalized_watchlist(agent.watchlist)
+    symbols = normalize_watchlist(agent.watchlist)
     if not symbols:
         return []
 

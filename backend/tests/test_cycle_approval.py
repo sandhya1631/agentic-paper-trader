@@ -140,6 +140,59 @@ async def test_approved_cycle_trade_uses_live_risk_data_before_submission(monkey
     assert approved_order.quantity == 1
 
 
+def _p005(decision):
+    return next(e for e in decision.evaluations if e.policy_id == "P-005")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored_watchlist",
+    [
+        pytest.param(["aapl", "AAPL", "nvda"], id="lowercase-and-duplicates"),
+        pytest.param(["aapl", "nvda"], id="lowercase-only"),
+    ],
+)
+async def test_p005_allows_a_symbol_in_a_watchlist_stored_unnormalized(
+    monkeypatch, stored_watchlist
+):
+    """#179: P-005 checks the canonical watchlist the prompt and the sweep use, so a
+    row stored un-normalized (an earlier SQL edit) still allows AAPL."""
+    db, agent, cycle, client = _trade_fixtures(monkeypatch, market_open=True)
+    agent.watchlist = stored_watchlist
+    submit_order = AsyncMock()
+    monkeypatch.setattr(approval, "submit_approved_order", submit_order)
+
+    decision, submitted = await approval.evaluate_and_submit_cycle_trade(
+        db, agent, cycle, submit=False
+    )
+
+    assert _p005(decision).outcome == "PASS"
+    assert _p005(decision).evidence["watchlist"] == ["AAPL", "NVDA"]
+    assert decision.decision == "ALLOW"
+    assert submitted is None
+    submit_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_p005_denies_a_symbol_outside_a_watchlist_stored_unnormalized(monkeypatch):
+    db, agent, cycle, client = _trade_fixtures(monkeypatch, market_open=True)
+    agent.watchlist = ["aapl", "AAPL", "nvda"]
+    cycle.proposal_json["symbol"] = "MSFT"
+    submit_order = AsyncMock()
+    monkeypatch.setattr(approval, "submit_approved_order", submit_order)
+
+    decision, submitted = await approval.evaluate_and_submit_cycle_trade(
+        db, agent, cycle, submit=False
+    )
+
+    assert _p005(decision).outcome == "FAIL"
+    assert _p005(decision).evidence["watchlist"] == ["AAPL", "NVDA"]
+    assert decision.decision == "DENY"
+    assert decision.policy_token is None
+    assert submitted is None
+    submit_order.assert_not_awaited()
+
+
 def _open_order(symbol: str, status: str = "accepted"):
     return SimpleNamespace(symbol=symbol, status=status, submitted_at=None)
 

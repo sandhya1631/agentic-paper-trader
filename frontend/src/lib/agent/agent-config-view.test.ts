@@ -124,6 +124,16 @@ describe("buildConfigPatch", () => {
       approval_mode: "AUTO",
     });
   });
+
+  it("is empty for an untouched draft of the normalized list GET /agent/config returns (#179)", () => {
+    // A row stored as ["aapl", "AAPL", "nvda"] (an earlier SQL edit) is served normalized.
+    const saved = { watchlist: ["AAPL", "NVDA"], approval_mode: "REQUIRED" };
+    expect(buildConfigPatch(saved, { watchlist: [...saved.watchlist], approval_mode: "REQUIRED" })).toEqual({});
+    // Editing still produces a patch, and the de-duplicated list is what gets sent.
+    expect(
+      buildConfigPatch(saved, { watchlist: [...saved.watchlist, "msft", "aapl"], approval_mode: "REQUIRED" }),
+    ).toEqual({ watchlist: ["AAPL", "NVDA", "MSFT"] });
+  });
 });
 
 describe("approval modes", () => {

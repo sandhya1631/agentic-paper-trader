@@ -22,6 +22,7 @@ describe("getConstants", () => {
       approval_mode: ["AUTO", "REQUIRED", "OBSERVE_ONLY"],
       approval_status: ["PENDING", "APPROVED", "REJECTED"],
       max_watchlist_size: 20,
+      default_watchlist: ["AAPL", "NVDA", "SPY"],
     };
     mockedApi.get.mockResolvedValue(constants);
 

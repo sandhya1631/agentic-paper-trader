@@ -21,6 +21,7 @@ from sqlalchemy.orm import selectinload
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
+from app.agent.watchlist import normalize_watchlist
 from app.audit import record_audit_event
 from app.auth.dependencies import get_current_user, require_operator
 from app.broker.gateway import TradingDisabledError
@@ -216,6 +217,18 @@ async def _get_owned_agent(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+def _agent_config_detail(agent: AgentConfig) -> AgentConfigDetailRead:
+    """The GET/PATCH /agent/config response, with the watchlist normalized (#179).
+
+    A stored list may predate the PATCH validation (e.g. `["aapl", "AAPL"]` from an
+    earlier SQL edit). Returning the canonical list the cycles actually use (trimmed,
+    upper-case, de-duplicated) keeps the Settings card from loading with unsaved
+    changes; the stored row itself is left as it is.
+    """
+    detail = AgentConfigDetailRead.model_validate(agent)
+    return detail.model_copy(update={"watchlist": normalize_watchlist(agent.watchlist)})
+
+
 @router.get(
     "/config",
     response_model=AgentConfigDetailRead,
@@ -230,7 +243,7 @@ async def get_agent_config(
     agent = await _get_owned_agent(db, current_user.id, agent_id)
     if agent is None:
         raise _agent_config_not_found(agent_id)
-    return AgentConfigDetailRead.model_validate(agent)
+    return _agent_config_detail(agent)
 
 
 @router.patch(
@@ -280,7 +293,7 @@ async def update_agent_config(
         )
         await db.commit()
         await db.refresh(agent)
-    return AgentConfigDetailRead.model_validate(agent)
+    return _agent_config_detail(agent)
 
 
 @router.post(
