@@ -22,8 +22,9 @@ allows CORS from `http://localhost:3000`. Every API call carries the Bearer JWT;
 ## 1. Sign in and promote the demo user
 - Go to `http://localhost:3000/register`, create a user, then log in at `/login`.
 - A fresh user has role **VIEWER**: read-only. Trigger Now, Start schedule, Approve/Reject and
-  agent-config edits need **OPERATOR** or **ADMIN** (Settings shows those controls disabled with an
-  "only operators and admins" note). There is no role UI yet, so promote the user once in SQL:
+  agent-config edits need **OPERATOR** or **ADMIN**. Settings shows Trigger Now, Start schedule and
+  the agent-config card disabled with an "only operators and admins" note; on the Approvals page the
+  API refuses a VIEWER's Approve/Reject (403). There is no role UI yet, so promote the user once in SQL:
 
   ```powershell
   docker exec apt-postgres psql -U <POSTGRES_USER> -d <POSTGRES_DB> -c "UPDATE users SET role='ADMIN' WHERE email='<you>';"
