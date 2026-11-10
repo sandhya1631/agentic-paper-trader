@@ -205,6 +205,8 @@ function SchedulerCard() {
       setSchedule(status.schedules[0] ?? null);
       if (status.schedules[0]) {
         setAgentId(status.schedules[0].agent_id);
+        // Pre-fill the restart form with the last interval (#163).
+        setIntervalMinutes(status.schedules[0].interval_minutes);
       } else {
         // Derive the user's agent id from their latest cycle, if any.
         const cycles = await listCycles({ limit: 1 });
@@ -250,13 +252,15 @@ function SchedulerCard() {
     }
   }
 
+  // Branch on the scheduler's running state, not on whether a schedule row exists: Stop keeps
+  // the row (it only pauses the user), so a stopped schedule must offer Start again (#163).
+  const isRunning = Boolean(schedule?.enabled && running);
+
   return (
     <section className="rounded-xl border border-border bg-surface p-5">
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold">Autonomous schedule</h3>
-        <Badge tone={schedule?.enabled && running ? "positive" : "neutral"}>
-          {schedule?.enabled && running ? "Running" : "Stopped"}
-        </Badge>
+        <Badge tone={isRunning ? "positive" : "neutral"}>{isRunning ? "Running" : "Stopped"}</Badge>
       </div>
       <p className="mt-1 text-sm text-muted">
         Run the agent automatically on an interval. Scheduled ticks are skipped while the market is
@@ -271,7 +275,7 @@ function SchedulerCard() {
 
       {loading ? (
         <p className="mt-2 text-sm text-muted">Loading schedule...</p>
-      ) : schedule ? (
+      ) : schedule && isRunning ? (
         <div className="mt-2 space-y-2 text-sm">
           <p className="text-muted">
             Every {schedule.interval_minutes} min · next run {formatDateTime(schedule.next_run_time)}

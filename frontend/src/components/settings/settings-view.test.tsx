@@ -416,3 +416,89 @@ describe("Kill-switch history", () => {
     expect(await screen.findByRole("alert")).toBeTruthy();
   });
 });
+
+describe("Schedule card states (#163)", () => {
+  function scheduleRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "s1",
+      agent_id: "a1",
+      interval_minutes: 30,
+      enabled: true,
+      next_run_time: null,
+      ...overrides,
+    };
+  }
+  const running = (interval = 30) =>
+    schedStatus({ running: true, schedules: [scheduleRow({ interval_minutes: interval })] });
+  // Stop keeps the schedule row and only pauses the user, so the row is still listed.
+  const stopped = (interval = 30) =>
+    schedStatus({
+      running: false,
+      schedules: [scheduleRow({ interval_minutes: interval, enabled: false })],
+    });
+
+  it("asks for a cycle first when there is no agent yet", async () => {
+    // Someone who can trigger the first cycle (a VIEWER can't, so gets another message).
+    mockMe.mockResolvedValue({ id: "u1", email: "o@example.com", role: "OPERATOR" });
+    render(<SettingsView />);
+
+    expect(await screen.findByText(/trigger a cycle first/i)).toBeTruthy();
+    expect(screen.queryByLabelText("Interval (min)")).toBeNull();
+    expect(screen.queryByRole("button", { name: /start schedule/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /stop schedule/i })).toBeNull();
+  });
+
+  it("shows Stop and no interval input while running", async () => {
+    mockSchedStatus.mockResolvedValue(running());
+    render(<SettingsView />);
+
+    expect(await screen.findByRole("button", { name: /stop schedule/i })).toBeTruthy();
+    expect(screen.getByText("Running")).toBeTruthy();
+    expect(screen.getByText(/every 30 min/i)).toBeTruthy();
+    expect(screen.queryByLabelText("Interval (min)")).toBeNull();
+    expect(screen.queryByRole("button", { name: /start schedule/i })).toBeNull();
+  });
+
+  it("offers Start pre-filled with the last interval once stopped", async () => {
+    mockSchedStatus.mockResolvedValue(stopped(30));
+    render(<SettingsView />);
+
+    const input = (await screen.findByLabelText("Interval (min)")) as HTMLInputElement;
+    expect(input.value).toBe("30");
+    expect(screen.getByRole("button", { name: /start schedule/i })).toBeTruthy();
+    expect(screen.getByText("Stopped")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /stop schedule/i })).toBeNull();
+  });
+
+  it("stops, then restarts at a new interval without a reload", async () => {
+    mockMe.mockResolvedValue({ id: "u1", email: "o@example.com", role: "OPERATOR" });
+    mockSchedStatus
+      .mockResolvedValueOnce(running(30))
+      .mockResolvedValueOnce(stopped(30))
+      .mockResolvedValue(running(45));
+    mockStop.mockResolvedValue({ ...scheduleRow({ enabled: false }), last_tick: null });
+    mockStart.mockResolvedValue({
+      schedule: { ...scheduleRow({ interval_minutes: 45 }), last_tick: null },
+      status_url: "/agent/scheduler/status",
+    });
+    render(<SettingsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /stop schedule/i }));
+    await waitFor(() => expect(mockStop).toHaveBeenCalledWith("s1"));
+
+    const input = (await screen.findByLabelText("Interval (min)")) as HTMLInputElement;
+    expect(input.value).toBe("30");
+    expect(screen.getByText("Stopped")).toBeTruthy();
+    fireEvent.change(input, { target: { value: "45" } });
+    const start = screen.getByRole("button", { name: /start schedule/i }) as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+    fireEvent.click(start);
+
+    await waitFor(() => expect(mockStart).toHaveBeenCalledWith("a1", 45));
+    expect(await screen.findByText(/every 45 min/i)).toBeTruthy();
+    expect(screen.getByText("Running")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /stop schedule/i })).toBeTruthy();
+    expect(screen.queryByLabelText("Interval (min)")).toBeNull();
+    expect(mockSchedStatus).toHaveBeenCalledTimes(3);
+  });
+});
