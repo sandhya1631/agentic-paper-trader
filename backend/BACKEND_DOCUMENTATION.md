@@ -239,7 +239,9 @@ change only `watchlist` and `approval_mode` with `PATCH /agent/config` (#141).
 Symbols are trimmed, upper-cased and de-duplicated in order, then pattern-checked,
 and the de-duplicated list must hold 1 to `MAX_WATCHLIST_SIZE` (20) symbols (so a
 repeated symbol never counts twice toward the cap); the cap is exposed as
-`max_watchlist_size` by `GET /meta/constants`. Every other field, including
+`max_watchlist_size` by `GET /meta/constants`, next to `default_watchlist`
+(`DEFAULT_WATCHLIST`, the list a new agent starts with, which the Market page
+shows until the user has an agent, #165). Every other field, including
 `cadence_minutes` and the allocation/risk limits, is rejected with `422`. Each
 change increments `version` and writes one `audit_events` row in the same commit.
 Each cycle re-reads the row, so the next manual or scheduled cycle uses the new

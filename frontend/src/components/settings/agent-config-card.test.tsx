@@ -52,6 +52,7 @@ const CONSTANTS: Constants = {
   approval_mode: ["OBSERVE_ONLY", "REQUIRED", "AUTO"],
   approval_status: ["PENDING", "APPROVED", "REJECTED"],
   max_watchlist_size: 20,
+  default_watchlist: ["AAPL", "NVDA", "SPY"],
 };
 
 function snapshot(overrides: Partial<MarketSnapshot> = {}): MarketSnapshot {
