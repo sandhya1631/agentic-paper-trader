@@ -39,6 +39,7 @@ from app.agent.approval import (
     reconcile_uncertain_cycle,
 )
 from app.agent.context import build_agent_context
+from app.agent.knowledge import retrieve_knowledge
 from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.broker.alpaca import AlpacaClient
@@ -136,6 +137,10 @@ def _enforce_context_window(
     # If the payload is still above the configured window, keep the target-only
     # market summary and lose the least critical non-decision metadata.
     estimated_tokens, _ = snapshot()
+    if estimated_tokens > model_window_tokens:
+        context.pop("knowledge", None)
+        estimated_tokens, _ = snapshot()
+
     if estimated_tokens > model_window_tokens:
         context["market"] = {
             decision_target: context["market"].get(decision_target, {})
@@ -439,6 +444,10 @@ async def run_agent_cycle(
         }
         context["strategy_version"] = selected_strategy
         context["versions"]["strategy"] = selected_strategy
+        context["knowledge"] = retrieve_knowledge(
+            strategy_version=selected_strategy,
+            market=context.get("market", {}),
+        )
         cycle.prompt_version = selected_strategy
         cycle.prompt_revision = prompt_definition.revision
         context = _enforce_context_window(

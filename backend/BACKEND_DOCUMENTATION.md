@@ -592,7 +592,19 @@ cycle record stores the actual selected prompt version for auditability.
 The prompt is guidance only. The Pydantic proposal validator and deterministic
 policies are authoritative.
 
-### 5.5 Proposal validation
+### 5.5 Curated strategy knowledge
+
+The orchestrator retrieves at most three short, local entries from
+`app/agent/knowledge.py` and adds them to the model context under `knowledge`.
+Entries cover data-quality risk, capital preservation, trend following,
+mean-reversion, and breakout confirmation. Retrieval is deterministic from the
+selected strategy, market regime, and relative volume; it does not scrape the
+internet or call an external knowledge service. Knowledge is advisory only and
+cannot override prompt HOLD mandates, schema validation, policy checks, or
+broker safeguards. If the context-window guard needs more space, knowledge is
+removed before decision-critical market and account fields are reduced.
+
+### 5.6 Proposal validation
 
 The LLM may return only a `DecisionProposal`:
 

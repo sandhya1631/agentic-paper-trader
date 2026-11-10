@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.approval import reconcile_uncertain_cycle
 from app.agent.context import build_agent_context
+from app.agent.knowledge import retrieve_knowledge
 from app.agent.orchestrator import (
     CycleOverlapError,
     _enforce_context_window,
@@ -261,6 +262,21 @@ def test_dynamic_strategy_selection_uses_regime_and_volume():
 
     assert selected == "S-004"
     assert "volume" in reason
+
+
+def test_knowledge_retrieval_is_small_and_relevant():
+    entries = retrieve_knowledge(
+        strategy_version="S-004",
+        market={
+            "AAPL": {
+                "regime": "UPTREND",
+                "relative_volume_20": 1.8,
+            }
+        },
+    )
+
+    assert len(entries) <= 3
+    assert {entry["topic"] for entry in entries} >= {"risk", "breakout"}
 
 
 def test_build_agent_context_sanitizes_live_portfolio_data():

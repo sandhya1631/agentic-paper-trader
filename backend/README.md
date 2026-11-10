@@ -130,6 +130,10 @@ LLM_PROVIDER=ollama   # or "openai"
   explanation in the cycle snapshot. Use `GET /agent/strategies` to
   list options and `PUT /agent/{agent_id}/strategy` with `{"strategy_version":"DYNAMIC"}`
   or a fixed version to configure an agent.
+- Cycles include up to three short, curated knowledge entries selected from
+  market regime, relative volume, and strategy. This is local advisory guidance,
+  not internet retrieval, and it is dropped first if the context-window guard
+  needs more capacity.
 - `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
 
 #### Offline strategy replay
