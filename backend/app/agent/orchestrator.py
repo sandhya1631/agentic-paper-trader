@@ -1,10 +1,13 @@
 """Agent Cycle Orchestrator Engine.
 
 Orchestrates automated and manual agent cycles:
-  1. Rejects the request if this agent already has a non-terminal cycle in
-     progress (`CycleOverlapError`). A scheduled watchlist sweep
-     (`run_watchlist_cycles`) checks this once, on its first symbol, so its own
-     per-symbol cycles can coexist (e.g. several PENDING_APPROVAL in REQUIRED mode).
+  1. Takes the agent's cycle lock (`agent_cycle_lock`, a Postgres advisory lock), so a
+     manual run and a scheduled watchlist sweep (`run_watchlist_cycles`) for the same
+     agent never run concurrently; then rejects the request if this agent already has
+     a non-terminal cycle in progress (`CycleOverlapError`). A sweep holds the lock for
+     all of its symbols and checks the status gate once, before any market-data or
+     broker read, so a busy agent's tick makes no such calls and its own per-symbol
+     cycles can coexist (e.g. several PENDING_APPROVAL in REQUIRED mode).
   2. Creates an `AgentCycle` record in PostgreSQL (`PENDING`).
   3. Collects OHLCV market bars for the watchlist and calculates indicators.
   4. Builds sanitized context via `build_agent_context`.
@@ -17,32 +20,31 @@ Orchestrates automated and manual agent cycles:
       `llm_raw_response`, `proposal_json`) to PostgreSQL and marks status `SUCCESS` or `FAILED`.
 """
 
-import asyncio
+import contextlib
 import hashlib
 import json
 import logging
 import uuid
+from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import BigInteger, bindparam, select, text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
-from app.accounts.credential_vault import (
-    CredentialVaultError,
-    get_decrypted_alpaca_credentials,
-)
 from app.agent.approval import (
     evaluate_and_submit_cycle_trade,
     expire_pending_approvals,
+    persistable_policy_result,
     reconcile_uncertain_cycle,
 )
 from app.agent.context import build_agent_context
 from app.agent.knowledge import retrieve_knowledge
+from app.agent.live_context import UNSET, LiveAccountData, Unset, fetch_live_account_data
 from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
-from app.broker.alpaca import AlpacaClient
+from app.agent.watchlist import normalize_watchlist
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
 from app.core.constants import (
@@ -59,11 +61,10 @@ from app.db.enums import (
     DecisionAction,
     PolicyDecisionType,
 )
-from app.db.models import AgentConfig, AgentCycle, CycleApproval, TradingAccount, utcnow
+from app.db.models import AgentConfig, AgentCycle, CycleApproval, utcnow
 from app.llm.base import LLMClient
 from app.llm.factory import get_llm_client
 from app.market_data.alpaca_client import MarketDataCollector, create_market_data_collector
-from app.risk.market_hours import fetch_market_clock_for  # CHANGE 1: market clock helper
 from app.schemas import DecisionProposal
 
 logger = logging.getLogger(__name__)
@@ -229,71 +230,83 @@ def _select_dynamic_strategy(
     )
 
 
-async def _load_portfolio_context(
-    agent: AgentConfig, db: AsyncSession
-) -> dict[str, Any]:
-    """Fetch sanitized live portfolio data for the model context."""
-    account_id = getattr(agent, "account_id", None)
-    if account_id is None:
-        return {
-            "account": None,
-            "positions": [],
-            "open_orders": [],
-            "status": "UNAVAILABLE_NOT_CONFIGURED",
-        }
-    account_result = await db.execute(
-        select(TradingAccount).where(TradingAccount.id == account_id)
-    )
-    account = account_result.scalar_one_or_none()
-    if account is None or not account.is_connected:
-        return {
-            "account": None,
-            "positions": [],
-            "open_orders": [],
-            "status": "UNAVAILABLE_NOT_CONNECTED",
-        }
+_AGENT_LOCK_SQL = text("SELECT pg_try_advisory_xact_lock(:key)").bindparams(
+    bindparam("key", type_=BigInteger)
+)
 
-    try:
-        api_key, api_secret = await get_decrypted_alpaca_credentials(db, account.user_id)
-        settings = get_settings()
-        async with AlpacaClient(
-            api_key=api_key,
-            api_secret=api_secret,
-            base_url=settings.alpaca_paper_base_url,
-        ) as client:
-            account_state, positions, orders = await asyncio.gather(
-                client.get_account(),
-                client.get_positions(),
-                client.get_orders(status="open"),
-            )
-            # CHANGE 2: the clock is informational: if it fails the portfolio is still LIVE.
+
+def _agent_lock_key(agent_id: uuid.UUID) -> int:
+    """A signed 64-bit advisory-lock key for the agent, identical in every process."""
+    digest = hashlib.blake2b(b"agent-cycle:" + agent_id.bytes, digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+@contextlib.asynccontextmanager
+async def agent_cycle_lock(db: AsyncSession, agent_id: uuid.UUID) -> AsyncIterator[None]:
+    """Hold this agent's cycle lock for the block, or raise CycleOverlapError at once.
+
+    Serializes a manual run (API process) and a scheduled sweep (Celery worker) for
+    the same agent, so two concurrent cycles can never both submit an order. The
+    Postgres advisory lock lives in its own transaction on a dedicated connection that
+    stays open for the whole block: a lock taken on ``db`` itself would be released
+    by the cycle's first commit. Every exit path ends that transaction, so the lock
+    cannot leak. A release error (e.g. the connection dropped mid-run, which already
+    released the lock server-side) is logged, not raised, so a cycle that finished is
+    never reported as failed.
+    """
+    engine = db.bind
+    if not isinstance(engine, AsyncEngine):
+        raise RuntimeError("agent_cycle_lock requires a session bound to an AsyncEngine")
+    async with engine.connect() as conn:
+        lock_txn = await conn.begin()
+        try:
+            if not await conn.scalar(_AGENT_LOCK_SQL, {"key": _agent_lock_key(agent_id)}):
+                raise CycleOverlapError(f"Agent '{agent_id}' already has a cycle in progress")
+            yield
+        finally:
             try:
-                market_open: bool | None = bool((await fetch_market_clock_for(client)).is_open)
+                await lock_txn.rollback()  # ends the lock's transaction, releasing the lock
             except Exception:
-                market_open = None
-        return {
-            "account": account_state.model_dump(mode="json"),
-            "positions": [position.model_dump(mode="json") for position in positions],
-            "open_orders": [order.model_dump(mode="json") for order in orders],
-            "status": "LIVE",
-            "market_open": market_open,  # CHANGE 2
-        }
-    except CredentialVaultError:
-        logger.exception("Could not load encrypted Alpaca credentials for agent %s", agent.id)
-        return {
-            "account": None,
-            "positions": [],
-            "open_orders": [],
-            "status": "UNAVAILABLE_CREDENTIALS",
-        }
-    except Exception:
-        logger.exception("Could not load live portfolio context for agent %s", agent.id)
-        return {
-            "account": None,
-            "positions": [],
-            "open_orders": [],
-            "status": "UNAVAILABLE_BROKER",
-        }
+                logger.warning(
+                    "Agent %s: cycle-lock connection was lost before release",
+                    agent_id,
+                    exc_info=True,
+                )
+
+
+async def _enforce_no_active_cycle(db: AsyncSession, agent: AgentConfig) -> None:
+    """The active-cycle gate: raise CycleOverlapError if the agent is already busy.
+
+    Expires stale approvals first, so a forgotten PENDING_APPROVAL cycle doesn't block
+    a fresh attempt forever, then looks for a non-terminal cycle. A RECONCILING cycle
+    is reconciled against the broker once; if that resolves it, the agent is free.
+    Shared by both entry points: a manual cycle runs it inside ``_run_agent_cycle``,
+    and a watchlist sweep runs it once before its bar prefetch and live-account read,
+    so a busy agent's tick makes no market-data or account calls (#178).
+    """
+    await expire_pending_approvals(db, agent.id)
+    active_stmt = select(AgentCycle).where(
+        AgentCycle.agent_id == agent.id,
+        AgentCycle.status.in_(ACTIVE_CYCLE_STATUSES),
+    )
+    active_res = await db.execute(active_stmt)
+    active_cycle = active_res.scalars().first()
+    if active_cycle is not None and active_cycle.status == CycleStatus.RECONCILING:
+        try:
+            resolved = await reconcile_uncertain_cycle(db, agent, active_cycle)
+        except Exception:
+            logger.exception(
+                "Could not reconcile uncertain cycle %s; keeping it active",
+                active_cycle.id,
+            )
+            resolved = False
+        if resolved:
+            active_cycle = None
+    if active_cycle is not None:
+        raise CycleOverlapError(
+            f"Agent '{agent.id}' already has an active cycle "
+            f"'{active_cycle.id}' (status={active_cycle.status})"
+        )
 
 
 async def run_agent_cycle(
@@ -305,57 +318,73 @@ async def run_agent_cycle(
     collector: MarketDataCollector | None = None,
     target_symbol: str | None = None,
     bars_per_symbol: dict[str, list[Any]] | None = None,
-    portfolio_context: dict[str, Any] | None = None,
     enforce_no_overlap: bool = True,
+    account_data: LiveAccountData | None | Unset = UNSET,
 ) -> AgentCycle:
-    """Execute a single end-to-end agent decision cycle.
+    """Run one decision cycle while holding the agent's cycle lock.
+
+    Raises CycleOverlapError at once if another cycle or sweep for this agent holds
+    the lock. See ``_run_agent_cycle`` for the parameters.
+    """
+    async with agent_cycle_lock(db, agent_id):
+        return await _run_agent_cycle(
+            agent_id,
+            db,
+            trigger=trigger,
+            llm_client=llm_client,
+            collector=collector,
+            target_symbol=target_symbol,
+            bars_per_symbol=bars_per_symbol,
+            enforce_no_overlap=enforce_no_overlap,
+            account_data=account_data,
+        )
+
+
+async def _run_agent_cycle(
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    *,
+    trigger: CycleTrigger = CycleTrigger.MANUAL,
+    llm_client: LLMClient | None = None,
+    collector: MarketDataCollector | None = None,
+    target_symbol: str | None = None,
+    bars_per_symbol: dict[str, list[Any]] | None = None,
+    enforce_no_overlap: bool = True,
+    account_data: LiveAccountData | None | Unset = UNSET,
+) -> AgentCycle:
+    """Execute a single end-to-end agent decision cycle (caller holds the agent lock).
 
     When ``target_symbol`` is given, the decision is scoped to that symbol: the
     prompt is told to decide for it, and a proposal naming any other symbol is
     coerced to HOLD (never act on a symbol this cycle did not evaluate). When
     ``bars_per_symbol`` is supplied those bars are used instead of fetching, so a
     watchlist sweep fetches once. ``enforce_no_overlap`` runs the active-cycle
-    gate; a sweep runs it once (first symbol) and skips it for the rest, so one
-    tick can produce a cycle per symbol without each blocking the next.
+    gate; a sweep runs that gate itself, once, before its broker reads, and skips it
+    for every symbol, so one tick can produce a cycle per symbol without each
+    blocking the next.
+    ``account_data`` is the live paper account shown to the model; when omitted it is
+    fetched here, and a sweep passes it in so the broker is read once per tick.
+    ``None`` means "could not be read" and the context says UNAVAILABLE (never defaults).
     """
-    # 1. Fetch AgentConfig
-    stmt = select(AgentConfig).where(AgentConfig.id == agent_id)
+    # 1. Fetch AgentConfig. populate_existing re-reads the committed row even when the
+    # session already holds this agent (a sweep reuses one session), so a config change
+    # (PATCH /agent/config) applies to every later cycle, including the rest of a sweep.
+    stmt = (
+        select(AgentConfig)
+        .where(AgentConfig.id == agent_id)
+        .execution_options(populate_existing=True)
+    )
     res = await db.execute(stmt)
     agent = res.scalar_one_or_none()
     if not agent:
         raise ValueError(f"AgentConfig with id '{agent_id}' not found")
 
     # 2. Gate: reject if this agent already has an active cycle (no overlap).
-    # A watchlist sweep runs this gate once (first symbol) and skips it for the
-    # rest (enforce_no_overlap=False), so sequential per-symbol cycles in one
-    # tick don't block each other.
+    # A watchlist sweep runs this gate itself, once, before it reads the broker, and
+    # passes enforce_no_overlap=False for every symbol, so sequential per-symbol
+    # cycles in one tick don't block each other.
     if enforce_no_overlap:
-        # Expire stale approvals first so a forgotten PENDING_APPROVAL cycle
-        # doesn't block a fresh attempt forever - applies to every caller
-        # (manual trigger, scheduler tick), not just the scheduler's own tick.
-        await expire_pending_approvals(db, agent.id)
-        active_stmt = select(AgentCycle).where(
-            AgentCycle.agent_id == agent.id,
-            AgentCycle.status.in_(ACTIVE_CYCLE_STATUSES),
-        )
-        active_res = await db.execute(active_stmt)
-        active_cycle = active_res.scalars().first()
-        if active_cycle is not None and active_cycle.status == CycleStatus.RECONCILING:
-            try:
-                resolved = await reconcile_uncertain_cycle(db, agent, active_cycle)
-            except Exception:
-                logger.exception(
-                    "Could not reconcile uncertain cycle %s; keeping it active",
-                    active_cycle.id,
-                )
-                resolved = False
-            if resolved:
-                active_cycle = None
-        if active_cycle is not None:
-            raise CycleOverlapError(
-                f"Agent '{agent_id}' already has an active cycle "
-                f"'{active_cycle.id}' (status={active_cycle.status})"
-            )
+        await _enforce_no_active_cycle(db, agent)
 
     # 3. Create AgentCycle record (PENDING)
     initial_strategy = (
@@ -382,6 +411,7 @@ async def run_agent_cycle(
         await db.commit()
 
         # 4. Collect Market Data (reuse caller-provided bars for a watchlist sweep)
+        symbols = normalize_watchlist(agent.watchlist)
         if bars_per_symbol is None:
             if collector is None:
                 try:
@@ -394,7 +424,7 @@ async def run_agent_cycle(
                 try:
                     settings = get_settings()
                     bars_per_symbol = await collector.fetch_latest_bars(
-                        agent.watchlist,
+                        symbols,
                         limit=settings.default_bar_limit,
                         lookback_days=30,
                         validate=False,
@@ -403,17 +433,21 @@ async def run_agent_cycle(
                     logger.warning("Failed to fetch market bars for cycle: %s", exc)
 
         # 5. Build Context & Get Versioned Prompt
-        if portfolio_context is None:
-            portfolio_context = await _load_portfolio_context(agent, db)
+        # Real account, positions, open orders and market status for the model.
+        live = (
+            await fetch_live_account_data(db, agent)
+            if isinstance(account_data, Unset)
+            else account_data
+        )
         context = build_agent_context(
-            symbols=agent.watchlist,
+            symbols=symbols,
             bars_per_symbol=bars_per_symbol,
-            account_info=portfolio_context.get("account"),
-            positions=portfolio_context.get("positions"),
-            open_orders=portfolio_context.get("open_orders"),
+            account_info=live.account if live else None,
+            positions=live.positions if live else None,
+            open_orders=live.open_orders if live else None,
+            market_open=live.market_open if live else None,
             strategy_version=agent.strategy_version,
-            account_data_status=portfolio_context.get("status", "UNAVAILABLE"),
-            market_open=portfolio_context.get("market_open"),  # CHANGE 3
+            account_data_status="LIVE" if live else "UNAVAILABLE",
             max_data_age_seconds=get_settings().max_market_data_age_minutes * 60,
         )
         context["versions"] = {
@@ -471,7 +505,7 @@ async def run_agent_cycle(
             "model_window_tokens": model_window_tokens,
             "remaining_context_tokens": max(model_window_tokens - estimated_tokens, 0),
             "context_over_limit": estimated_tokens > model_window_tokens,
-            "symbols": len(agent.watchlist),
+            "symbols": len(symbols),
             "bars_used": bars_used,
             "account_data_status": context["account"]["data_status"],
             "context_truncated": bool(
@@ -602,9 +636,7 @@ async def run_agent_cycle(
             # runs again at approval time, so this never weakens the execution gate.
             if policy_preview is not None:
                 cycle.policy_decision = policy_preview.decision
-                cycle.policy_result_json = policy_preview.model_dump(
-                    mode="json", exclude={"policy_token"}
-                )
+                cycle.policy_result_json = persistable_policy_result(policy_preview)
             else:
                 cycle.policy_decision = PolicyDecisionType.NOT_EVALUATED
             approval = CycleApproval(
@@ -614,9 +646,7 @@ async def run_agent_cycle(
                 expires_at=utcnow() + timedelta(minutes=get_settings().approval_expiry_minutes),
                 policy_version=policy_preview.policy_version if policy_preview else None,
                 policy_result_json=(
-                    policy_preview.model_dump(mode="json", exclude={"policy_token"})
-                    if policy_preview
-                    else None
+                    persistable_policy_result(policy_preview) if policy_preview else None
                 ),
             )
             db.add(approval)
@@ -659,13 +689,12 @@ async def run_agent_cycle(
                 await db.refresh(cycle)
                 set_committed_value(cycle, "approval", None)
                 return cycle
-            context["policy_evaluation"] = policy_decision.model_dump(mode="json")
+            # The signed policy token stays in memory only; it is never stored (#175).
+            context["policy_evaluation"] = persistable_policy_result(policy_decision)
             # Persist the same decision the execution gate just produced (#121) - this is
             # a read-only copy for audit/query, not a second evaluation.
             cycle.policy_decision = policy_decision.decision
-            cycle.policy_result_json = policy_decision.model_dump(
-                mode="json", exclude={"policy_token"}
-            )
+            cycle.policy_result_json = persistable_policy_result(policy_decision)
             if broker_order is None:
                 cycle.status = CycleStatus.REJECTED
                 cycle.failure_code = "POLICY_DENIED"
@@ -707,27 +736,52 @@ async def run_watchlist_cycles(
     llm_client: LLMClient | None = None,
     collector: MarketDataCollector | None = None,
 ) -> list[AgentCycle]:
-    """Run one decision cycle per watchlist symbol in a single tick.
+    """Run a watchlist sweep while holding the agent's cycle lock for all of it.
+
+    Raises CycleOverlapError at once if another cycle or sweep for this agent holds
+    the lock. See ``_run_watchlist_cycles`` for the sweep itself.
+    """
+    async with agent_cycle_lock(db, agent_id):
+        return await _run_watchlist_cycles(
+            agent_id, db, trigger=trigger, llm_client=llm_client, collector=collector
+        )
+
+
+async def _run_watchlist_cycles(
+    agent_id: uuid.UUID,
+    db: AsyncSession,
+    *,
+    trigger: CycleTrigger = CycleTrigger.SCHEDULED,
+    llm_client: LLMClient | None = None,
+    collector: MarketDataCollector | None = None,
+) -> list[AgentCycle]:
+    """Run one decision cycle per watchlist symbol in a single tick (caller holds the lock).
 
     This is what makes the agent evaluate its whole watchlist instead of a single
     (historically AAPL-anchored) symbol. Market bars are fetched once for the
     watchlist and reused across the per-symbol cycles. The active-cycle gate runs
-    once (on the first symbol); if the agent already has a cycle in progress,
-    CycleOverlapError propagates and no symbols run - matching the previous
-    per-agent scheduled behaviour. A failing symbol is logged (its cycle is persisted
-    as FAILED) and the sweep continues; if every symbol fails, the last error is
-    re-raised so the scheduler counts the agent as failed.
+    once, before the bar prefetch and the live-account read; if the agent already has
+    a cycle in progress, CycleOverlapError propagates and no symbols run, without a
+    single market-data or broker call (#178). The per-symbol cycles skip the gate, so
+    an approval one symbol parks never blocks the next. A failing symbol is logged (its
+    cycle is persisted as FAILED) and the sweep continues; if every symbol fails, the
+    last error is re-raised so the scheduler counts the agent as failed.
     """
     agent_res = await db.execute(select(AgentConfig).where(AgentConfig.id == agent_id))
     agent = agent_res.scalar_one_or_none()
     if agent is None:
         raise ValueError(f"AgentConfig with id '{agent_id}' not found")
 
-    # Normalize to the canonical upper-case form the Ticker type produces, so the
-    # per-symbol scope guard and P-005 compare against one consistent form.
-    symbols = [str(s).strip().upper() for s in (agent.watchlist or [])]
+    # Canonical, de-duplicated symbols (the same helper the per-symbol cycle uses), so
+    # the scope guard compares one consistent form and one sweep never evaluates (or
+    # orders) the same symbol twice.
+    symbols = normalize_watchlist(agent.watchlist)
     if not symbols:
         return []
+
+    # Gate once per sweep, before any market-data or broker read: a busy agent (e.g.
+    # parked in PENDING_APPROVAL) raises CycleOverlapError here and costs no calls.
+    await _enforce_no_active_cycle(db, agent)
 
     # Fetch bars once for the whole watchlist; per-symbol cycles reuse them.
     bars_per_symbol: dict[str, list[Any]] = {}
@@ -749,12 +803,14 @@ async def run_watchlist_cycles(
             logger.warning("Watchlist sweep: bar prefetch failed: %s", exc)
             bars_per_symbol = {}
 
-    portfolio_context = await _load_portfolio_context(agent, db)
+    # Read the live account once per tick; every per-symbol cycle reuses it.
+    live_account_data = await fetch_live_account_data(db, agent)
+
     cycles: list[AgentCycle] = []
     last_error: Exception | None = None
-    for index, symbol in enumerate(symbols):
+    for symbol in symbols:
         try:
-            cycle = await run_agent_cycle(
+            cycle = await _run_agent_cycle(
                 agent_id,
                 db,
                 trigger=trigger,
@@ -762,16 +818,12 @@ async def run_watchlist_cycles(
                 collector=collector,
                 target_symbol=symbol,
                 bars_per_symbol=bars_per_symbol,
-                portfolio_context=portfolio_context,
-                # Gate once on the first symbol; the rest are sequential and must not
-                # block on an approval/execution the first symbol may have left active.
-                enforce_no_overlap=(index == 0),
+                account_data=live_account_data,
+                # The sweep already ran the gate; the symbols are sequential and must
+                # not block on an approval/execution an earlier symbol left active.
+                enforce_no_overlap=False,
             )
             cycles.append(cycle)
-        except CycleOverlapError:
-            # Only the first symbol runs the gate, so this means the agent is already
-            # busy: skip the whole tick, matching the previous per-agent behaviour.
-            raise
         except Exception as exc:
             # One symbol's transient failure (e.g. LLM timeout) must not drop the
             # rest of the watchlist for this tick.

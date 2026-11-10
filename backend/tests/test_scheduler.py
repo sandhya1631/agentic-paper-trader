@@ -22,6 +22,7 @@ from app.db.enums import (
     CycleStatus,
     CycleTrigger,
     OrderSide,
+    UserRole,
 )
 from app.db.models import AgentSchedule, BrokerOrder
 from app.risk.market_hours import MarketClock
@@ -39,10 +40,11 @@ class _SessionContext:
         return None
 
 
-def _make_session(agent_ids):
-    result = SimpleNamespace(
-        scalars=lambda: SimpleNamespace(all=lambda: agent_ids)
-    )
+def _make_session(agent_ids, roles=None):
+    # The tick's agent query returns (agent id, owner role) rows (#176).
+    roles = roles or [UserRole.OPERATOR] * len(agent_ids)
+    rows = list(zip(agent_ids, roles, strict=True))
+    result = SimpleNamespace(all=lambda: rows)
     return SimpleNamespace(
         execute=AsyncMock(return_value=result),
     )
@@ -98,6 +100,8 @@ async def test_lifespan_starts_scheduler_before_yield_and_stops_it(monkeypatch):
         "ensure_kill_switch_event_scope_columns",
         AsyncMock(),
     )
+    scrub_policy_tokens = AsyncMock()
+    monkeypatch.setattr(main_module, "ensure_policy_token_scrubbed", scrub_policy_tokens)
     monkeypatch.setattr(
         main_module,
         "AsyncSessionLocal",
@@ -112,6 +116,8 @@ async def test_lifespan_starts_scheduler_before_yield_and_stops_it(monkeypatch):
     async with main_module.lifespan(main_module.app):
         assert main_module.app.state.scheduler is scheduler_instance
         scheduler_instance.start.assert_called_once()
+        # Stored policy tokens from before #175 are scrubbed at startup.
+        scrub_policy_tokens.assert_awaited_once_with(connection)
 
     scheduler_instance.shutdown.assert_called_once_with(wait=False)
     assert main_module.app.state.scheduler is None
@@ -308,6 +314,61 @@ async def test_scheduled_tick_skips_when_kill_switch_is_enabled(
     assert result.reason == "kill_switch_enabled"
     run_cycle.assert_not_awaited()
     assert "kill switch is enabled" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_scheduled_tick_skips_owners_who_are_not_operators(
+    scheduled_tick, monkeypatch, caplog
+):
+    """#176: a demoted owner's schedule runs nothing, before any broker call."""
+    agent_ids, query_session, run_cycle = scheduled_tick
+    query_session.execute.return_value = SimpleNamespace(
+        all=lambda: [(agent_ids[0], UserRole.VIEWER), (agent_ids[1], UserRole.AUDITOR)]
+    )
+    market_clock = AsyncMock(return_value=_open_market())
+    monkeypatch.setattr(scheduler, "_fetch_market_clock", market_clock)
+
+    with caplog.at_level(logging.WARNING):
+        result = await scheduler.run_scheduled_cycles()
+
+    assert result.status == "SKIPPED"
+    assert result.reason == "owner_not_operator"
+    assert result.enabled_agents == 2
+    assert result.attempted_agents == 0
+    run_cycle.assert_not_awaited()
+    market_clock.assert_not_awaited()
+    assert f"Scheduled cycle skipped for agent {agent_ids[0]}" in caplog.text
+    assert scheduler.get_tick_history(limit=1)[0] == result
+
+
+@pytest.mark.asyncio
+async def test_scheduled_tick_runs_only_agents_with_operator_owners(
+    scheduled_tick, monkeypatch, caplog
+):
+    agent_ids, _, run_cycle = scheduled_tick
+    viewer_agent, operator_agent = agent_ids
+    recheck = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=SimpleNamespace(scalar_one_or_none=lambda: operator_agent)
+        )
+    )
+    sessions = iter(
+        [None, _make_session(agent_ids, [UserRole.VIEWER, UserRole.ADMIN]), recheck]
+    )
+    monkeypatch.setattr(
+        scheduler, "AsyncSessionLocal", lambda: _SessionContext(next(sessions))
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await scheduler.run_scheduled_cycles()
+
+    assert result.status == "COMPLETED"
+    assert result.enabled_agents == 2
+    assert result.attempted_agents == 1
+    assert [call.args[0] for call in run_cycle.await_args_list] == [operator_agent]
+    assert f"Scheduled cycle skipped for agent {viewer_agent}" in caplog.text
+    # The pre-run re-check also requires an operator owner (a demotion mid-tick).
+    assert "users.role IN" in str(recheck.execute.await_args.args[0])
 
 
 @pytest.mark.asyncio

@@ -61,8 +61,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
 
     # LLM Client Factory — switch providers via .env, no code changes.
-    llm_provider: str = "ollama"  # "openai" | "ollama"
+    llm_provider: str = "ollama"  # "openai" | "ollama" | "anthropic"
     openai_model: str = "gpt-4o-mini"
+    anthropic_model: str = "claude-opus-5-5"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
     ollama_temperature: float = Field(default=0.1, ge=0, le=2)

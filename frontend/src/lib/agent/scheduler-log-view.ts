@@ -2,7 +2,21 @@
  * Pure presentation helpers for scheduler tick logs and LLM health (#143). Kept
  * React-free so they unit-test in the node environment.
  */
+import { ApiError } from "@/lib/api/errors";
 import type { LlmHealth, SchedulerTick } from "./observability-api";
+
+/**
+ * The probe answers 503 with a health payload (`reachable: false` plus a `detail`) when
+ * the LLM is down or misconfigured. Return that payload so the pill can say why; any
+ * other failure returns null (the request itself failed).
+ */
+export function llmHealthFromProbeError(error: unknown): LlmHealth | null {
+  if (!(error instanceof ApiError) || error.status !== 503) return null;
+  const body = error.body;
+  if (typeof body !== "object" || body === null) return null;
+  const health = body as LlmHealth;
+  return health.reachable === false ? health : null;
+}
 
 export type TickTone = "positive" | "negative" | "neutral";
 
@@ -17,6 +31,7 @@ const REASON_TEXT: Record<string, string> = {
   kill_switch_enabled: "Kill switch enabled",
   kill_switch_check_failed: "Kill-switch check failed",
   no_enabled_agents: "No enabled agents",
+  owner_not_operator: "Owner isn't an operator or admin",
   agent_query_failed: "Agent lookup failed",
   market_clock_check_failed: "Market-clock check failed",
   market_closed: "Market closed",

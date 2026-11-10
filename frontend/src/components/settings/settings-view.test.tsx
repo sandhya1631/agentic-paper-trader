@@ -23,6 +23,11 @@ vi.mock("@/lib/agent/scheduler-api", () => ({
 }));
 vi.mock("@/lib/agent/cycles-api", () => ({ listCycles: vi.fn() }));
 vi.mock("@/lib/agent/observability-api", () => ({ getSchedulerLogs: vi.fn() }));
+vi.mock("@/lib/agent/agent-config-api", () => ({
+  getAgentConfig: vi.fn(),
+  updateAgentConfig: vi.fn(),
+}));
+vi.mock("@/lib/meta/meta-api", () => ({ getConstants: vi.fn() }));
 
 import {
   getCurrentUser,
@@ -39,6 +44,8 @@ import {
 } from "@/lib/accounts/accounts-api";
 import { getSchedulerStatus, startSchedule, stopSchedule } from "@/lib/agent/scheduler-api";
 import { listCycles } from "@/lib/agent/cycles-api";
+import { getAgentConfig } from "@/lib/agent/agent-config-api";
+import { getConstants } from "@/lib/meta/meta-api";
 import { SettingsView } from "./settings-view";
 
 const mockMe = vi.mocked(getCurrentUser);
@@ -54,6 +61,8 @@ const mockStart = vi.mocked(startSchedule);
 const mockStop = vi.mocked(stopSchedule);
 const mockCycles = vi.mocked(listCycles);
 const mockLogs = vi.mocked(getSchedulerLogs);
+const mockAgentConfig = vi.mocked(getAgentConfig);
+const mockConstants = vi.mocked(getConstants);
 
 function notFound() {
   return new ApiError(404, "Not Found", { detail: "No Alpaca account connected" }, "http://x");
@@ -81,6 +90,17 @@ function cycle(overrides: Record<string, unknown> = {}) {
     approval: null,
     ...overrides,
   } as never;
+}
+
+function asOperator() {
+  mockMe.mockResolvedValue({ id: "u1", email: "o@example.com", role: "OPERATOR" });
+}
+
+/** Find a button and wait until the role has loaded and enabled it. */
+async function findEnabledButton(name: RegExp): Promise<HTMLButtonElement> {
+  const button = (await screen.findByRole("button", { name })) as HTMLButtonElement;
+  await waitFor(() => expect(button.disabled).toBe(false));
+  return button;
 }
 
 function schedStatus(overrides: Record<string, unknown> = {}) {
@@ -111,22 +131,64 @@ beforeEach(() => {
   mockCycles.mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0, next_offset: null });
   mockLogs.mockResolvedValue([]);
   mockGetKsEvents.mockResolvedValue([]);
+  mockAgentConfig.mockResolvedValue({
+    id: "a1",
+    name: "Default agent",
+    strategy_version: "S-001",
+    cadence_minutes: 15,
+    target_allocation: "0.05",
+    max_symbol_allocation: "0.10",
+    cash_reserve: "0.05",
+    daily_loss_limit: "0.02",
+    approval_mode: "REQUIRED",
+    enabled: true,
+    watchlist: ["AAPL", "NVDA", "SPY"],
+  });
+  mockConstants.mockResolvedValue({
+    approval_mode: ["OBSERVE_ONLY", "REQUIRED", "AUTO"],
+    max_watchlist_size: 20,
+    default_watchlist: ["AAPL", "NVDA", "SPY"],
+  } as never);
 });
 afterEach(() => cleanup());
 
+describe("Agent configuration gating", () => {
+  it("is read-only for viewers", async () => {
+    render(<SettingsView />);
+    const remove = (await screen.findByRole("button", { name: /remove aapl/i })) as HTMLButtonElement;
+    expect(remove.disabled).toBe(true);
+    expect(
+      screen.getByText(/only operators and admins can change the agent configuration/i),
+    ).toBeTruthy();
+  });
+
+  it("is editable for operators", async () => {
+    mockMe.mockResolvedValue({ id: "u1", email: "o@example.com", role: "OPERATOR" });
+    render(<SettingsView />);
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: /remove aapl/i }) as HTMLButtonElement).disabled,
+      ).toBe(false),
+    );
+    expect(screen.queryByText(/only operators and admins/i)).toBeNull();
+  });
+});
+
 describe("Trigger Now", () => {
   it("runs a cycle and shows the result", async () => {
+    asOperator();
     mockTrigger.mockResolvedValue(cycle());
     render(<SettingsView />);
-    fireEvent.click(await screen.findByRole("button", { name: /trigger now/i }));
+    fireEvent.click(await findEnabledButton(/trigger now/i));
     expect(await screen.findByText("COMPLETED")).toBeTruthy();
     expect(screen.getByText(/BUY AAPL/)).toBeTruthy();
   });
 
   it("explains a 409 non-destructively", async () => {
+    asOperator();
     mockTrigger.mockRejectedValue(new ApiError(409, "Conflict", { detail: "running" }, "http://x"));
     render(<SettingsView />);
-    fireEvent.click(await screen.findByRole("button", { name: /trigger now/i }));
+    fireEvent.click(await findEnabledButton(/trigger now/i));
     expect(await screen.findByText(/a cycle is already running/i)).toBeTruthy();
   });
 });
@@ -238,6 +300,7 @@ describe("Account connection", () => {
 
 describe("Scheduler controls", () => {
   it("starts a schedule using the user's agent id", async () => {
+    asOperator();
     mockCycles.mockResolvedValue({
       items: [cycle({ id: "cx", agent_id: "agent-9" })],
       total: 1,
@@ -251,7 +314,7 @@ describe("Scheduler controls", () => {
     });
     render(<SettingsView />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /start schedule/i }));
+    fireEvent.click(await findEnabledButton(/start schedule/i));
     await waitFor(() => expect(mockStart).toHaveBeenCalledWith("agent-9", 15));
   });
 
@@ -276,6 +339,88 @@ describe("Scheduler controls", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /stop schedule/i }));
     await waitFor(() => expect(mockStop).toHaveBeenCalledWith("s1"));
+  });
+});
+
+describe("Agent activity gating (#176)", () => {
+  const agentCycles = {
+    items: [cycle({ id: "cx", agent_id: "agent-9" })],
+    total: 1,
+    limit: 1,
+    offset: 0,
+    next_offset: null,
+  };
+
+  it("disables Trigger Now and Start schedule for viewers, with a note", async () => {
+    mockCycles.mockResolvedValue(agentCycles);
+    render(<SettingsView />);
+
+    const start = (await screen.findByRole("button", { name: /start schedule/i })) as HTMLButtonElement;
+    const trigger = screen.getByRole("button", { name: /trigger now/i }) as HTMLButtonElement;
+    await waitFor(() => expect(mockMe).toHaveBeenCalled());
+    expect(trigger.disabled).toBe(true);
+    expect(start.disabled).toBe(true);
+    expect(screen.getByText(/only operators and admins can trigger cycles/i)).toBeTruthy();
+    expect(screen.getByText(/only operators and admins can start the schedule/i)).toBeTruthy();
+
+    fireEvent.click(trigger);
+    fireEvent.click(start);
+    expect(mockTrigger).not.toHaveBeenCalled();
+    expect(mockStart).not.toHaveBeenCalled();
+  });
+
+  it("leaves Stop schedule enabled for viewers", async () => {
+    mockSchedStatus.mockResolvedValue(
+      schedStatus({
+        running: true,
+        schedules: [
+          { id: "s1", agent_id: "a1", interval_minutes: 15, enabled: true, next_run_time: null },
+        ],
+      }),
+    );
+    mockStop.mockResolvedValue({
+      id: "s1",
+      agent_id: "a1",
+      interval_minutes: 15,
+      enabled: false,
+      next_run_time: null,
+      last_tick: null,
+    });
+    render(<SettingsView />);
+
+    const stop = (await screen.findByRole("button", { name: /stop schedule/i })) as HTMLButtonElement;
+    await waitFor(() => expect(mockMe).toHaveBeenCalled());
+    expect(stop.disabled).toBe(false);
+    fireEvent.click(stop);
+    await waitFor(() => expect(mockStop).toHaveBeenCalledWith("s1"));
+  });
+
+  it.each(["OPERATOR", "ADMIN"] as const)("enables both controls for %s", async (role) => {
+    mockMe.mockResolvedValue({ id: "u1", email: "o@example.com", role });
+    mockCycles.mockResolvedValue(agentCycles);
+    render(<SettingsView />);
+
+    await findEnabledButton(/trigger now/i);
+    await findEnabledButton(/start schedule/i);
+    expect(screen.queryByText(/only operators and admins/i)).toBeNull();
+  });
+
+  it("doesn't send a viewer without an agent to the disabled Trigger Now", async () => {
+    render(<SettingsView />);
+
+    expect(
+      await screen.findByText(/only operators and admins can create and schedule the agent/i),
+    ).toBeTruthy();
+    await waitFor(() => expect(mockMe).toHaveBeenCalled());
+    expect(screen.queryByText(/trigger a cycle first/i)).toBeNull();
+  });
+
+  it("keeps the trigger-first hint for an operator without an agent", async () => {
+    asOperator();
+    render(<SettingsView />);
+
+    expect(await screen.findByText(/trigger a cycle first/i)).toBeTruthy();
+    expect(screen.queryByText(/create and schedule the agent/i)).toBeNull();
   });
 });
 
@@ -368,5 +513,91 @@ describe("Kill-switch history", () => {
     render(<SettingsView />);
 
     expect(await screen.findByRole("alert")).toBeTruthy();
+  });
+});
+
+describe("Schedule card states (#163)", () => {
+  function scheduleRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "s1",
+      agent_id: "a1",
+      interval_minutes: 30,
+      enabled: true,
+      next_run_time: null,
+      ...overrides,
+    };
+  }
+  const running = (interval = 30) =>
+    schedStatus({ running: true, schedules: [scheduleRow({ interval_minutes: interval })] });
+  // Stop keeps the schedule row and only pauses the user, so the row is still listed.
+  const stopped = (interval = 30) =>
+    schedStatus({
+      running: false,
+      schedules: [scheduleRow({ interval_minutes: interval, enabled: false })],
+    });
+
+  it("asks for a cycle first when there is no agent yet", async () => {
+    // Someone who can trigger the first cycle (a VIEWER can't, so gets another message).
+    mockMe.mockResolvedValue({ id: "u1", email: "o@example.com", role: "OPERATOR" });
+    render(<SettingsView />);
+
+    expect(await screen.findByText(/trigger a cycle first/i)).toBeTruthy();
+    expect(screen.queryByLabelText("Interval (min)")).toBeNull();
+    expect(screen.queryByRole("button", { name: /start schedule/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /stop schedule/i })).toBeNull();
+  });
+
+  it("shows Stop and no interval input while running", async () => {
+    mockSchedStatus.mockResolvedValue(running());
+    render(<SettingsView />);
+
+    expect(await screen.findByRole("button", { name: /stop schedule/i })).toBeTruthy();
+    expect(screen.getByText("Running")).toBeTruthy();
+    expect(screen.getByText(/every 30 min/i)).toBeTruthy();
+    expect(screen.queryByLabelText("Interval (min)")).toBeNull();
+    expect(screen.queryByRole("button", { name: /start schedule/i })).toBeNull();
+  });
+
+  it("offers Start pre-filled with the last interval once stopped", async () => {
+    mockSchedStatus.mockResolvedValue(stopped(30));
+    render(<SettingsView />);
+
+    const input = (await screen.findByLabelText("Interval (min)")) as HTMLInputElement;
+    expect(input.value).toBe("30");
+    expect(screen.getByRole("button", { name: /start schedule/i })).toBeTruthy();
+    expect(screen.getByText("Stopped")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /stop schedule/i })).toBeNull();
+  });
+
+  it("stops, then restarts at a new interval without a reload", async () => {
+    mockMe.mockResolvedValue({ id: "u1", email: "o@example.com", role: "OPERATOR" });
+    mockSchedStatus
+      .mockResolvedValueOnce(running(30))
+      .mockResolvedValueOnce(stopped(30))
+      .mockResolvedValue(running(45));
+    mockStop.mockResolvedValue({ ...scheduleRow({ enabled: false }), last_tick: null });
+    mockStart.mockResolvedValue({
+      schedule: { ...scheduleRow({ interval_minutes: 45 }), last_tick: null },
+      status_url: "/agent/scheduler/status",
+    });
+    render(<SettingsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /stop schedule/i }));
+    await waitFor(() => expect(mockStop).toHaveBeenCalledWith("s1"));
+
+    const input = (await screen.findByLabelText("Interval (min)")) as HTMLInputElement;
+    expect(input.value).toBe("30");
+    expect(screen.getByText("Stopped")).toBeTruthy();
+    fireEvent.change(input, { target: { value: "45" } });
+    const start = screen.getByRole("button", { name: /start schedule/i }) as HTMLButtonElement;
+    await waitFor(() => expect(start.disabled).toBe(false));
+    fireEvent.click(start);
+
+    await waitFor(() => expect(mockStart).toHaveBeenCalledWith("a1", 45));
+    expect(await screen.findByText(/every 45 min/i)).toBeTruthy();
+    expect(screen.getByText("Running")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /stop schedule/i })).toBeTruthy();
+    expect(screen.queryByLabelText("Interval (min)")).toBeNull();
+    expect(mockSchedStatus).toHaveBeenCalledTimes(3);
   });
 });

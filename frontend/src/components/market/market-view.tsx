@@ -1,13 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  DEFAULT_SYMBOLS,
   getBars,
   getSnapshot,
   type MarketSnapshot,
   type OHLCVBar,
 } from "@/lib/market-data/market-data-api";
+import { getAgentConfig } from "@/lib/agent/agent-config-api";
+import { getConstants } from "@/lib/meta/meta-api";
+import {
+  EMPTY_WATCHLIST_MESSAGE,
+  resolveMarketWatchlist,
+  selectSymbol,
+  type MarketWatchlist,
+} from "@/lib/market-data/market-watchlist";
 import {
   ageSeconds,
   estimatedMarketStatus,
@@ -47,15 +54,39 @@ const freshnessTone: Record<Freshness, "positive" | "negative" | "neutral"> = {
 };
 
 export function MarketView() {
-  const [symbol, setSymbol] = useState<string>(DEFAULT_SYMBOLS[0]);
+  // null until the watchlist has loaded the first time (the tab row shows a placeholder).
+  const [watchlist, setWatchlist] = useState<MarketWatchlist | null>(null);
+  const [symbol, setSymbol] = useState<string | null>(null);
+  // Bumped on every watchlist (re)load, so Refresh also reloads the selected symbol's data.
+  const [reloadKey, setReloadKey] = useState(0);
   const [state, setState] = useState<MarketState>(INITIAL);
+  const watchlistRequest = useRef(0);
+  const dataRequest = useRef(0);
+
+  const loadWatchlist = useCallback(async () => {
+    const request = ++watchlistRequest.current;
+    const [config, constants] = await Promise.allSettled([getAgentConfig(), getConstants()]);
+    if (request !== watchlistRequest.current) return; // a newer Refresh superseded this one
+    const next = resolveMarketWatchlist(config, constants);
+    if (next.symbols.length === 0) {
+      // No symbol left to select: drop the previous symbol's bars and snapshot, and
+      // ignore any load for it still in flight.
+      dataRequest.current++;
+      setState(INITIAL);
+    }
+    setWatchlist(next);
+    setSymbol((current) => selectSymbol(next.symbols, current));
+    setReloadKey((key) => key + 1);
+  }, []);
 
   const load = useCallback(async (sym: string) => {
+    const request = ++dataRequest.current;
     setState((prev) => ({ ...prev, loading: true }));
     const [bars, snapshot] = await Promise.allSettled([
       getBars({ symbols: [sym], limit: 90, lookbackDays: 90 }),
       getSnapshot(sym),
     ]);
+    if (request !== dataRequest.current) return; // another symbol was selected meanwhile
 
     setState({
       loading: false,
@@ -75,8 +106,12 @@ export function MarketView() {
   }, []);
 
   useEffect(() => {
-    void load(symbol);
-  }, [load, symbol]);
+    void loadWatchlist();
+  }, [loadWatchlist]);
+
+  useEffect(() => {
+    if (symbol !== null) void load(symbol);
+  }, [load, symbol, reloadKey]);
 
   const latestTs = latestBarTimestamp(state.bars);
   const age = ageSeconds(latestTs, Date.now());
@@ -96,31 +131,46 @@ export function MarketView() {
         </div>
         <button
           type="button"
-          onClick={() => void load(symbol)}
+          onClick={() => void loadWatchlist()}
           className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-muted"
         >
           Refresh
         </button>
       </section>
 
-      <div className="flex flex-wrap items-center gap-2" role="tablist" aria-label="Symbol">
-        {DEFAULT_SYMBOLS.map((s) => (
-          <button
-            key={s}
-            type="button"
-            role="tab"
-            aria-selected={s === symbol}
-            onClick={() => setSymbol(s)}
-            className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${
-              s === symbol
-                ? "border-brand bg-brand/10 text-brand"
-                : "border-border hover:bg-surface-muted"
-            }`}
-          >
-            {s}
-          </button>
-        ))}
-      </div>
+      {watchlist === null ? (
+        <p role="status" className="py-1.5 text-sm text-muted">
+          Loading watchlist...
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {watchlist.symbols.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2" role="tablist" aria-label="Symbol">
+              {watchlist.symbols.map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  role="tab"
+                  aria-selected={s === symbol}
+                  onClick={() => setSymbol(s)}
+                  className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${
+                    s === symbol
+                      ? "border-brand bg-brand/10 text-brand"
+                      : "border-border hover:bg-surface-muted"
+                  }`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          )}
+          {watchlist.error && (
+            <p role="alert" className="text-sm text-negative">
+              {watchlist.error}
+            </p>
+          )}
+        </div>
+      )}
 
       <section className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface px-5 py-3 text-sm">
         <span className="flex items-center gap-2">
@@ -146,7 +196,14 @@ export function MarketView() {
         )}
       </section>
 
-      {state.loading ? (
+      {symbol === null ? (
+        watchlist !== null &&
+        watchlist.source === "agent" && (
+          <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-border bg-surface px-4 text-center text-sm text-muted">
+            {EMPTY_WATCHLIST_MESSAGE}
+          </div>
+        )
+      ) : state.loading ? (
         <p className="text-sm text-muted">Loading {symbol} market data...</p>
       ) : (
         <>

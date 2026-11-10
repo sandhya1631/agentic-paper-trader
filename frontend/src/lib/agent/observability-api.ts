@@ -3,6 +3,7 @@
  * api client attaches the Bearer token and handles 401 globally.
  */
 import { api } from "@/lib/api/client";
+import { llmHealthFromProbeError } from "./scheduler-log-view";
 
 /** One scheduler tick's outcome. All fields optional — older ticks may omit some. */
 export interface SchedulerTick {
@@ -33,9 +34,10 @@ export async function getSchedulerLogs(): Promise<SchedulerTickLog[]> {
 }
 
 /**
- * `/llm/health` is a cheap echo of the configured provider/model. A successful
- * response means the backend's LLM config is reachable; some deployments may also
- * include explicit `reachable` / `model_available` flags, which we honor.
+ * LLM health from `/llm/health?probe=true`: the backend actually contacts the
+ * configured provider and reports `reachable` / `model_available`. Without `probe`
+ * the endpoint only echoes the configured provider/model, so it would say nothing
+ * about whether the LLM can be reached.
  */
 export interface LlmHealth {
   provider?: string;
@@ -45,6 +47,16 @@ export interface LlmHealth {
   detail?: string;
 }
 
-export function getLlmHealth(): Promise<LlmHealth> {
-  return api.get<LlmHealth>("/llm/health");
+/**
+ * Probe the LLM. A 503 carrying `reachable: false` (LLM down or misconfigured) resolves
+ * to that payload so callers can show the backend's reason; other failures reject.
+ */
+export async function getLlmHealth(): Promise<LlmHealth> {
+  try {
+    return await api.get<LlmHealth>("/llm/health?probe=true");
+  } catch (error) {
+    const reported = llmHealthFromProbeError(error);
+    if (reported) return reported;
+    throw error;
+  }
 }

@@ -19,10 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.agent import scheduler as scheduler_service
-from app.agent.approval import evaluate_and_submit_cycle_trade
+from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition
 from app.agent.replay import ReplaySample, evaluate_replay
+from app.agent.watchlist import normalize_watchlist
+from app.audit import record_audit_event
 from app.auth.dependencies import get_current_user, require_operator
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
@@ -38,6 +40,8 @@ from app.db.enums import (
     BrokerOrderStatus,
     CycleStatus,
     CycleTrigger,
+    DecisionAction,
+    PolicyDecisionType,
     UserRole,
 )
 from app.db.models import (
@@ -62,7 +66,9 @@ from app.risk.kill_switch import (
     set_user_scheduler_switch,
 )
 from app.schemas import (
+    AgentConfigDetailRead,
     AgentConfigRead,
+    AgentConfigUpdate,
     AgentScheduleRead,
     ApprovalAction,
     ApprovalRead,
@@ -266,25 +272,137 @@ async def update_kill_switch(
     )
 
 
-@router.post("/cycles/run", response_model=CycleRead, summary="Trigger manual agent cycle")
-async def trigger_manual_cycle(
+_NO_AGENT_DETAIL = "No agent configured yet. Trigger a cycle to create your default agent."
+
+
+def _agent_config_not_found(agent_id: uuid.UUID | None) -> HTTPException:
+    """404 for GET/PATCH /agent/config. A named agent_id that the caller doesn't own (or
+    that doesn't exist) is "Agent not found", which reveals nothing about other users'
+    agents; without an agent_id the caller simply has no agent yet."""
+    detail = "Agent not found" if agent_id is not None else _NO_AGENT_DETAIL
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+
+
+async def _get_owned_agent(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    agent_id: uuid.UUID | None = None,
+    *,
+    for_update: bool = False,
+) -> AgentConfig | None:
+    """Return the caller's agent (a specific one when agent_id is given), else None.
+
+    Ownership runs AgentConfig -> TradingAccount.user_id. The deterministic order means
+    the agent GET/PATCH /agent/config edits is the same agent POST /agent/cycles/run runs.
+    """
+    stmt = (
+        select(AgentConfig)
+        .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+        .where(TradingAccount.user_id == user_id)
+    )
+    if agent_id is not None:
+        stmt = stmt.where(AgentConfig.id == agent_id)
+    stmt = stmt.order_by(AgentConfig.created_at, AgentConfig.id).limit(1)
+    if for_update:
+        stmt = stmt.with_for_update(of=AgentConfig)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+def _agent_config_detail(agent: AgentConfig) -> AgentConfigDetailRead:
+    """The GET/PATCH /agent/config response, with the watchlist normalized (#179).
+
+    A stored list may predate the PATCH validation (e.g. `["aapl", "AAPL"]` from an
+    earlier SQL edit). Returning the canonical list the cycles actually use (trimmed,
+    upper-case, de-duplicated) keeps the Settings card from loading with unsaved
+    changes; the stored row itself is left as it is.
+    """
+    detail = AgentConfigDetailRead.model_validate(agent)
+    return detail.model_copy(update={"watchlist": normalize_watchlist(agent.watchlist)})
+
+
+@router.get(
+    "/config",
+    response_model=AgentConfigDetailRead,
+    summary="Get the caller's agent configuration",
+)
+async def get_agent_config(
     agent_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
+) -> AgentConfigDetailRead:
+    """Return the caller's agent config. Never provisions an agent (404 when none)."""
+    agent = await _get_owned_agent(db, current_user.id, agent_id)
+    if agent is None:
+        raise _agent_config_not_found(agent_id)
+    return _agent_config_detail(agent)
+
+
+@router.patch(
+    "/config",
+    response_model=AgentConfigDetailRead,
+    summary="Update the caller's agent watchlist / approval mode (operator)",
+)
+async def update_agent_config(
+    body: AgentConfigUpdate,
+    agent_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_operator),
+) -> AgentConfigDetailRead:
+    """Apply the changed fields and audit them in the same commit.
+
+    Only the watchlist and approval mode are editable (the body forbids every other
+    field). OPERATOR/ADMIN only: switching to AUTO removes human review, which a VIEWER
+    (who cannot approve trades) must not be able to do. The next cycle reads the new
+    values; risk policies still gate every order.
+    """
+    agent = await _get_owned_agent(db, current_user.id, agent_id, for_update=True)
+    if agent is None:
+        raise _agent_config_not_found(agent_id)
+
+    changes: dict[str, dict[str, Any]] = {}
+    current_watchlist = list(agent.watchlist or [])
+    if body.watchlist is not None and body.watchlist != current_watchlist:
+        changes["watchlist"] = {"from": current_watchlist, "to": list(body.watchlist)}
+        # Assign a NEW list: the JSON column is not mutation-tracked.
+        agent.watchlist = list(body.watchlist)
+    if body.approval_mode is not None and body.approval_mode != agent.approval_mode:
+        changes["approval_mode"] = {
+            "from": agent.approval_mode.value,
+            "to": body.approval_mode.value,
+        }
+        agent.approval_mode = body.approval_mode
+
+    if changes:
+        agent.version += 1
+        record_audit_event(
+            db,
+            event_type="AGENT_CONFIG_UPDATED",
+            entity_type="agent_config",
+            entity_id=agent.id,
+            actor_id=current_user.id,
+            details={"changes": changes},
+        )
+        await db.commit()
+        await db.refresh(agent)
+    return _agent_config_detail(agent)
+
+
+@router.post(
+    "/cycles/run", response_model=CycleRead, summary="Trigger manual agent cycle (operator)"
+)
+async def trigger_manual_cycle(
+    agent_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_operator),
 ) -> Any:
     """Manually trigger one execution cycle for an agent.
 
-    Auto-creates a default agent if none exists.
+    Auto-creates a default agent if none exists. OPERATOR/ADMIN only (#176): a cycle can
+    trade, and the role dependency rejects a VIEWER before any provisioning, LLM or
+    broker call.
     """
     if agent_id is None:
-        stmt = (
-            select(AgentConfig)
-            .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
-            .where(TradingAccount.user_id == current_user.id)
-            .limit(1)
-        )
-        res = await db.execute(stmt)
-        agent = res.scalar_one_or_none()
+        agent = await _get_owned_agent(db, current_user.id)
         if not agent:
             # Auto-provision default TradingAccount, PolicySet, and AgentConfig for instant testing
             acc_stmt = select(TradingAccount).where(TradingAccount.user_id == current_user.id)
@@ -329,15 +447,7 @@ async def trigger_manual_cycle(
 
         target_agent_id = agent.id
     else:
-        agent_result = await db.execute(
-            select(AgentConfig)
-            .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
-            .where(
-                AgentConfig.id == agent_id,
-                TradingAccount.user_id == current_user.id,
-            )
-        )
-        agent = agent_result.scalar_one_or_none()
+        agent = await _get_owned_agent(db, current_user.id, agent_id)
         if agent is None:
             raise HTTPException(status_code=404, detail="Agent not found")
         target_agent_id = agent.id
@@ -412,6 +522,11 @@ async def run_replay(
 async def list_agent_cycles(
     limit: int = 20,
     offset: int = 0,
+    started_after: datetime | None = None,
+    started_before: datetime | None = None,
+    action: DecisionAction | None = None,
+    status_filter: CycleStatus | None = Query(default=None, alias="status"),
+    policy_decision: PolicyDecisionType | None = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> CycleListRead:
@@ -420,11 +535,21 @@ async def list_agent_cycles(
     Shared read surface for the dashboard cycle-history (#79), decision timeline
     (#81), and audit history (#82). Covers both MANUAL and SCHEDULED cycles and is
     ownership-scoped: a user only ever sees cycles belonging to their own agents.
+
+    Every filter is optional and they AND together. ``action`` matches the LLM's
+    proposed action (``proposal_json.action``); ``policy_decision`` matches the
+    cycle's overall, first-class outcome (ALLOW/DENY/RESIZE/NOT_EVALUATED) rather
+    than any single policy's result, which would need a slower, unindexed JSON
+    search over ``policy_result_json.evaluations`` (#82's noted follow-up).
     """
     if not 1 <= limit <= 100:
         raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
     if offset < 0:
         raise HTTPException(status_code=422, detail="offset must be >= 0")
+    if started_after is not None and started_before is not None and started_after > started_before:
+        raise HTTPException(
+            status_code=422, detail="started_after must not be after started_before"
+        )
 
     owned_cycles = (
         select(AgentCycle)
@@ -432,6 +557,21 @@ async def list_agent_cycles(
         .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
         .where(TradingAccount.user_id == current_user.id)
     )
+    if started_after is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.started_at >= started_after)
+    if started_before is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.started_at <= started_before)
+    if action is not None:
+        # proposal_json is a plain JSON column (not JSONB), so comparing it to a
+        # string needs the explicit as_string() cast - Postgres has no json = text
+        # operator (confirmed: raises UndefinedFunctionError without this).
+        owned_cycles = owned_cycles.where(
+            AgentCycle.proposal_json["action"].as_string() == action.value
+        )
+    if status_filter is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.status == status_filter)
+    if policy_decision is not None:
+        owned_cycles = owned_cycles.where(AgentCycle.policy_decision == policy_decision.value)
 
     total = await db.scalar(
         select(func.count()).select_from(owned_cycles.subquery())
@@ -701,17 +841,19 @@ async def approve_cycle_trade(
         ) from exc
 
     approval.policy_version = policy_decision.policy_version
-    approval.policy_result_json = policy_decision.model_dump(mode="json")
+    # The signed policy token is never stored or returned; only the gateway receives it,
+    # in memory (#175).
+    approval.policy_result_json = persistable_policy_result(policy_decision)
     approval.acted_at = now
     approval.actor_id = current_user.id
     approval.comment = body.comment
     cycle.completed_at = now
     snapshot = dict(cycle.snapshot_json or {})
-    snapshot["policy_evaluation"] = policy_decision.model_dump(mode="json")
+    snapshot["policy_evaluation"] = persistable_policy_result(policy_decision)
     # Record the fresh binding decision as the cycle's queryable policy result (#121),
     # overwriting the earlier pending-approval preview. The signed token is excluded.
     cycle.policy_decision = policy_decision.decision
-    cycle.policy_result_json = policy_decision.model_dump(mode="json", exclude={"policy_token"})
+    cycle.policy_result_json = persistable_policy_result(policy_decision)
     if broker_order is None:
         approval.status = ApprovalStatus.REJECTED
         approval.comment = (
@@ -778,15 +920,19 @@ async def reject_cycle_trade(
     "/scheduler/start",
     response_model=ScheduleStartRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Start a recurring schedule and resume scheduling for this user",
+    summary="Start a recurring schedule and resume scheduling for this user (operator)",
 )
 async def start_agent_schedule(
     body: ScheduleStartRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator),
 ) -> ScheduleStartRead:
-    """Persist one schedule, resume this user, and restore all their enabled schedules."""
+    """Persist one schedule, resume this user, and restore all their enabled schedules.
+
+    OPERATOR/ADMIN only (#176). Stopping stays open to the owner, since pausing only
+    reduces risk; scheduled ticks skip owners who are no longer OPERATOR/ADMIN.
+    """
     scheduler_instance = getattr(request.app.state, "scheduler", None)
     if scheduler_instance is None or not scheduler_instance.running:
         raise HTTPException(
@@ -877,7 +1023,10 @@ async def stop_agent_schedule(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> AgentScheduleRead:
-    """Pause all scheduled cycles for the owning user; in-flight cycles may finish."""
+    """Pause all scheduled cycles for the owning user; in-flight cycles may finish.
+
+    Open to any owner, VIEWER included (#176): pausing only reduces risk.
+    """
     result = await db.execute(
         select(AgentSchedule).where(
             AgentSchedule.id == schedule_id,

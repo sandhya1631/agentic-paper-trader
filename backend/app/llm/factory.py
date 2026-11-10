@@ -11,8 +11,10 @@ def create_llm_client(settings: Settings | None = None) -> LLMClient:
     """LLM Client Factory — returns the provider selected by LLM_PROVIDER.
 
     Orchestration code should depend only on the LLMClient interface, never on
-    a specific provider, so switching LLM_PROVIDER in .env (openai <-> ollama)
-    is the only change needed to move between a cloud model and a local one.
+    a specific provider, so switching LLM_PROVIDER in .env (openai <-> ollama <->
+    anthropic) is the only change needed to move between a cloud model and a local one.
+    The Anthropic client is imported lazily inside its own branch, so a missing SDK or
+    key can never affect the openai/ollama paths.
     """
     settings = settings or get_settings()
     provider = settings.llm_provider.lower()
@@ -27,11 +29,29 @@ def create_llm_client(settings: Settings | None = None) -> LLMClient:
             num_ctx=settings.ollama_num_ctx,
             json_format=settings.ollama_json_format,
         )
+    if provider == "anthropic":
+        try:
+            from app.llm.anthropic_client import AnthropicClient
+        except ImportError as exc:
+            raise ValueError(
+                "LLM_PROVIDER=anthropic requires the 'anthropic' package (pip install -e '.[dev]')"
+            ) from exc
+        return AnthropicClient(api_key=settings.anthropic_api_key, model=settings.anthropic_model)
 
     raise ValueError(
         f"Unsupported LLM_PROVIDER '{settings.llm_provider}'. "
         f"Expected one of: {SUPPORTED_PROVIDERS}"
     )
+
+
+def configured_model(settings: Settings) -> str:
+    """Model id for the configured provider (reads no keys; used by /llm/health)."""
+    provider = settings.llm_provider.lower()
+    if provider == "openai":
+        return settings.openai_model
+    if provider == "anthropic":
+        return settings.anthropic_model
+    return settings.ollama_model
 
 
 @lru_cache
