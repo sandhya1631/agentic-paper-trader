@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 
 import { ApiError } from "@/lib/api/errors";
 
@@ -140,5 +140,127 @@ describe("DashboardView", () => {
 
     expect(await screen.findByText(/HOLD AAPL/)).toBeTruthy();
     expect(screen.getByText("Scheduled")).toBeTruthy();
+  });
+});
+
+type Account = Awaited<ReturnType<typeof getAccount>>;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Fire the 15 s auto-refresh. */
+async function advancePoll() {
+  await act(async () => {
+    vi.advanceTimersByTime(15_000);
+  });
+}
+
+describe("DashboardView live refresh in place (#164)", () => {
+  beforeEach(() => {
+    // Only the poll interval and the clock are faked; RTL's findBy* keeps real timeouts.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    vi.setSystemTime(new Date(2026, 10, 9, 14, 41, 5));
+    mockAccount.mockResolvedValue(account() as Account);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("shows the placeholder only on the first load", async () => {
+    const first = deferred<Account>();
+    mockAccount.mockReturnValueOnce(first.promise);
+    render(<DashboardView />);
+    expect(screen.getByText("Loading dashboard...")).toBeTruthy();
+
+    await act(async () => first.resolve(account() as Account));
+    expect(await screen.findByText("$100,000.00")).toBeTruthy();
+    expect(screen.queryByText("Loading dashboard...")).toBeNull();
+  });
+
+  it("keeps the content on screen while a refresh is pending, then updates in place", async () => {
+    render(<DashboardView />);
+    expect(await screen.findByText("$100,000.00")).toBeTruthy();
+
+    const refresh = deferred<Account>();
+    mockAccount.mockReturnValueOnce(refresh.promise);
+    await advancePoll();
+
+    expect(mockAccount).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/Loading dashboard/)).toBeNull();
+    expect(screen.getByText("$100,000.00")).toBeTruthy();
+    expect(screen.getByText("Recent decisions")).toBeTruthy();
+
+    await act(async () =>
+      refresh.resolve(account({ portfolio_value: "101500", cash: "26000" }) as Account),
+    );
+    expect(await screen.findByText("$101,500.00")).toBeTruthy();
+    expect(screen.getByText("$26,000.00")).toBeTruthy();
+    expect(screen.queryByText("$25,000.00")).toBeNull();
+  });
+
+  it("skips poll ticks while a slow refresh is in flight, then shows its values", async () => {
+    render(<DashboardView />);
+    await screen.findByText("$100,000.00");
+
+    const slow = deferred<Account>();
+    mockAccount.mockReturnValueOnce(slow.promise);
+    await advancePoll(); // t = 15 s: the refresh starts
+    expect(mockAccount).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      vi.advanceTimersByTime(20_000); // t = 35 s: the 30 s tick finds it still in flight
+    });
+    expect(mockAccount).toHaveBeenCalledTimes(2);
+    expect(mockCycles).toHaveBeenCalledTimes(2);
+
+    await act(async () => slow.resolve(account({ portfolio_value: "101500" }) as Account));
+    expect(await screen.findByText("$101,500.00")).toBeTruthy();
+
+    // Polling resumes once the slow refresh has landed.
+    await act(async () => {
+      vi.advanceTimersByTime(10_000); // t = 45 s
+    });
+    expect(mockAccount).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the last good data with a non-blocking note when a refresh fails", async () => {
+    render(<DashboardView />);
+    await screen.findByText("$100,000.00");
+
+    vi.setSystemTime(new Date(2026, 10, 9, 14, 45, 0));
+    mockAccount.mockRejectedValueOnce(new ApiError(500, "Server Error", { detail: "boom" }, "http://x"));
+    mockCycles.mockRejectedValueOnce(new ApiError(500, "Server Error", null, "http://x"));
+    await advancePoll();
+
+    const note = await screen.findByText(/couldn't refresh/i);
+    expect(note.textContent).toMatch(/showing data from 2:41:05/);
+    expect(screen.getByText("$100,000.00")).toBeTruthy();
+    expect(screen.getByText("+$1,000.00")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull(); // not the account error block
+    // The cycle list keeps its last good (empty) answer instead of "unavailable".
+    expect(screen.getByText(/no agent cycles yet/i)).toBeTruthy();
+
+    mockAccount.mockResolvedValueOnce(account({ portfolio_value: "101500" }) as Account);
+    await advancePoll();
+    expect(await screen.findByText("$101,500.00")).toBeTruthy();
+    expect(screen.queryByText(/couldn't refresh/i)).toBeNull();
+  });
+
+  it("switches to the connect notice if the account is disconnected", async () => {
+    render(<DashboardView />);
+    await screen.findByText("$100,000.00");
+
+    mockAccount.mockRejectedValueOnce(
+      new ApiError(503, "Service Unavailable", { detail: "No Alpaca account connected" }, "http://x"),
+    );
+    await advancePoll();
+
+    expect(await screen.findByText(/no alpaca paper account connected/i)).toBeTruthy();
+    expect(screen.queryByText("$100,000.00")).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   getAccount,
@@ -25,10 +25,12 @@ import { Badge } from "@/components/ui/badge";
 import { ConnectAccountNotice } from "@/components/ui/connect-account-notice";
 import { AutoRefreshToggle } from "@/components/ui/auto-refresh-toggle";
 import { usePolling } from "@/lib/hooks/use-polling";
+import { keepLastGood, staleDataMessage } from "@/lib/live-refresh";
 
 const REFRESH_SECONDS = 15;
 
 interface DashboardState {
+  /** True only until the first load completes; later refreshes update in place (#164). */
   loading: boolean;
   notConnected: boolean;
   accountError: string | null;
@@ -36,6 +38,10 @@ interface DashboardState {
   positions: AlpacaPosition[] | null;
   cycles: AgentCycle[] | null;
   scheduler: SchedulerStatus | null;
+  /** When the data on screen was last fully refreshed (epoch ms). */
+  updatedAt: number | null;
+  /** The last refresh failed, so older data is still on screen. */
+  stale: boolean;
 }
 
 const INITIAL: DashboardState = {
@@ -46,46 +52,76 @@ const INITIAL: DashboardState = {
   positions: null,
   cycles: null,
   scheduler: null,
+  updatedAt: null,
+  stale: false,
 };
 
 export function DashboardView() {
   const [state, setState] = useState<DashboardState>(INITIAL);
   const [live, setLive] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const latestLoad = useRef(0);
+  // True while a refresh is outstanding: a poll tick then skips instead of superseding it,
+  // so a refresh slower than the interval still lands.
+  const inFlight = useRef(false);
 
+  // Refreshes keep the page mounted and swap the values in place (#164).
   const load = useCallback(async () => {
-    setState((prev) => ({ ...prev, loading: true }));
+    const request = ++latestLoad.current;
+    inFlight.current = true;
+    setRefreshing(true);
     const [account, positions, cycles, scheduler] = await Promise.allSettled([
       getAccount(),
       getPositions(),
       listCycles({ limit: 5 }),
       getSchedulerStatus(),
     ]);
+    // Defensive: if a newer refresh was started meanwhile, its answer wins.
+    if (request !== latestLoad.current) return;
+    inFlight.current = false;
+    setRefreshing(false);
+    const now = Date.now();
 
-    const next: DashboardState = {
-      loading: false,
-      notConnected: false,
-      accountError: null,
-      account: null,
-      positions: positions.status === "fulfilled" ? positions.value : null,
-      cycles: cycles.status === "fulfilled" ? cycles.value.items : null,
-      scheduler: scheduler.status === "fulfilled" ? scheduler.value : null,
-    };
-
-    if (account.status === "fulfilled") {
-      next.account = account.value;
-    } else if (isAccountNotConnected(account.reason)) {
-      next.notConnected = true;
-    } else {
-      next.accountError = getErrorMessage(account.reason, "Could not load account summary.");
-    }
-    setState(next);
+    setState((prev) => {
+      if (account.status === "rejected" && isAccountNotConnected(account.reason)) {
+        return { ...INITIAL, loading: false, notConnected: true, updatedAt: now };
+      }
+      // A part that fails to refresh keeps its last good value instead of blanking.
+      const cycleItems: PromiseSettledResult<AgentCycle[]> =
+        cycles.status === "fulfilled" ? { status: "fulfilled", value: cycles.value.items } : cycles;
+      const nextAccount = keepLastGood(account, prev.account);
+      const nextPositions = keepLastGood(positions, prev.positions);
+      const nextCycles = keepLastGood(cycleItems, prev.cycles);
+      const nextScheduler = keepLastGood(scheduler, prev.scheduler);
+      const stale = [nextAccount, nextPositions, nextCycles, nextScheduler].some((p) => p.kept);
+      return {
+        loading: false,
+        notConnected: false,
+        accountError:
+          account.status === "rejected" && !nextAccount.kept
+            ? getErrorMessage(account.reason, "Could not load account summary.")
+            : null,
+        account: nextAccount.value,
+        positions: nextPositions.value,
+        cycles: nextCycles.value,
+        scheduler: nextScheduler.value,
+        updatedAt: stale ? prev.updatedAt : now,
+        stale,
+      };
+    });
   }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  usePolling(() => void load(), REFRESH_SECONDS * 1000, live);
+  usePolling(
+    () => {
+      if (!inFlight.current) void load();
+    },
+    REFRESH_SECONDS * 1000,
+    live,
+  );
 
   if (state.loading) {
     return <p className="text-sm text-muted">Loading dashboard...</p>;
@@ -110,8 +146,19 @@ export function DashboardView() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <DashboardHeader />
-        <AutoRefreshToggle enabled={live} onChange={setLive} seconds={REFRESH_SECONDS} />
+        <AutoRefreshToggle
+          enabled={live}
+          onChange={setLive}
+          seconds={REFRESH_SECONDS}
+          updating={refreshing}
+        />
       </div>
+
+      {state.stale && (
+        <p role="status" className="text-xs text-negative">
+          {staleDataMessage(state.updatedAt)}
+        </p>
+      )}
 
       {state.accountError ? (
         <div
