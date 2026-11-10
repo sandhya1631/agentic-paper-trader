@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import validate_token
+from app.core.constants import OPERATOR_ROLES
 from app.db.enums import UserRole
 from app.db.models import User
 from app.db.session import get_db
@@ -66,4 +67,4 @@ def require_roles(*allowed_roles: UserRole) -> Callable:
     return role_guard
 
 
-require_operator = require_roles(UserRole.OPERATOR, UserRole.ADMIN)
+require_operator = require_roles(*OPERATOR_ROLES)

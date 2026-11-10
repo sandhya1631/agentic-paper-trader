@@ -863,19 +863,22 @@ tick:
 1. Checks the kill switch.
 2. Finds enabled agents for users whose scheduler is enabled.
 3. Excludes agents that have their own enabled `AgentSchedule`.
-4. Checks the Alpaca market clock.
-5. Runs each eligible agent cycle.
-6. Counts successful, failed, and overlapping agents.
-7. Stores a tick summary in Redis and in process memory fallback.
+4. Skips (and logs) agents whose owner is no longer `OPERATOR` or `ADMIN`;
+   if none remain, the tick is `SKIPPED` with reason `owner_not_operator`.
+5. Checks the Alpaca market clock.
+6. Runs each eligible agent cycle.
+7. Counts successful, failed, and overlapping agents.
+8. Stores a tick summary in Redis and in process memory fallback.
 
 ### Per-agent schedule
 
-`POST /agent/scheduler/start` stores or updates `AgentSchedule`, enables the
-user scheduler, and registers a job. The first run occurs after the interval;
-it is not immediate.
+`POST /agent/scheduler/start` (`OPERATOR` or `ADMIN`) stores or updates
+`AgentSchedule`, enables the user scheduler, and registers a job. The first run
+occurs after the interval; it is not immediate.
 
 `POST /agent/scheduler/{schedule_id}/stop` disables scheduling for the user and
 removes that user's in-memory jobs. In-flight cycles are not forcibly stopped.
+Any owner, `VIEWER` included, may stop: pausing only reduces risk.
 
 ### Celery boundary
 
@@ -958,7 +961,8 @@ and that `ollama list` includes the configured model.
 
 1. `GET /health` — confirms the API process is alive.
 2. `GET /health/db` — confirms PostgreSQL.
-3. `POST /auth/register` — create a user.
+3. `POST /auth/register` — create a user, then promote it to `OPERATOR` or
+   `ADMIN` in SQL (new users are `VIEWER`, which gets `403` on steps 7 and 9).
 4. `POST /auth/login` — copy `access_token`.
 5. Click **Authorize** in Swagger and enter `Bearer <access_token>`.
 6. `POST /accounts/alpaca` — connect valid Alpaca paper credentials, unless
@@ -981,8 +985,8 @@ and that `ollama list` includes the configured model.
     `schedules`, and `recent_cycles`.
 12. `GET /agent/scheduler/logs?schedule_id=<schedule-id>` — inspect tick
     results. `COMPLETED` means the worker ran the tick; `SKIPPED` includes
-    reasons such as `market_closed`, `kill_switch_enabled`, or
-    `no_enabled_agents`.
+    reasons such as `market_closed`, `kill_switch_enabled`,
+    `no_enabled_agents`, or `owner_not_operator`.
 13. If the cycle produces a BUY/SELL proposal under `REQUIRED` approval mode,
     call `GET /agent/approvals/pending`, then approve or reject it.
 14. Stop the schedule with
@@ -1075,9 +1079,12 @@ attempt is recorded in `audit_events` as `MANUAL_ORDER_SUBMITTED`,
 - `GET /agent/scheduler/logs`
 
 All protected routes use the current-user dependency. Kill-switch mutation and
-read endpoints require the `ADMIN` role. Direct broker order submission, cycle
-approval/rejection, and agent-config updates (`PATCH /agent/config`) require the
-`OPERATOR` or `ADMIN` role; authenticated read endpoints, including
+read endpoints require the `ADMIN` role. Direct broker order submission, manual
+cycle runs (`POST /agent/cycles/run`), schedule starts
+(`POST /agent/scheduler/start`), cycle approval/rejection, and agent-config
+updates (`PATCH /agent/config`) require the `OPERATOR` or `ADMIN` role; the
+role check runs before any agent provisioning, LLM or broker call. Stopping a
+schedule stays open to its owner. Authenticated read endpoints, including
 `GET /agent/config`, remain available to every active user. The agent-config
 endpoints are owner-scoped: another user's agent returns `404`.
 
@@ -1087,7 +1094,7 @@ endpoints are owner-scoped: another user's agent returns `404`.
 |---|---|
 | `VIEWER` | Read-only access to authenticated account, broker, market-data, agent-config, agent-cycle, approval, and scheduler status endpoints. |
 | `AUDITOR` | Same read-only access as `VIEWER`, intended for audit and review workflows. |
-| `OPERATOR` | All authenticated read access plus direct paper-order submission, cycle approval/rejection, and agent watchlist/approval-mode updates. |
+| `OPERATOR` | All authenticated read access plus direct paper-order submission, manual cycle runs, schedule starts, cycle approval/rejection, and agent watchlist/approval-mode updates. Scheduled ticks skip an owner who is no longer `OPERATOR`/`ADMIN`. |
 | `ADMIN` | All `OPERATOR` access plus kill-switch read/update access. |
 
 Role checks are implemented as reusable FastAPI dependencies in

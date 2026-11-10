@@ -15,7 +15,7 @@ in Settings instead - see app/core/config.py.
 
 from __future__ import annotations
 
-from app.db.enums import CycleStatus
+from app.db.enums import CycleStatus, UserRole
 
 # --- Alpaca paper-trading endpoint ---
 # The ONLY trading endpoint this app will ever submit real orders to
@@ -70,6 +70,9 @@ SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")
 
 # --- Auth ---
 BCRYPT_MAX_PASSWORD_BYTES = 72
+# Roles allowed to act on trading: run or schedule cycles, approve or reject proposals,
+# edit the agent config (`require_operator`). Scheduled ticks skip owners outside it (#176).
+OPERATOR_ROLES = (UserRole.OPERATOR, UserRole.ADMIN)
 # How long a /auth/forgot-password token stays valid (Issue #166).
 PASSWORD_RESET_TOKEN_EXPIRY_MINUTES = 30
 

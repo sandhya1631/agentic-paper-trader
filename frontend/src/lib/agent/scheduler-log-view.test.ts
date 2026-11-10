@@ -28,6 +28,14 @@ describe("describeTick", () => {
     });
   });
 
+  it("labels a tick skipped for an owner who isn't an operator (#176)", () => {
+    expect(describeTick({ status: "SKIPPED", reason: "owner_not_operator" })).toMatchObject({
+      label: "Skipped",
+      tone: "neutral",
+      reason: "Owner isn't an operator or admin",
+    });
+  });
+
   it("labels a failed tick (negative)", () => {
     expect(describeTick({ status: "FAILED", reason: "agent_cycle_failed" })).toMatchObject({
       label: "Failed",
