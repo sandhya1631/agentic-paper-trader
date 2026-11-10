@@ -19,6 +19,7 @@ from app.db.schema import (
     ensure_agent_cycle_policy_columns,
     ensure_agent_cycle_prompt_columns,
     ensure_kill_switch_event_scope_columns,
+    ensure_policy_token_scrubbed,
     ensure_user_scheduler_column,
 )
 from app.db.session import AsyncSessionLocal, engine, get_db
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
         await ensure_agent_cycle_policy_columns(conn)
         await ensure_user_scheduler_column(conn)
         await ensure_kill_switch_event_scope_columns(conn)
+        await ensure_policy_token_scrubbed(conn)
     scheduler = create_scheduler(
         settings,
         include_global_job=settings.scheduler_enabled,

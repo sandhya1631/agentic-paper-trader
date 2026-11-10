@@ -100,6 +100,8 @@ async def test_lifespan_starts_scheduler_before_yield_and_stops_it(monkeypatch):
         "ensure_kill_switch_event_scope_columns",
         AsyncMock(),
     )
+    scrub_policy_tokens = AsyncMock()
+    monkeypatch.setattr(main_module, "ensure_policy_token_scrubbed", scrub_policy_tokens)
     monkeypatch.setattr(
         main_module,
         "AsyncSessionLocal",
@@ -114,6 +116,8 @@ async def test_lifespan_starts_scheduler_before_yield_and_stops_it(monkeypatch):
     async with main_module.lifespan(main_module.app):
         assert main_module.app.state.scheduler is scheduler_instance
         scheduler_instance.start.assert_called_once()
+        # Stored policy tokens from before #175 are scrubbed at startup.
+        scrub_policy_tokens.assert_awaited_once_with(connection)
 
     scheduler_instance.shutdown.assert_called_once_with(wait=False)
     assert main_module.app.state.scheduler is None

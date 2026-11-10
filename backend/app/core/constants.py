@@ -23,6 +23,10 @@ from app.db.enums import CycleStatus, UserRole
 ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 ALPACA_DATA_FEED = "iex"
+# GET /v2/orders returns at most this many orders per request (Alpaca's maximum `limit`).
+ALPACA_ORDERS_PAGE_LIMIT = 500
+# Paging stops (and the read fails closed) after this many full pages, i.e. 10,000 orders.
+ALPACA_ORDERS_MAX_PAGES = 20
 
 # --- Market data ---
 DEFAULT_WATCHLIST = ["AAPL", "NVDA", "SPY"]
@@ -54,6 +58,12 @@ ALPACA_PROVIDER = "ALPACA"
 
 # --- Risk policies ---
 POLICY_VERSION = "POLICY-1.0"
+
+# --- Audit events (audit_events.event_type) ---
+# Manual override orders through POST /api/v1/broker/orders (#162): one row per attempt.
+MANUAL_ORDER_SUBMITTED = "MANUAL_ORDER_SUBMITTED"
+MANUAL_ORDER_BLOCKED = "MANUAL_ORDER_BLOCKED"  # the kill switch refused it (423)
+MANUAL_ORDER_FAILED = "MANUAL_ORDER_FAILED"  # the broker call raised (502)
 
 # --- LLM client factory ---
 SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")

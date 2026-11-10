@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.agent import scheduler as scheduler_service
-from app.agent.approval import evaluate_and_submit_cycle_trade
+from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.audit import record_audit_event
 from app.auth.dependencies import get_current_user, require_operator
@@ -638,17 +638,19 @@ async def approve_cycle_trade(
         ) from exc
 
     approval.policy_version = policy_decision.policy_version
-    approval.policy_result_json = policy_decision.model_dump(mode="json")
+    # The signed policy token is never stored or returned; only the gateway receives it,
+    # in memory (#175).
+    approval.policy_result_json = persistable_policy_result(policy_decision)
     approval.acted_at = now
     approval.actor_id = current_user.id
     approval.comment = body.comment
     cycle.completed_at = now
     snapshot = dict(cycle.snapshot_json or {})
-    snapshot["policy_evaluation"] = policy_decision.model_dump(mode="json")
+    snapshot["policy_evaluation"] = persistable_policy_result(policy_decision)
     # Record the fresh binding decision as the cycle's queryable policy result (#121),
     # overwriting the earlier pending-approval preview. The signed token is excluded.
     cycle.policy_decision = policy_decision.decision
-    cycle.policy_result_json = policy_decision.model_dump(mode="json", exclude={"policy_token"})
+    cycle.policy_result_json = persistable_policy_result(policy_decision)
     if broker_order is None:
         approval.status = ApprovalStatus.REJECTED
         approval.comment = (
