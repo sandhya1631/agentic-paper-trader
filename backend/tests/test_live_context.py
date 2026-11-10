@@ -13,12 +13,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from alpaca_order_book import NOTIONAL_ORDER_JSON
+from test_broker_positions_orders import _mock_http_get
 
 from app.agent import live_context, orchestrator
 from app.agent.context import build_agent_context
 from app.agent.live_context import LiveAccountData, fetch_live_account_data
 from app.agent.orchestrator import run_agent_cycle
 from app.agent.prompt import get_system_prompt
+from app.broker.alpaca import AlpacaClient
 
 REAL_ACCOUNT = {
     "cash": "52000.50",
@@ -143,10 +146,12 @@ class _FakeAlpaca:
             )
         ]
 
-    async def get_orders(self, status="open"):
+    async def get_orders(self, status="open", **_kwargs):
         self.calls.append(f"orders:{status}")
         return [
-            SimpleNamespace(id="o1", symbol="NVDA", side="buy", qty=Decimal("2"), status="new")
+            SimpleNamespace(
+                id="o1", symbol="NVDA", side="buy", qty=Decimal("2"), notional=None, status="new"
+            )
         ]
 
 
@@ -190,6 +195,47 @@ async def test_fetch_maps_the_broker_account_into_plain_sanitized_values(monkeyp
     assert data.market_open is True
     assert _FakeAlpaca.calls == ["account", "positions", "orders:open"]
     assert "key" not in json.dumps(data.account)
+
+
+@pytest.mark.asyncio
+async def test_fetch_stays_live_with_an_open_notional_order(monkeypatch):
+    """Alpaca returns `qty: null` for a notional order; that used to make the whole
+    account UNAVAILABLE (#177). The order is now listed with its dollar amount."""
+    _patch_broker(monkeypatch)
+    real_parser = AlpacaClient(
+        api_key="k", api_secret="s", client=_mock_http_get([NOTIONAL_ORDER_JSON])
+    )
+
+    async def get_orders(self, status="open", **kwargs):
+        self.calls.append(f"orders:{status}")
+        return await real_parser.get_orders(status=status, **kwargs)
+
+    monkeypatch.setattr(_FakeAlpaca, "get_orders", get_orders)
+
+    data = await fetch_live_account_data(_db_with_account(), _agent())
+
+    assert data is not None
+    assert data.open_orders == [
+        {
+            "id": "notional-1",
+            "symbol": "MSFT",
+            "side": "buy",
+            "qty": None,
+            "status": "accepted",
+            "notional": "100",
+        }
+    ]
+    context = build_agent_context(
+        ["AAPL"],
+        {},
+        account_info=data.account,
+        positions=data.positions,
+        open_orders=data.open_orders,
+        market_open=data.market_open,
+    )
+    assert context["account_data"] == "LIVE"
+    assert context["open_orders"][0]["notional"] == "100"
+    assert context["open_orders"][0]["qty"] is None
 
 
 @pytest.mark.asyncio

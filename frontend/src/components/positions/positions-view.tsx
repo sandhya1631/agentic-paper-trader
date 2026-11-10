@@ -9,6 +9,7 @@ import {
   type AlpacaOrder,
   type AlpacaPosition,
 } from "@/lib/broker/broker-api";
+import { formatOrderQuantity } from "@/lib/broker/order-view";
 import { getErrorMessage } from "@/lib/api/error-message";
 import { formatDateTime, formatMoney, formatPercent, formatSignedMoney, signTone } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
@@ -151,7 +152,7 @@ export function PositionsView() {
                         {o.side.toUpperCase()}
                       </Badge>
                     </td>
-                    <td className="px-4 py-3">{o.qty}</td>
+                    <td className="px-4 py-3">{formatOrderQuantity(o)}</td>
                     <td className="px-4 py-3">{o.filled_qty}</td>
                     <td className="px-4 py-3">{o.status}</td>
                     <td className="px-4 py-3 text-muted">{formatDateTime(o.submitted_at)}</td>
