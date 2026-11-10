@@ -630,6 +630,7 @@ async def test_trigger_cycle_endpoint_returns_409_on_overlap(client: AsyncClient
     async with TestSessionLocal() as db:
         user_result = await db.execute(select(User).where(User.email == email))
         user = user_result.scalar_one()
+        user.role = UserRole.OPERATOR  # running cycles is operator-only (#176)
         account = TradingAccount(
             user_id=user.id,
             provider="ALPACA",

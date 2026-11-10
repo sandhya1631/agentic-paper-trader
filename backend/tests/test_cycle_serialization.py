@@ -33,7 +33,7 @@ from app.agent.orchestrator import (
     run_watchlist_cycles,
 )
 from app.agent.orchestrator import agent_cycle_lock as real_agent_cycle_lock
-from app.db.enums import ApprovalMode, CycleTrigger, PolicyDecisionType
+from app.db.enums import ApprovalMode, CycleTrigger, PolicyDecisionType, UserRole
 from app.db.models import AgentCycle, TradingAccount, User
 
 WATCHLIST = ["AAPL", "NVDA"]
@@ -176,6 +176,7 @@ async def test_manual_trigger_returns_409_while_agent_lock_is_held(client: Async
     async with TestSessionLocal() as db:
         agent = await _seed_agent(db, watchlist=WATCHLIST, approval_mode=ApprovalMode.REQUIRED)
         owner = (await db.execute(select(User).where(User.email == email))).scalar_one()
+        owner.role = UserRole.OPERATOR  # running cycles is operator-only (#176)
         account = await db.get(TradingAccount, agent.account_id)
         account.user_id = owner.id  # hand the seeded agent to the logged-in user
         await db.commit()

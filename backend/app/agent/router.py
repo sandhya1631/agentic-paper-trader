@@ -283,15 +283,19 @@ async def update_agent_config(
     return AgentConfigDetailRead.model_validate(agent)
 
 
-@router.post("/cycles/run", response_model=CycleRead, summary="Trigger manual agent cycle")
+@router.post(
+    "/cycles/run", response_model=CycleRead, summary="Trigger manual agent cycle (operator)"
+)
 async def trigger_manual_cycle(
     agent_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator),
 ) -> Any:
     """Manually trigger one execution cycle for an agent.
 
-    Auto-creates a default agent if none exists.
+    Auto-creates a default agent if none exists. OPERATOR/ADMIN only (#176): a cycle can
+    trade, and the role dependency rejects a VIEWER before any provisioning, LLM or
+    broker call.
     """
     if agent_id is None:
         agent = await _get_owned_agent(db, current_user.id)
@@ -711,15 +715,19 @@ async def reject_cycle_trade(
     "/scheduler/start",
     response_model=ScheduleStartRead,
     status_code=status.HTTP_201_CREATED,
-    summary="Start a recurring schedule and resume scheduling for this user",
+    summary="Start a recurring schedule and resume scheduling for this user (operator)",
 )
 async def start_agent_schedule(
     body: ScheduleStartRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator),
 ) -> ScheduleStartRead:
-    """Persist one schedule, resume this user, and restore all their enabled schedules."""
+    """Persist one schedule, resume this user, and restore all their enabled schedules.
+
+    OPERATOR/ADMIN only (#176). Stopping stays open to the owner, since pausing only
+    reduces risk; scheduled ticks skip owners who are no longer OPERATOR/ADMIN.
+    """
     scheduler_instance = getattr(request.app.state, "scheduler", None)
     if scheduler_instance is None or not scheduler_instance.running:
         raise HTTPException(
@@ -810,7 +818,10 @@ async def stop_agent_schedule(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> AgentScheduleRead:
-    """Pause all scheduled cycles for the owning user; in-flight cycles may finish."""
+    """Pause all scheduled cycles for the owning user; in-flight cycles may finish.
+
+    Open to any owner, VIEWER included (#176): pausing only reduces risk.
+    """
     result = await db.execute(
         select(AgentSchedule).where(
             AgentSchedule.id == schedule_id,

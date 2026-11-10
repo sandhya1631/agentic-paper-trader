@@ -92,6 +92,17 @@ function cycle(overrides: Record<string, unknown> = {}) {
   } as never;
 }
 
+function asOperator() {
+  mockMe.mockResolvedValue({ id: "u1", email: "o@example.com", role: "OPERATOR" });
+}
+
+/** Find a button and wait until the role has loaded and enabled it. */
+async function findEnabledButton(name: RegExp): Promise<HTMLButtonElement> {
+  const button = (await screen.findByRole("button", { name })) as HTMLButtonElement;
+  await waitFor(() => expect(button.disabled).toBe(false));
+  return button;
+}
+
 function schedStatus(overrides: Record<string, unknown> = {}) {
   return {
     enabled: false,
@@ -145,7 +156,9 @@ describe("Agent configuration gating", () => {
     render(<SettingsView />);
     const remove = (await screen.findByRole("button", { name: /remove aapl/i })) as HTMLButtonElement;
     expect(remove.disabled).toBe(true);
-    expect(screen.getByText(/only operators and admins/i)).toBeTruthy();
+    expect(
+      screen.getByText(/only operators and admins can change the agent configuration/i),
+    ).toBeTruthy();
   });
 
   it("is editable for operators", async () => {
@@ -162,17 +175,19 @@ describe("Agent configuration gating", () => {
 
 describe("Trigger Now", () => {
   it("runs a cycle and shows the result", async () => {
+    asOperator();
     mockTrigger.mockResolvedValue(cycle());
     render(<SettingsView />);
-    fireEvent.click(await screen.findByRole("button", { name: /trigger now/i }));
+    fireEvent.click(await findEnabledButton(/trigger now/i));
     expect(await screen.findByText("COMPLETED")).toBeTruthy();
     expect(screen.getByText(/BUY AAPL/)).toBeTruthy();
   });
 
   it("explains a 409 non-destructively", async () => {
+    asOperator();
     mockTrigger.mockRejectedValue(new ApiError(409, "Conflict", { detail: "running" }, "http://x"));
     render(<SettingsView />);
-    fireEvent.click(await screen.findByRole("button", { name: /trigger now/i }));
+    fireEvent.click(await findEnabledButton(/trigger now/i));
     expect(await screen.findByText(/a cycle is already running/i)).toBeTruthy();
   });
 });
@@ -284,6 +299,7 @@ describe("Account connection", () => {
 
 describe("Scheduler controls", () => {
   it("starts a schedule using the user's agent id", async () => {
+    asOperator();
     mockCycles.mockResolvedValue({
       items: [cycle({ id: "cx", agent_id: "agent-9" })],
       total: 1,
@@ -297,7 +313,7 @@ describe("Scheduler controls", () => {
     });
     render(<SettingsView />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /start schedule/i }));
+    fireEvent.click(await findEnabledButton(/start schedule/i));
     await waitFor(() => expect(mockStart).toHaveBeenCalledWith("agent-9", 15));
   });
 
@@ -322,6 +338,88 @@ describe("Scheduler controls", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /stop schedule/i }));
     await waitFor(() => expect(mockStop).toHaveBeenCalledWith("s1"));
+  });
+});
+
+describe("Agent activity gating (#176)", () => {
+  const agentCycles = {
+    items: [cycle({ id: "cx", agent_id: "agent-9" })],
+    total: 1,
+    limit: 1,
+    offset: 0,
+    next_offset: null,
+  };
+
+  it("disables Trigger Now and Start schedule for viewers, with a note", async () => {
+    mockCycles.mockResolvedValue(agentCycles);
+    render(<SettingsView />);
+
+    const start = (await screen.findByRole("button", { name: /start schedule/i })) as HTMLButtonElement;
+    const trigger = screen.getByRole("button", { name: /trigger now/i }) as HTMLButtonElement;
+    await waitFor(() => expect(mockMe).toHaveBeenCalled());
+    expect(trigger.disabled).toBe(true);
+    expect(start.disabled).toBe(true);
+    expect(screen.getByText(/only operators and admins can trigger cycles/i)).toBeTruthy();
+    expect(screen.getByText(/only operators and admins can start the schedule/i)).toBeTruthy();
+
+    fireEvent.click(trigger);
+    fireEvent.click(start);
+    expect(mockTrigger).not.toHaveBeenCalled();
+    expect(mockStart).not.toHaveBeenCalled();
+  });
+
+  it("leaves Stop schedule enabled for viewers", async () => {
+    mockSchedStatus.mockResolvedValue(
+      schedStatus({
+        running: true,
+        schedules: [
+          { id: "s1", agent_id: "a1", interval_minutes: 15, enabled: true, next_run_time: null },
+        ],
+      }),
+    );
+    mockStop.mockResolvedValue({
+      id: "s1",
+      agent_id: "a1",
+      interval_minutes: 15,
+      enabled: false,
+      next_run_time: null,
+      last_tick: null,
+    });
+    render(<SettingsView />);
+
+    const stop = (await screen.findByRole("button", { name: /stop schedule/i })) as HTMLButtonElement;
+    await waitFor(() => expect(mockMe).toHaveBeenCalled());
+    expect(stop.disabled).toBe(false);
+    fireEvent.click(stop);
+    await waitFor(() => expect(mockStop).toHaveBeenCalledWith("s1"));
+  });
+
+  it.each(["OPERATOR", "ADMIN"] as const)("enables both controls for %s", async (role) => {
+    mockMe.mockResolvedValue({ id: "u1", email: "o@example.com", role });
+    mockCycles.mockResolvedValue(agentCycles);
+    render(<SettingsView />);
+
+    await findEnabledButton(/trigger now/i);
+    await findEnabledButton(/start schedule/i);
+    expect(screen.queryByText(/only operators and admins/i)).toBeNull();
+  });
+
+  it("doesn't send a viewer without an agent to the disabled Trigger Now", async () => {
+    render(<SettingsView />);
+
+    expect(
+      await screen.findByText(/only operators and admins can create and schedule the agent/i),
+    ).toBeTruthy();
+    await waitFor(() => expect(mockMe).toHaveBeenCalled());
+    expect(screen.queryByText(/trigger a cycle first/i)).toBeNull();
+  });
+
+  it("keeps the trigger-first hint for an operator without an agent", async () => {
+    asOperator();
+    render(<SettingsView />);
+
+    expect(await screen.findByText(/trigger a cycle first/i)).toBeTruthy();
+    expect(screen.queryByText(/create and schedule the agent/i)).toBeNull();
   });
 });
 
