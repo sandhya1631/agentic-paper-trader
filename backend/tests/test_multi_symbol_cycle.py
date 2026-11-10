@@ -9,17 +9,18 @@ approval must not block the next), per-symbol guardrails, and a de-anchored prom
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.orchestrator import run_watchlist_cycles
+from app.agent.orchestrator import CycleOverlapError, run_watchlist_cycles
 from app.agent.prompt import get_system_prompt
 from app.db.enums import (
     ApprovalMode,
+    ApprovalStatus,
     CycleStatus,
     CycleTrigger,
     PolicyDecisionType,
@@ -28,6 +29,7 @@ from app.db.enums import (
 from app.db.models import (
     AgentConfig,
     AgentCycle,
+    CycleApproval,
     PolicySet,
     TradingAccount,
     User,
@@ -387,3 +389,80 @@ async def test_sweep_reads_the_live_account_once_and_shares_it(db_session: Async
     for cycle in cycles:
         assert cycle.snapshot_json["account"]["cash"] == "52000.50"
         assert cycle.snapshot_json["positions"][0]["symbol"] == "NVDA"
+
+
+async def _park_pending_approval(
+    db: AsyncSession, agent: AgentConfig, *, expires_in: timedelta
+) -> AgentCycle:
+    """An earlier tick's BUY parked in PENDING_APPROVAL, with its approval."""
+    now = datetime.now(timezone.utc)
+    cycle = AgentCycle(
+        agent_id=agent.id,
+        trigger=CycleTrigger.SCHEDULED,
+        status=CycleStatus.PENDING_APPROVAL,
+        started_at=now,
+        proposal_json={"symbol": "AAPL", "action": "BUY", "quantity": 1, "reasoning": "x"},
+    )
+    db.add(cycle)
+    await db.flush()
+    db.add(
+        CycleApproval(
+            cycle_id=cycle.id,
+            status=ApprovalStatus.PENDING,
+            proposal_hash="0" * 64,
+            expires_at=now + expires_in,
+        )
+    )
+    await db.commit()
+    return cycle
+
+
+@pytest.mark.asyncio
+async def test_sweep_for_a_busy_agent_makes_no_market_data_or_broker_calls(
+    db_session: AsyncSession,
+):
+    """#178: the sweep gates once, BEFORE its bar prefetch and live-account read, so an
+    agent parked in PENDING_APPROVAL costs no Alpaca calls on a tick."""
+    watchlist = ["AAPL", "NVDA"]
+    agent = await _seed_agent(db_session, watchlist=watchlist, approval_mode=ApprovalMode.REQUIRED)
+    parked = await _park_pending_approval(db_session, agent, expires_in=timedelta(hours=1))
+    collector = _collector_for(watchlist)
+    llm = _echo_target_llm()
+
+    # collector=None is the scheduled tick's path: the sweep builds its own collector.
+    with (
+        patch(
+            "app.agent.orchestrator.create_market_data_collector", return_value=collector
+        ) as make_collector,
+        patch("app.agent.orchestrator.fetch_live_account_data", AsyncMock()) as fetch_account,
+        pytest.raises(CycleOverlapError, match=str(parked.id)),
+    ):
+        await run_watchlist_cycles(agent.id, db_session, llm_client=llm, collector=None)
+
+    make_collector.assert_not_called()
+    collector.fetch_latest_bars.assert_not_awaited()
+    fetch_account.assert_not_awaited()
+    llm.generate.assert_not_awaited()
+    rows = (
+        await db_session.execute(select(AgentCycle).where(AgentCycle.agent_id == agent.id))
+    ).scalars().all()
+    assert [r.id for r in rows] == [parked.id]  # no new cycle was created
+
+
+@pytest.mark.asyncio
+async def test_sweep_expires_a_stale_approval_and_then_runs(db_session: AsyncSession):
+    """The sweep's gate still expires stale approvals first, so a forgotten approval
+    never blocks the agent forever; the tick then runs every symbol."""
+    watchlist = ["AAPL", "NVDA"]
+    agent = await _seed_agent(db_session, watchlist=watchlist, approval_mode=ApprovalMode.REQUIRED)
+    stale = await _park_pending_approval(db_session, agent, expires_in=-timedelta(minutes=1))
+
+    cycles = await run_watchlist_cycles(
+        agent.id, db_session, llm_client=_echo_target_llm(), collector=_collector_for(watchlist)
+    )
+
+    assert [c.proposal_json["symbol"] for c in cycles] == watchlist
+    assert all(c.status == CycleStatus.PENDING_APPROVAL for c in cycles)
+    await db_session.refresh(stale)
+    assert stale.status == CycleStatus.REJECTED
+    assert stale.failure_code == "APPROVAL_EXPIRED"
