@@ -15,6 +15,7 @@ from app.agent.orchestrator import CycleOverlapError, run_watchlist_cycles
 from app.agent.tasks import run_agent_schedule_task, run_scheduled_cycles_task
 from app.broker.alpaca import AlpacaClient
 from app.core.config import Settings, get_settings
+from app.core.constants import OPERATOR_ROLES
 from app.db.enums import CycleTrigger
 from app.db.models import (
     AgentConfig,
@@ -170,7 +171,7 @@ async def run_scheduled_cycles(
     try:
         async with AsyncSessionLocal() as db:
             query = (
-                select(AgentConfig.id)
+                select(AgentConfig.id, User.role)
                 .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
                 .join(User, TradingAccount.user_id == User.id)
                 .where(
@@ -186,14 +187,29 @@ async def run_scheduled_cycles(
                 )
                 query = query.where(AgentConfig.id.not_in(scheduled_agent_ids))
             result = await db.execute(query)
-            agent_ids = result.scalars().all()
+            agent_rows = result.all()
     except Exception:
         logger.exception("Scheduled agent tick failed while loading enabled agents")
         return finish("FAILED", "agent_query_failed")
 
-    enabled_agents = len(agent_ids)
-    if not agent_ids:
+    enabled_agents = len(agent_rows)
+    if not agent_rows:
         return finish("SKIPPED", "no_enabled_agents")
+
+    # Only OPERATOR/ADMIN owners may run cycles (#176): a demoted owner's schedule keeps
+    # ticking, but the tick runs nothing for them (no market clock, LLM or broker call).
+    agent_ids: list[UUID] = []
+    for agent_id, owner_role in agent_rows:
+        if owner_role in OPERATOR_ROLES:
+            agent_ids.append(agent_id)
+        else:
+            logger.warning(
+                "Scheduled cycle skipped for agent %s: owner role %s is not OPERATOR or ADMIN",
+                agent_id,
+                owner_role,
+            )
+    if not agent_ids:
+        return finish("SKIPPED", "owner_not_operator")
 
     try:
         clock = await _fetch_market_clock(settings)
@@ -217,6 +233,7 @@ async def run_scheduled_cycles(
                         AgentConfig.id == agent_id,
                         AgentConfig.enabled.is_(True),
                         User.scheduler_enabled.is_(True),
+                        User.role.in_(OPERATOR_ROLES),
                     )
                 )
                 if enabled_result.scalar_one_or_none() is None:

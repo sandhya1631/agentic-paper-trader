@@ -19,11 +19,23 @@ The frontend reads `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000`) 
 allows CORS from `http://localhost:3000`. Every API call carries the Bearer JWT; a 401 redirects to
 `/login`.
 
-## 1. Sign in
+## 1. Sign in and promote the demo user
 - Go to `http://localhost:3000/register`, create a user, then log in at `/login`.
-- A fresh user has role **VIEWER** (the kill-switch control stays hidden — see step 7).
+- A fresh user has role **VIEWER**: read-only. Trigger Now, Start schedule, Approve/Reject and
+  agent-config edits need **OPERATOR** or **ADMIN** (Settings shows those controls disabled with an
+  "only operators and admins" note). There is no role UI yet, so promote the user once in SQL:
+
+  ```powershell
+  docker exec apt-postgres psql -U <POSTGRES_USER> -d <POSTGRES_DB> -c "UPDATE users SET role='ADMIN' WHERE email='<you>';"
+  ```
+
+  Use the `POSTGRES_USER` / `POSTGRES_DB` names from `backend/.env`. `ADMIN` also unlocks the kill
+  switch (step 7); use `OPERATOR` to demo without it. Roles are read on every request, so just
+  refresh the page.
 
 ## 2. Connect the Alpaca paper account (Settings)
+- Do this **after** promoting the user (step 1), and **before** the first Trigger Now: a cycle run
+  before keys are connected creates a placeholder account.
 - Open **Settings** → *Alpaca paper account* → paste your Alpaca **paper** API key + secret → **Connect account**.
 - Keys are encrypted at rest and never shown again. Dashboard/Positions now show live data.
 
@@ -32,7 +44,8 @@ allows CORS from `http://localhost:3000`. Every API call carries the Bearer JWT;
 - **Positions**: open positions with unrealized-P/L badges and open orders.
 
 ## 4. Trigger a cycle (Settings → Trigger Now)
-- Click **Trigger Now**. This runs one agent cycle: market data → indicators → LLM proposal → policies.
+- Click **Trigger Now** (OPERATOR or ADMIN; see step 1). This runs one agent cycle: market data →
+  indicators → LLM proposal → policies.
 - The default agent runs in **REQUIRED** approval mode, so a BUY/SELL proposal is parked for review
   (a HOLD completes with no order). This is the intended, transparent demo path.
 
@@ -48,11 +61,12 @@ allows CORS from `http://localhost:3000`. Every API call carries the Bearer JWT;
 
 ## 7. Operator controls
 - **Autonomous schedule** (Settings): start a recurring schedule (e.g. every 15 min) and stop it.
-  Scheduled ticks are **skipped while the market is closed** (a safety guardrail) — demo during
-  market hours, or show the skip as expected behavior.
-- **Kill switch** (Settings, **admin only**): to show it, promote a user to admin once:
-  `UPDATE users SET role='ADMIN' WHERE email='<you>';`. Enabling it blocks all order dispatch
-  server-side; approving a trade while it's on returns a blocked result.
+  Starting needs OPERATOR or ADMIN; any owner can stop their own schedule. Scheduled ticks are
+  **skipped while the market is closed** (a safety guardrail) — demo during market hours, or show
+  the skip as expected behavior. Ticks are also skipped (`owner_not_operator`) if the owner has
+  since been demoted to VIEWER.
+- **Kill switch** (Settings, **admin only**): visible once the user is ADMIN (step 1). Enabling it
+  blocks all order dispatch server-side; approving a trade while it's on returns a blocked result.
 
 ## Known scope / deferred
 - **Approval mode is REQUIRED** by default and cannot be changed from the UI — there is no

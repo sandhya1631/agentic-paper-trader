@@ -41,6 +41,9 @@ export function SettingsView() {
       .catch(() => setUser(null));
   }, []);
 
+  // Running or scheduling cycles is OPERATOR/ADMIN only (#176); Stop stays open to the owner.
+  const canOperate = user?.role === "OPERATOR" || user?.role === "ADMIN";
+
   return (
     <div className="space-y-6">
       <section>
@@ -48,10 +51,10 @@ export function SettingsView() {
         <p className="text-sm text-muted">Agent controls and account configuration.</p>
       </section>
       <AccountCard />
-      {/* Mirrors the backend operator gate (off until the role loads); its 403 is authoritative. */}
-      <AgentConfigCard canEdit={user?.role === "OPERATOR" || user?.role === "ADMIN"} />
-      <TriggerNowCard />
-      <SchedulerCard />
+      {/* Mirror the backend operator gate (off until the role loads); its 403 is authoritative. */}
+      <AgentConfigCard canEdit={canOperate} />
+      <TriggerNowCard canRun={canOperate} />
+      <SchedulerCard canStart={canOperate} />
       <SchedulerActivity />
       <KillSwitchCard isAdmin={user?.role === "ADMIN"} />
       <KillSwitchAuditCard isAdmin={user?.role === "ADMIN"} />
@@ -188,7 +191,7 @@ function AccountCard() {
   );
 }
 
-function SchedulerCard() {
+function SchedulerCard({ canStart }: { canStart: boolean }) {
   const [schedule, setSchedule] = useState<SchedulerScheduleRow | null>(null);
   const [running, setRunning] = useState(false);
   const [agentId, setAgentId] = useState<string | null>(null);
@@ -302,11 +305,14 @@ function SchedulerCard() {
           <button
             type="button"
             onClick={() => void onStart()}
-            disabled={busy || interval < 1}
+            disabled={!canStart || busy || interval < 1}
             className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-brand-foreground disabled:opacity-50"
           >
             {busy ? "Starting..." : "Start schedule"}
           </button>
+          {!canStart && (
+            <p className="w-full text-muted">Only operators and admins can start the schedule.</p>
+          )}
         </div>
       ) : (
         <p className="mt-2 text-sm text-muted">
@@ -317,7 +323,7 @@ function SchedulerCard() {
   );
 }
 
-function TriggerNowCard() {
+function TriggerNowCard({ canRun }: { canRun: boolean }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<AgentCycle | null>(null);
   const [message, setMessage] = useState<{ tone: "neutral" | "negative"; text: string } | null>(
@@ -355,11 +361,14 @@ function TriggerNowCard() {
       <button
         type="button"
         onClick={() => void onTrigger()}
-        disabled={busy}
+        disabled={!canRun || busy}
         className="mt-3 rounded-lg bg-brand px-4 py-2 text-sm font-medium text-brand-foreground disabled:opacity-50"
       >
         {busy ? "Running..." : "Trigger Now"}
       </button>
+      {!canRun && (
+        <p className="mt-2 text-sm text-muted">Only operators and admins can trigger cycles.</p>
+      )}
 
       {message && (
         <p
