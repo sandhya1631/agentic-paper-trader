@@ -10,7 +10,7 @@ The backend is a FastAPI application using:
 
 - PostgreSQL through async SQLAlchemy 2.0 and `asyncpg`.
 - Alpaca's paper-trading and market-data APIs.
-- Ollama or OpenAI for the language-model decision proposal.
+- Ollama, OpenAI or Anthropic (Claude) for the language-model decision proposal.
 - APScheduler for in-process schedule timing.
 - Celery and Redis for scheduled-cycle execution.
 - Fernet encryption for user Alpaca credentials.
@@ -45,7 +45,7 @@ HTTP request or scheduler tick
        |             |
        v             v
  Market data     LLM provider
- bars + TA       Ollama/OpenAI
+ bars + TA   Ollama/OpenAI/Claude
        |             |
        +------+------+
               v
@@ -118,9 +118,10 @@ Important settings:
 | `JWT_SECRET`, `JWT_ALGORITHM`, `JWT_ISSUER`, `JWT_EXPIRATION_MINUTES` | JWT authentication settings. |
 | `ALPACA_API_KEY`, `ALPACA_API_SECRET` | Server-level credentials used by market-data and scheduler clock checks. |
 | `ALPACA_PAPER_BASE_URL` | Must be `https://paper-api.alpaca.markets` with optional `/v2`. |
-| `LLM_PROVIDER` | `ollama` or `openai`; defaults to `ollama`. |
+| `LLM_PROVIDER` | `ollama`, `openai` or `anthropic`; defaults to `ollama`. |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local LLM connection. |
-| `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI connection. |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI connection; `OPENAI_MODEL` (default `gpt-4o-mini`) must support strict structured output (`json_schema`) and `temperature`. |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Anthropic (Claude) connection; model defaults to `claude-opus-5-5`. |
 | `CREDENTIAL_ENCRYPTION_KEY` | Required Fernet key for user Alpaca credentials. |
 | `SCHEDULER_ENABLED` | Enables the global APScheduler job; defaults to false. |
 | `SCHEDULER_INTERVAL_MINUTES` | Global schedule interval; defaults to 15. |
@@ -149,7 +150,7 @@ constructed.
 
 Fixed domain values that should not be environment-tunable are centralized in
 [constants.py](app/core/constants.py). This includes the official Alpaca
-endpoints and data feed, default watchlist, active-cycle statuses, strategy and
+endpoints and data feed, default watchlist and its size cap, active-cycle statuses, strategy and
 prompt versions, policy version, supported LLM providers, Alpaca provider name,
 and bcrypt's 72-byte password limit. Runtime-tunable values such as market-data
 limits, retry behavior, and daily order cap remain in `Settings`.
@@ -216,7 +217,7 @@ Stores how an agent is configured:
 - `name`
 - `watchlist` as JSON
 - `strategy_version` (currently `S-001`)
-- `cadence_minutes` (database constraint currently requires 15)
+- `cadence_minutes` (display-only; database constraint currently requires 15)
 - `target_allocation`
 - `max_symbol_allocation`
 - `cash_reserve`
@@ -232,6 +233,23 @@ Constraints currently require the target allocation to be positive and no
 larger than the maximum allocation, and the maximum symbol allocation to be at
 most 10%. The `strategy_version` validator calls `get_system_prompt()` so an
 unknown strategy version is rejected.
+
+The owner reads this row with `GET /agent/config`. An `OPERATOR` or `ADMIN` can
+change only `watchlist` and `approval_mode` with `PATCH /agent/config` (#141).
+Symbols are trimmed, upper-cased and de-duplicated in order, then pattern-checked,
+and the de-duplicated list must hold 1 to `MAX_WATCHLIST_SIZE` (20) symbols (so a
+repeated symbol never counts twice toward the cap); the cap is exposed as
+`max_watchlist_size` by `GET /meta/constants`. Every other field, including
+`cadence_minutes` and the allocation/risk limits, is rejected with `422`. Each
+change increments `version` and writes one `audit_events` row in the same commit.
+Each cycle re-reads the row, so the next manual or scheduled cycle uses the new
+watchlist and approval mode. P-005 still enforces the watchlist at policy time.
+
+`cadence_minutes` has no runtime effect: no scheduler or policy reads it. The
+real run interval is the per-agent `agent_schedules.interval_minutes` (1 to 1440,
+set by `POST /agent/scheduler/start`, the Settings "Autonomous schedule" card) or
+`SCHEDULER_INTERVAL_MINUTES` for the global job. It is therefore returned for
+display only and is not editable; the `ck_agent_mvp_cadence` constraint stays.
 
 ### 4.5 `agent_cycles`
 
@@ -323,7 +341,31 @@ The record is inserted as `PENDING_SUBMISSION` before the Alpaca POST. This
 allows the reconciliation path to determine whether a timeout happened before
 or after Alpaca accepted the order.
 
-### 4.10 Data stored outside PostgreSQL
+### 4.10 `audit_events`
+
+A generic, append-only audit trail; the persisted form of the `AuditEventRead`
+schema (#141):
+
+- `id`
+- `occurred_at`
+- `actor_type` (`USER`, `SYSTEM`, or `SCHEDULER`, stored as text)
+- `actor_id` (foreign key to `users.id`, set to null if the user is deleted)
+- `event_type` (for example `AGENT_CONFIG_UPDATED`)
+- `entity_type` (for example `agent_config`)
+- `entity_id`
+- `correlation_id`
+- `details` as JSON
+
+Rows are written by `record_audit_event()` in [audit.py](app/audit.py), which
+only stages the row; the caller commits it together with the change, so a
+committed change always has its audit row. The first producer is
+`PATCH /agent/config`, which writes one `AGENT_CONFIG_UPDATED` event per real
+change with `details = {"changes": {field: {"from": ..., "to": ...}}}` and none
+for a no-op request. There is no read endpoint yet. Because it is a new table,
+startup `create_all` creates it on existing databases. Kill-switch changes keep
+their own `kill_switch_events` table.
+
+### 4.11 Data stored outside PostgreSQL
 
 Redis stores:
 
@@ -338,11 +380,7 @@ directory is mounted to the `redis_data` Docker volume. Redis data therefore
 survives container recreation, although Celery results, scheduler history, and
 deduplication keys still have application-level expiry.
 
-There is an `AuditEventRead` Pydantic response model, but there is currently no
-corresponding `AuditEvent` SQLAlchemy model or persistence path. Therefore,
-full audit events are not currently stored as a separate database table.
-
-### 4.11 Storage ownership map
+### 4.12 Storage ownership map
 
 The following table shows where each important piece of data actually lives.
 “Source of truth” means the system that owns the current value; “local copy”
@@ -353,7 +391,8 @@ reconciliation.
 |---|---|---|---|---|
 | User identity and role | PostgreSQL `users` | Durable | Email, bcrypt hash, role, active flag, scheduler flag | Backend source of truth |
 | User Alpaca credentials | PostgreSQL `trading_accounts` | Durable | Fernet-encrypted API key and secret plus connection metadata | Backend vault copy; plaintext exists only during an immediate broker call |
-| Agent configuration | PostgreSQL `agent_configs` | Durable | Watchlist, strategy, risk thresholds, model, approval mode, enabled flag | Backend source of truth |
+| Agent configuration | PostgreSQL `agent_configs` | Durable | Watchlist, strategy, risk thresholds, model, approval mode, enabled flag | Backend source of truth; watchlist and approval mode editable via `PATCH /agent/config` |
+| Configuration audit trail | PostgreSQL `audit_events` | Durable, append-only | Actor, event type, entity, before/after changes | Backend audit record, written in the same commit as the change |
 | Policy-set metadata | PostgreSQL `policy_sets` | Durable | Policy version, JSON limits, active flag | Stored configuration; current evaluator uses Python policy definitions |
 | Agent cycle history | PostgreSQL `agent_cycles` | Durable | Status, trigger, timestamps, context snapshot, prompt, raw LLM response, proposal, errors | Backend decision/audit history |
 | Market context used by a cycle | PostgreSQL `agent_cycles.snapshot_json` | Durable snapshot | Latest prices, indicators, account summary, positions, open-order summary, execution metadata | Historical snapshot only; not a raw market-data archive |
@@ -373,11 +412,11 @@ reconciliation.
 | Scheduler tick history | Redis + `redis_data` volume in Compose | Up to 100 entries/key, 30-day expiry | Tick status, counts, reason, timestamps | Shared operational monitoring state |
 | Scheduler dispatch locks | Redis | Short-lived, about two interval lengths | `SET NX` slot keys preventing duplicate enqueueing | Distributed coordination lock, not history |
 | Scheduler fallback history | API process memory | Temporary | Recent tick summaries if Redis cannot be read/written | Best-effort fallback; lost on process restart |
-| LLM prompt and response | LLM provider during request; PostgreSQL after cycle | Provider runtime plus durable cycle record | Prompt sent to Ollama/OpenAI and returned text | Provider performs generation; PostgreSQL preserves the cycle evidence |
+| LLM prompt and response | LLM provider during request; PostgreSQL after cycle | Provider runtime plus durable cycle record | Prompt sent to Ollama/OpenAI/Anthropic and returned text | Provider performs generation; PostgreSQL preserves the cycle evidence |
 | Downloaded Ollama models | Ollama container filesystem | Durable in Compose | Pulled model files | `ollama_data` Docker volume; not PostgreSQL or Redis |
 | Logs and exceptions | Application process logging destination | Deployment-dependent | Operational messages and stack traces | Observability only; not a structured business-data store |
 
-### 4.12 Storage boundaries in one request
+### 4.13 Storage boundaries in one request
 
 For a scheduled trade, the storage sequence is:
 
@@ -560,16 +599,21 @@ main sequence.
 
 ### Step 1: Load and gate the agent
 
+- Take the agent's cycle lock (`agent_cycle_lock`): a Postgres advisory try-lock
+  held on a dedicated connection for the whole run. If another cycle or sweep for
+  this agent already holds it, raise `CycleOverlapError` immediately.
 - Load `AgentConfig`.
 - Expire old pending approvals for this agent.
 - Search for a cycle in any active status.
 - If an active cycle is `RECONCILING`, try to reconcile its broker order first.
 - If an active cycle remains, raise `CycleOverlapError`.
 
-This prevents a new trigger from starting while the agent has a cycle in progress.
-Scheduled ticks use `run_watchlist_cycles()`, which runs one cycle per watchlist
-symbol (`target_symbol`) and checks this gate only on the first symbol, so the
-sweep's own per-symbol cycles may be active together.
+This prevents a new trigger from starting while the agent has a cycle in progress,
+including across processes: a manual run (API) and a scheduled sweep (Celery
+worker) for the same agent can never interleave (#156). Scheduled ticks use
+`run_watchlist_cycles()`, which holds the lock for the whole sweep, runs one cycle
+per de-duplicated watchlist symbol (`target_symbol`) and checks the status gate only
+on the first symbol, so the sweep's own per-symbol cycles may be active together.
 
 ### Step 2: Create the cycle
 
@@ -584,7 +628,9 @@ Insert an `AgentCycle` with:
 ### Step 3: Collect market context
 
 Set status to `COLLECTING`, fetch watchlist bars, calculate indicators where
-there are at least 50 closes, and build the sanitized context.
+there are at least 50 closes, and build the sanitized context. The watchlist is
+first normalized (trimmed, upper-cased, de-duplicated, blanks dropped), the same way
+for a manual cycle and a sweep, so each distinct symbol is collected exactly once.
 
 A collector construction or bar-fetch problem is logged and leaves the cycle
 with empty/missing market data, allowing the strategy's HOLD mandate to apply.
@@ -712,8 +758,8 @@ result contains complete evidence instead of stopping at the first failure.
 | P-003 | Market open | Requires Alpaca clock to report open. |
 | P-004 | Fresh data | Requires data age at most 600 seconds. |
 | P-005 | Symbol allowlist | Requires symbol in agent watchlist. |
-| P-007 | Maximum allocation | BUY projected symbol exposure must be at most configured max, default 10% of equity. |
-| P-008 | Available cash | BUY cost must fit cash minus configured reserve. |
+| P-007 | Maximum allocation | BUY projected exposure in that symbol must be at most configured max, default 10% of equity. Per symbol by design (#156), so the caps can add up across a watchlist. |
+| P-008 | Available cash | BUY cost must fit cash minus configured reserve. The aggregate backstop: total deployment stays at about (1 − reserve) of equity; unfilled orders are not counted. |
 | P-009 | Sell ownership | SELL quantity cannot exceed owned long position. |
 | P-010 | Open-order conflict | Rejects a symbol that already has an open order. |
 | P-011 | Daily loss | Rejects when daily P&L is at or below the configured loss limit. |
@@ -989,6 +1035,8 @@ The direct order endpoint checks the kill switch, but it does not create the
 
 - `GET /agent/kill-switch`
 - `PUT /agent/kill-switch`
+- `GET /agent/config` (optional `?agent_id=`; `404` when the caller has no agent, never auto-provisions; a named `agent_id` the caller doesn't own is `404 "Agent not found"`)
+- `PATCH /agent/config` (optional `?agent_id=`; `watchlist` and/or `approval_mode` only)
 - `POST /agent/cycles/run`
 - `GET /agent/cycles/{cycle_id}`
 - `GET /agent/approvals/pending`
@@ -1000,17 +1048,19 @@ The direct order endpoint checks the kill switch, but it does not create the
 - `GET /agent/scheduler/logs`
 
 All protected routes use the current-user dependency. Kill-switch mutation and
-read endpoints require the `ADMIN` role. Direct broker order submission and
-cycle approval/rejection require the `OPERATOR` or `ADMIN` role; authenticated
-read endpoints remain available to every active user.
+read endpoints require the `ADMIN` role. Direct broker order submission, cycle
+approval/rejection, and agent-config updates (`PATCH /agent/config`) require the
+`OPERATOR` or `ADMIN` role; authenticated read endpoints, including
+`GET /agent/config`, remain available to every active user. The agent-config
+endpoints are owner-scoped: another user's agent returns `404`.
 
 ### Role-based access policy
 
 | Role | Access |
 |---|---|
-| `VIEWER` | Read-only access to authenticated account, broker, market-data, agent-cycle, approval, and scheduler status endpoints. |
+| `VIEWER` | Read-only access to authenticated account, broker, market-data, agent-config, agent-cycle, approval, and scheduler status endpoints. |
 | `AUDITOR` | Same read-only access as `VIEWER`, intended for audit and review workflows. |
-| `OPERATOR` | All authenticated read access plus direct paper-order submission and cycle approval/rejection. |
+| `OPERATOR` | All authenticated read access plus direct paper-order submission, cycle approval/rejection, and agent watchlist/approval-mode updates. |
 | `ADMIN` | All `OPERATOR` access plus kill-switch read/update access. |
 
 Role checks are implemented as reusable FastAPI dependencies in
@@ -1043,6 +1093,7 @@ async context-manager methods. Function locations are relative to `backend`.
 | `Settings._paper_endpoint_only` | `app/core/config.py` | Validates that configured Alpaca URL is paper-only. |
 | `get_settings` | `app/core/config.py` | Returns cached environment configuration. |
 | `ensure_alpaca_paper_url` | `app/core/paper_guard.py` | Refuses any non-official Alpaca paper URL. |
+| `record_audit_event` | `app/audit.py` | Stages one `audit_events` row; the caller commits it with the change. |
 
 ### Shared request, response, and decision schemas
 
@@ -1051,6 +1102,8 @@ async context-manager methods. Function locations are relative to `backend`.
 | `DecisionProposal.check_quantity_for_action` | `app/schemas.py` | Requires a positive quantity for BUY/SELL and permits zero for HOLD. |
 | `PolicyDecision.decision_is_consistent` | `app/schemas.py` | Ensures ALLOW/DENY, failed policies, and policy-token presence agree. |
 | `ApprovedOrder.price_matches_type` | `app/schemas.py` | Requires a limit price for LIMIT orders and forbids one for MARKET orders. |
+| `AgentConfigUpdate._dedupe_watchlist` | `app/schemas.py` | De-duplicates the normalized watchlist, keeping order. |
+| `AgentConfigUpdate._at_least_one_field_and_no_nulls` | `app/schemas.py` | Rejects an empty agent-config update and explicit nulls. |
 
 ### Authentication and account credentials
 
@@ -1100,6 +1153,9 @@ async context-manager methods. Function locations are relative to `backend`.
 |---|---|---|
 | `get_kill_switch` | `app/agent/router.py` | Returns effective kill-switch state for an admin. |
 | `update_kill_switch` | `app/agent/router.py` | Changes database kill-switch state for an admin. |
+| `_get_owned_agent` | `app/agent/router.py` | Loads the caller's agent (oldest first, optionally by id and locked); shared by config and manual-cycle routes. |
+| `get_agent_config` | `app/agent/router.py` | Returns the caller's agent config, or `404` when there is none. |
+| `update_agent_config` | `app/agent/router.py` | Applies watchlist/approval-mode changes and audits them in one commit. |
 | `trigger_manual_cycle` | `app/agent/router.py` | Finds or provisions a default agent and runs a manual cycle. |
 | `get_cycle_status` | `app/agent/router.py` | Loads an owned cycle and its approval. |
 | `_job_id` | `app/agent/router.py` | Creates the APScheduler job id for a schedule. |
@@ -1137,14 +1193,19 @@ async context-manager methods. Function locations are relative to `backend`.
 |---|---|---|
 | `LLMClient.generate` | `app/llm/base.py` | Abstract provider-neutral text-generation contract. |
 | `LLMClient.health_check` | `app/llm/base.py` | Abstract provider/model availability contract. |
-| `create_llm_client` | `app/llm/factory.py` | Creates OpenAI or Ollama from settings. |
+| `create_llm_client` | `app/llm/factory.py` | Creates OpenAI, Ollama or Anthropic from settings (Anthropic imported lazily). |
+| `configured_model` | `app/llm/factory.py` | Returns the configured provider's model id without reading keys. |
 | `get_llm_client` | `app/llm/factory.py` | Returns a cached provider client. |
 | `OllamaClient.__init__` | `app/llm/ollama_client.py` | Stores Ollama URL and model. |
 | `OllamaClient.generate` | `app/llm/ollama_client.py` | Calls Ollama `/api/chat` without streaming. |
 | `OllamaClient.health_check` | `app/llm/ollama_client.py` | Checks Ollama reachability and installed model. |
-| `OpenAIClient.__init__` | `app/llm/openai_client.py` | Requires an API key and stores the model. |
-| `OpenAIClient.generate` | `app/llm/openai_client.py` | Calls OpenAI chat completions. |
-| `OpenAIClient.health_check` | `app/llm/openai_client.py` | Lists OpenAI models and checks availability. |
+| `DECISION_JSON_SCHEMA` | `app/llm/decision_schema.py` | Provider-neutral decision schema used for structured output by the OpenAI and Anthropic clients (imports no SDK). |
+| `OpenAIClient.__init__` | `app/llm/openai_client.py` | Requires an API key and stores it with the model; an SDK client is created per call. |
+| `OpenAIClient.generate` | `app/llm/openai_client.py` | Calls chat completions with strict structured JSON output; a refusal's text is returned as the (invalid) answer, so it is recorded in the cycle's raw response. An API error raises a `RuntimeError` naming only its type and HTTP status; the type, status, error code/type/param and request id are logged server-side, while the provider's message and body are never logged or returned. |
+| `OpenAIClient.health_check` | `app/llm/openai_client.py` | Lists OpenAI models and checks availability; on failure the detail names only the exception type. |
+| `AnthropicClient.__init__` | `app/llm/anthropic_client.py` | Requires an API key and stores the model. |
+| `AnthropicClient.generate` | `app/llm/anthropic_client.py` | Calls the Messages API with structured JSON output; returns the text blocks. An API error raises a `RuntimeError` naming only its type and HTTP status; the type, status and request id are logged server-side, while the provider's body is never logged or returned. |
+| `AnthropicClient.health_check` | `app/llm/anthropic_client.py` | Retrieves the model and checks reachability/availability. |
 | `llm_health` | `app/llm/router.py` | Echoes configuration or performs an active LLM probe. |
 
 ### Alpaca broker integration
@@ -1244,8 +1305,8 @@ async context-manager methods. Function locations are relative to `backend`.
    into cycle snapshots; they are not separately persisted.
 3. **No dedicated decision table:** `AgentCycle.proposal_json` is the current
    decision record.
-4. **No dedicated audit-event table:** `AuditEventRead` exists as a schema, but
-   the ORM/persistence model is not implemented.
+4. **Audit events are write-only so far:** `audit_events` records agent-config
+   changes, but no endpoint or UI reads it yet; the audit page reads cycles.
 5. **Direct broker orders differ from agent orders:** The direct broker endpoint
    checks the kill switch but does not create a cycle-linked `BrokerOrder`.
 6. **Scheduler market-clock credentials:** Scheduler clock checks use server

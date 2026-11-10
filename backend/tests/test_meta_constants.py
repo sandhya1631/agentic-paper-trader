@@ -4,6 +4,7 @@ should read instead of hardcoding (#139)."""
 import pytest
 from httpx import AsyncClient
 
+from app.core.constants import MAX_WATCHLIST_SIZE
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -33,3 +34,5 @@ async def test_get_constants_matches_backend_enums(client: AsyncClient):
     assert set(body["policy_decision_type"]) == {v.value for v in PolicyDecisionType}
     assert set(body["approval_mode"]) == {v.value for v in ApprovalMode}
     assert set(body["approval_status"]) == {v.value for v in ApprovalStatus}
+    # The watchlist cap the agent-config editor enforces (#141) - never hardcoded client-side.
+    assert body["max_watchlist_size"] == MAX_WATCHLIST_SIZE

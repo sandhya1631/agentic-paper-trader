@@ -26,6 +26,9 @@ ALPACA_DATA_FEED = "iex"
 
 # --- Market data ---
 DEFAULT_WATCHLIST = ["AAPL", "NVDA", "SPY"]
+# Upper bound on a user-edited watchlist (PATCH /agent/config, #141). Each symbol costs
+# one LLM call per scheduled tick plus a bars request; exposed via /meta/constants.
+MAX_WATCHLIST_SIZE = 20
 RATE_LIMIT_STATUS = 429
 
 # --- Agent cycles ---
@@ -53,7 +56,7 @@ ALPACA_PROVIDER = "ALPACA"
 POLICY_VERSION = "POLICY-1.0"
 
 # --- LLM client factory ---
-SUPPORTED_PROVIDERS = ("openai", "ollama")
+SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")
 
 # --- Auth ---
 BCRYPT_MAX_PASSWORD_BYTES = 72
