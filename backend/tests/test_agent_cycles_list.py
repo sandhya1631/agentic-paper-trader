@@ -228,6 +228,52 @@ async def test_strategy_selection_rejects_unknown_strategy(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_manual_cycle_can_be_cancelled(client: AsyncClient):
+    token = await _register_and_login(client, "cancel@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "cancel@example.com")
+        cycle = _cycle(agent.id, minutes_ago=1)
+        cycle.status = CycleStatus.REASONING
+        db.add(cycle)
+        await db.commit()
+        cycle_id = cycle.id
+
+    response = await client.post(
+        f"/agent/cycles/{cycle_id}/cancel",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "CANCELLED"
+    assert response.json()["failure_code"] == "MANUAL_CYCLE_CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_cycle_cannot_be_cancelled_by_manual_endpoint(
+    client: AsyncClient,
+):
+    token = await _register_and_login(client, "scheduled-cancel@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "scheduled-cancel@example.com")
+        cycle = _cycle(
+            agent.id,
+            minutes_ago=1,
+            trigger=CycleTrigger.SCHEDULED,
+        )
+        cycle.status = CycleStatus.REASONING
+        db.add(cycle)
+        await db.commit()
+        cycle_id = cycle.id
+
+    response = await client.post(
+        f"/agent/cycles/{cycle_id}/cancel",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_cycle_token_usage_returns_persisted_context_budget(client: AsyncClient):
     token = await _register_and_login(client, "tokens@example.com")
     async with TestSessionLocal() as db:

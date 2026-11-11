@@ -171,6 +171,12 @@ class CycleOverlapError(Exception):
     """Raised when the agent already has a non-terminal cycle in progress."""
 
 
+async def _cycle_was_cancelled(db: AsyncSession, cycle: AgentCycle) -> bool:
+    """Reload a cycle and report whether a concurrent cancellation was requested."""
+    await db.refresh(cycle)
+    return cycle.status == CycleStatus.CANCELLED
+
+
 def _select_dynamic_strategy(
     context: dict[str, Any],
     *,
@@ -487,6 +493,9 @@ async def run_agent_cycle(
             model_window_tokens,
         )
 
+        if await _cycle_was_cancelled(db, cycle):
+            return cycle
+
         # 6. Execute LLM Call
         cycle.status = CycleStatus.REASONING
         await db.commit()
@@ -495,9 +504,14 @@ async def run_agent_cycle(
 
         raw_response = await llm_client.generate(prompt_input, system=system_prompt)
 
+        if await _cycle_was_cancelled(db, cycle):
+            return cycle
+
         # 7. Validate Output with 1-Retry Self-Repair
         cycle.status = CycleStatus.VALIDATING
         await db.commit()
+        if await _cycle_was_cancelled(db, cycle):
+            return cycle
         proposal: DecisionProposal
         try:
             proposal = validate_decision_proposal(raw_response)
@@ -515,6 +529,8 @@ async def run_agent_cycle(
             try:
                 repaired_response = await llm_client.generate(repair_prompt, system=system_prompt)
                 raw_response = repaired_response
+                if await _cycle_was_cancelled(db, cycle):
+                    return cycle
                 proposal = validate_decision_proposal(repaired_response)
             except ToolValidationError as repair_err:
                 # Exactly one repair attempt is allowed. If it also fails, the cycle ENDS:
@@ -538,6 +554,9 @@ async def run_agent_cycle(
                 await db.refresh(cycle)
                 set_committed_value(cycle, "approval", None)
                 return cycle
+
+        if await _cycle_was_cancelled(db, cycle):
+            return cycle
 
         # 8. Persist Cycle Success & Snapshot State
         cycle.snapshot_json = context

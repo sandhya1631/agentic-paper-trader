@@ -484,6 +484,59 @@ async def get_cycle_status(
     return cycle
 
 
+@router.post(
+    "/cycles/{cycle_id}/cancel",
+    response_model=CycleRead,
+    summary="Cancel an active manual agent cycle",
+)
+async def cancel_manual_cycle(
+    cycle_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> CycleRead:
+    """Cancel an owned manual cycle before it can validate or execute a trade."""
+    stmt = (
+        select(AgentCycle)
+        .join(AgentConfig, AgentCycle.agent_id == AgentConfig.id)
+        .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+        .options(selectinload(AgentCycle.approval))
+        .where(
+            AgentCycle.id == cycle_id,
+            TradingAccount.user_id == current_user.id,
+        )
+    )
+    result = await db.execute(stmt)
+    cycle = result.scalar_one_or_none()
+    if cycle is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"AgentCycle '{cycle_id}' not found.",
+        )
+    if cycle.trigger != CycleTrigger.MANUAL:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only manually triggered cycles can be cancelled.",
+        )
+    if cycle.status not in {
+        CycleStatus.PENDING,
+        CycleStatus.COLLECTING,
+        CycleStatus.REASONING,
+        CycleStatus.VALIDATING,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cycle cannot be cancelled from status {cycle.status}.",
+        )
+
+    cycle.status = CycleStatus.CANCELLED
+    cycle.failure_code = "MANUAL_CYCLE_CANCELLED"
+    cycle.failure_message = "Cancelled by the authenticated user."
+    cycle.completed_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(cycle)
+    return CycleRead.model_validate(cycle)
+
+
 @router.get(
     "/cycles/{cycle_id}/token-usage",
     response_model=CycleTokenUsageRead,

@@ -592,6 +592,16 @@ cycle record stores the actual selected prompt version for auditability.
 The prompt is guidance only. The Pydantic proposal validator and deterministic
 policies are authoritative.
 
+`POST /agent/cycles/{cycle_id}/cancel` cancels an owned `MANUAL` cycle while it
+is `PENDING`, `COLLECTING`, `REASONING`, or `VALIDATING`. The cycle becomes a
+terminal `CANCELLED` record with failure code `MANUAL_CYCLE_CANCELLED`.
+Cancellation is cooperative: it cannot interrupt an already-running provider
+network request, but the orchestrator reloads the cycle before validation and
+execution and will not create an approval or submit an order after cancellation.
+Scheduled cycles and cycles already `EXECUTING`, `RECONCILING`, or
+`PENDING_APPROVAL` must use their existing scheduler, reconciliation, or
+approval controls instead.
+
 ### 5.5 Curated strategy knowledge
 
 The orchestrator retrieves at most three short, local entries from

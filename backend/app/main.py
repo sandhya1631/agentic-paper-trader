@@ -18,6 +18,7 @@ from app.db.models import AgentConfig, AgentSchedule, TradingAccount, User
 from app.db.schema import (
     ensure_agent_cycle_policy_columns,
     ensure_agent_cycle_prompt_columns,
+    ensure_cycle_cancelled_status,
     ensure_kill_switch_event_scope_columns,
     ensure_user_scheduler_column,
 )
@@ -63,6 +64,7 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await ensure_agent_cycle_prompt_columns(conn)
+        await ensure_cycle_cancelled_status(conn)
         await ensure_agent_cycle_policy_columns(conn)
         await ensure_user_scheduler_column(conn)
         await ensure_kill_switch_event_scope_columns(conn)
