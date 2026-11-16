@@ -65,7 +65,9 @@ class AlpacaOrderRead(APIModel):
     id: str
     client_order_id: str
     symbol: str
-    qty: Decimal
+    # A notional (dollar-amount) order has qty null and a notional amount instead (#177).
+    qty: Decimal | None = None
+    notional: Decimal | None = None
     filled_qty: Decimal = Decimal("0")
     average_fill_price: Decimal | None = None
     side: str

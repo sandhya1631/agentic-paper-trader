@@ -110,11 +110,12 @@ with the rest of the stack. Cycle, approval, and broker-order records remain in 
 
 ### LLM Client Factory
 
-`app/llm/` gives a single provider-neutral interface (`LLMClient.generate(...)`) over OpenAI and a
-local Ollama model. Switch providers with one `.env` variable — no orchestration code changes:
+`app/llm/` gives a single provider-neutral interface (`LLMClient.generate(...)`) over OpenAI,
+Anthropic (Claude) and a local Ollama model. Switch providers with one `.env` variable — no
+orchestration code changes:
 
 ```bash
-LLM_PROVIDER=ollama   # or "openai"
+LLM_PROVIDER=ollama   # or "openai" / "anthropic"
 ```
 
 - `ollama`: requires a local [Ollama](https://ollama.com) server running (`OLLAMA_BASE_URL`, default
@@ -135,6 +136,18 @@ LLM_PROVIDER=ollama   # or "openai"
   not internet retrieval, and it is dropped first if the context-window guard
   needs more capacity.
 - `openai`: requires `OPENAI_API_KEY` set; model via `OPENAI_MODEL` (default `gpt-4o-mini`).
+  Replies are constrained to the decision JSON schema (strict structured output), so
+  `OPENAI_MODEL` must support structured output and `temperature` (`gpt-4o-mini` does); other
+  models get HTTP 400 on every call.
+- `anthropic`: requires `ANTHROPIC_API_KEY` set; model via `ANTHROPIC_MODEL` (default
+  `claude-opus-5-5`). Replies are constrained to the decision JSON schema (structured output).
+
+Both cloud providers use the same decision schema (`app/llm/decision_schema.py`) and report an
+API failure only as `<Provider> API error: <Type>`, plus ` (HTTP <status>)` when the provider
+answered (connection errors and timeouts have none). The provider's response body and the key
+never reach the cycle record, API responses, the UI or the log; the error type, HTTP status and
+request id are logged server-side. `validate_decision_proposal` remains the authoritative check
+for every provider.
 
 #### Offline strategy replay
 

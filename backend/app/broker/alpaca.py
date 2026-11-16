@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -11,15 +11,44 @@ from app.broker.schemas import (
     MarketSnapshotRead,
     OrderCreate,
 )
-from app.core.constants import ALPACA_DATA_BASE_URL, ALPACA_DATA_FEED, ALPACA_PAPER_BASE_URL
+from app.core.constants import (
+    ALPACA_DATA_BASE_URL,
+    ALPACA_DATA_FEED,
+    ALPACA_ORDERS_MAX_PAGES,
+    ALPACA_ORDERS_PAGE_LIMIT,
+    ALPACA_PAPER_BASE_URL,
+)
 from app.core.paper_guard import ensure_alpaca_paper_url
 from app.market_data.indicators import calculate_indicators
 
 
 def _optional_decimal(value: Any) -> Decimal | None:
-    """Convert an indicator value to Decimal, preserving None for absent indicators."""
+    """Convert a numeric value to Decimal, preserving None for absent values."""
     return Decimal(str(value)) if value is not None else None
 
+
+def _parse_order(item: dict[str, Any]) -> AlpacaOrderRead:
+    """Parse one Alpaca order object.
+
+    A notional (dollar-amount) order comes back with ``qty: null`` and a ``notional``
+    amount (#177), so both are optional; ``filled_qty`` defaults to 0 when absent.
+    """
+    filled_qty = _optional_decimal(item.get("filled_qty"))
+    return AlpacaOrderRead(
+        id=item["id"],
+        client_order_id=item["client_order_id"],
+        symbol=item["symbol"],
+        qty=_optional_decimal(item.get("qty")),
+        notional=_optional_decimal(item.get("notional")),
+        filled_qty=filled_qty if filled_qty is not None else Decimal("0"),
+        average_fill_price=_optional_decimal(item.get("filled_avg_price")),
+        side=item["side"],
+        type=item["type"],
+        time_in_force=item["time_in_force"],
+        status=item["status"],
+        submitted_at=item.get("submitted_at"),
+        filled_at=item.get("filled_at"),
+    )
 
 
 class AlpacaClient:
@@ -210,54 +239,35 @@ class AlpacaClient:
         client = self._get_client()
         resp = await client.post(url, headers=self.headers, json=payload, timeout=10.0)
         resp.raise_for_status()
-        data = resp.json()
+        return _parse_order(resp.json())
 
-        return AlpacaOrderRead(
-            id=data["id"],
-            client_order_id=data["client_order_id"],
-            symbol=data["symbol"],
-            qty=Decimal(str(data["qty"])),
-            filled_qty=Decimal(str(data.get("filled_qty", 0))),
-            average_fill_price=(
-                Decimal(str(data["filled_avg_price"]))
-                if data.get("filled_avg_price") is not None
-                else None
-            ),
-            side=data["side"],
-            type=data["type"],
-            time_in_force=data["time_in_force"],
-            status=data["status"],
-            submitted_at=data.get("submitted_at"),
-            filled_at=data.get("filled_at"),
-        )
+    async def get_orders(
+        self,
+        status: str = "all",
+        limit: int = 50,
+        *,
+        after: datetime | None = None,
+        until: datetime | None = None,
+        direction: str | None = None,
+    ) -> list[AlpacaOrderRead]:
+        """Fetch one page of paper orders (Alpaca allows ``limit`` up to 500).
 
-    async def get_orders(self, status: str = "all", limit: int = 50) -> list[AlpacaOrderRead]:
-        """Fetch list of paper orders."""
+        ``after`` / ``until`` keep only orders submitted after / until that moment (both
+        exclusive at Alpaca); ``direction`` is ``"asc"`` or ``"desc"`` (Alpaca's default).
+        Use ``fetch_all_orders`` when every matching order must be seen.
+        """
         url = f"{self.base_url}/v2/orders"
-        params = {"status": status, "limit": limit}
+        params: dict[str, Any] = {"status": status, "limit": limit}
+        if after is not None:
+            params["after"] = after.isoformat()
+        if until is not None:
+            params["until"] = until.isoformat()
+        if direction is not None:
+            params["direction"] = direction
         client = self._get_client()
         resp = await client.get(url, headers=self.headers, params=params, timeout=10.0)
         resp.raise_for_status()
-        items = resp.json()
-
-        orders: list[AlpacaOrderRead] = []
-        for item in items:
-            orders.append(
-                AlpacaOrderRead(
-                    id=item["id"],
-                    client_order_id=item["client_order_id"],
-                    symbol=item["symbol"],
-                    qty=Decimal(str(item["qty"])),
-                    filled_qty=Decimal(str(item.get("filled_qty", 0))),
-                    side=item["side"],
-                    type=item["type"],
-                    time_in_force=item["time_in_force"],
-                    status=item["status"],
-                    submitted_at=item.get("submitted_at"),
-                    filled_at=item.get("filled_at"),
-                )
-            )
-        return orders
+        return [_parse_order(item) for item in resp.json()]
 
     async def get_order_by_client_order_id(self, client_order_id: str) -> AlpacaOrderRead | None:
         """Fetch a single order by client_order_id, or None if Alpaca has no record of it."""
@@ -268,18 +278,77 @@ class AlpacaClient:
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-        item = resp.json()
+        return _parse_order(resp.json())
 
-        return AlpacaOrderRead(
-            id=item["id"],
-            client_order_id=item["client_order_id"],
-            symbol=item["symbol"],
-            qty=Decimal(str(item["qty"])),
-            filled_qty=Decimal(str(item.get("filled_qty", 0))),
-            side=item["side"],
-            type=item["type"],
-            time_in_force=item["time_in_force"],
-            status=item["status"],
-            submitted_at=item.get("submitted_at"),
-            filled_at=item.get("filled_at"),
+
+class OrderLister(Protocol):
+    """Anything with AlpacaClient.get_orders' signature (the client, or a test double)."""
+
+    async def get_orders(
+        self,
+        status: str = "all",
+        limit: int = 50,
+        *,
+        after: datetime | None = None,
+        until: datetime | None = None,
+        direction: str | None = None,
+    ) -> list[AlpacaOrderRead]: ...
+
+
+def _submitted_at(order: AlpacaOrderRead) -> datetime:
+    if not order.submitted_at:
+        raise ValueError("An order without submitted_at prevents paging the order list")
+    try:
+        moment = datetime.fromisoformat(order.submitted_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"Unreadable order timestamp: {order.submitted_at!r}") from exc
+    if moment.tzinfo is None:
+        raise ValueError(f"Order timestamp has no timezone: {order.submitted_at!r}")
+    return moment
+
+
+async def fetch_all_orders(
+    client: OrderLister,
+    *,
+    status: str,
+    after: datetime | None = None,
+) -> list[AlpacaOrderRead]:
+    """Fetch EVERY order matching ``status`` (and submitted after ``after``), newest first.
+
+    The risk policies must not judge from a truncated list (#177), but Alpaca returns at
+    most ALPACA_ORDERS_PAGE_LIMIT orders per request and has no cursor. A full page is
+    therefore followed by a request for the orders submitted until the oldest one seen.
+    ``until`` is exclusive, so it is nudged one microsecond later: orders that share that
+    timestamp are read again (and dropped by id) instead of being skipped.
+
+    Fails closed: raises ValueError when completeness cannot be shown (a full page with
+    an unreadable ``submitted_at``, a full page that adds nothing new, or more than
+    ALPACA_ORDERS_MAX_PAGES full pages).
+    """
+    page = await client.get_orders(
+        status=status, limit=ALPACA_ORDERS_PAGE_LIMIT, after=after, direction="desc"
+    )
+    orders = list(page)
+    seen = {order.id for order in orders} if len(page) >= ALPACA_ORDERS_PAGE_LIMIT else set()
+    for _ in range(ALPACA_ORDERS_MAX_PAGES - 1):
+        if len(page) < ALPACA_ORDERS_PAGE_LIMIT:
+            return orders
+        until = min(_submitted_at(order) for order in page) + timedelta(microseconds=1)
+        page = await client.get_orders(
+            status=status,
+            limit=ALPACA_ORDERS_PAGE_LIMIT,
+            after=after,
+            until=until,
+            direction="desc",
         )
+        new = [order for order in page if order.id not in seen]
+        if len(page) >= ALPACA_ORDERS_PAGE_LIMIT and not new:
+            raise ValueError("Paging the Alpaca order list made no progress")
+        orders.extend(new)
+        seen.update(order.id for order in new)
+    if len(page) < ALPACA_ORDERS_PAGE_LIMIT:
+        return orders
+    raise ValueError(
+        f"More than {ALPACA_ORDERS_PAGE_LIMIT * ALPACA_ORDERS_MAX_PAGES} matching orders; "
+        "refusing to use a partial order list"
+    )

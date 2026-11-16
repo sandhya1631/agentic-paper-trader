@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { describeLlmHealth, describeReason, describeTick } from "./scheduler-log-view";
+import { ApiError } from "@/lib/api/errors";
+import {
+  describeLlmHealth,
+  describeReason,
+  describeTick,
+  llmHealthFromProbeError,
+} from "./scheduler-log-view";
 
 describe("describeReason", () => {
   it("maps known codes and humanizes unknown ones", () => {
@@ -19,6 +25,14 @@ describe("describeTick", () => {
       label: "Skipped",
       tone: "neutral",
       reason: "Market closed",
+    });
+  });
+
+  it("labels a tick skipped for an owner who isn't an operator (#176)", () => {
+    expect(describeTick({ status: "SKIPPED", reason: "owner_not_operator" })).toMatchObject({
+      label: "Skipped",
+      tone: "neutral",
+      reason: "Owner isn't an operator or admin",
     });
   });
 
@@ -56,5 +70,34 @@ describe("describeLlmHealth", () => {
   it("flags a missing model", () => {
     const v = describeLlmHealth({ provider: "ollama", model: "x", model_available: false }, true);
     expect(v).toMatchObject({ reachable: true, label: "Model missing" });
+  });
+});
+
+describe("llmHealthFromProbeError", () => {
+  const down = {
+    provider: "anthropic",
+    model: "claude-opus-5-5",
+    reachable: false,
+    model_available: false,
+    detail: "LLM client unavailable: ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic",
+  };
+
+  it("turns the probe's 503 payload into an unreachable view with the backend's reason", () => {
+    const health = llmHealthFromProbeError(new ApiError(503, "Service Unavailable", down, "/llm/health"));
+    expect(health).toEqual(down);
+    expect(describeLlmHealth(health, true)).toMatchObject({
+      reachable: false,
+      label: "Unreachable",
+      detail: down.detail,
+    });
+  });
+
+  it("ignores anything that is not a 503 health payload", () => {
+    expect(llmHealthFromProbeError(new ApiError(500, "Server Error", down, "/llm/health"))).toBeNull();
+    expect(llmHealthFromProbeError(new ApiError(503, "Unavailable", "busy", "/llm/health"))).toBeNull();
+    expect(
+      llmHealthFromProbeError(new ApiError(503, "Unavailable", { reachable: true }, "/llm/health")),
+    ).toBeNull();
+    expect(llmHealthFromProbeError(new TypeError("Failed to fetch"))).toBeNull();
   });
 });

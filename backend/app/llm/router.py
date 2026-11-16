@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Query, Response, status
 
 from app.core.config import get_settings
-from app.llm.factory import get_llm_client
+from app.llm.factory import configured_model, get_llm_client
 
 router = APIRouter(prefix="/llm", tags=["llm"])
 
@@ -22,12 +22,26 @@ async def llm_health(
     """Report the configured LLM provider/model, optionally probing connectivity."""
     settings = get_settings()
     provider = settings.llm_provider.lower()
-    model = settings.openai_model if provider == "openai" else settings.ollama_model
+    model = configured_model(settings)
 
     if not probe:
         return {"provider": provider, "model": model}
 
-    health = await get_llm_client().health_check()
+    try:
+        llm_client = get_llm_client()
+    except ValueError as exc:
+        # Misconfiguration (missing key/SDK, unknown provider): report unavailable
+        # instead of a 500. These messages are static factory/client text, never secrets.
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {
+            "provider": provider,
+            "model": model,
+            "reachable": False,
+            "model_available": False,
+            "detail": f"LLM client unavailable: {exc}",
+        }
+
+    health = await llm_client.health_check()
     if not health.reachable:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {

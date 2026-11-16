@@ -103,7 +103,7 @@ def test_s002_is_short_json_focused_strategy():
     prompt = get_system_prompt("S-002")
 
     assert "STRATEGY VERSION: S-002" in prompt
-    assert "account data_status is LIVE" in prompt
+    assert "account_data is LIVE" in prompt
     assert "Return only one valid JSON object" in prompt
     assert len(prompt) < len(get_system_prompt("S-001"))
 
@@ -163,7 +163,10 @@ def test_build_agent_context():
     assert context["market"]["AAPL"]["data_quality"]["freshness_status"] == "STALE"
     assert context["market"]["NVDA"]["status"] == "NO_DATA"
     assert context["market"]["NVDA"]["data_quality"]["quality_status"] == "NO_DATA"
-    assert context["account"]["data_status"] == "NOT_PROVIDED"
+    # No account_data_status passed: the simpler convention infers UNAVAILABLE from
+    # no account_info being given (#64/#172), not the richer NOT_PROVIDED placeholder.
+    assert context["account"] == {"status": "UNAVAILABLE"}
+    assert context["account_data"] == "UNAVAILABLE"
 
 
 def test_build_agent_context_reports_market_data_quality():
@@ -843,6 +846,7 @@ async def test_trigger_cycle_endpoint_returns_409_on_overlap(client: AsyncClient
     async with TestSessionLocal() as db:
         user_result = await db.execute(select(User).where(User.email == email))
         user = user_result.scalar_one()
+        user.role = UserRole.OPERATOR  # running cycles is operator-only (#176)
         account = TradingAccount(
             user_id=user.id,
             provider="ALPACA",

@@ -34,9 +34,6 @@ export interface MarketSnapshot {
   timestamp: string | null;
 }
 
-/** The backend's default tracked symbols (watchlist editing is a separate story). */
-export const DEFAULT_SYMBOLS = ["AAPL", "NVDA", "SPY"] as const;
-
 export interface BarsParams {
   symbols?: readonly string[];
   limit?: number;

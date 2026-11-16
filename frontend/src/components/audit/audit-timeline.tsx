@@ -1,13 +1,53 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { getCycle, listCycles, type AgentCycle } from "@/lib/agent/cycles-api";
+import {
+  getCycle,
+  listCycles,
+  type AgentCycle,
+  type CycleListFilters,
+} from "@/lib/agent/cycles-api";
+import { getConstants } from "@/lib/meta/meta-api";
 import { getErrorMessage } from "@/lib/api/error-message";
 import { formatDateTime } from "@/lib/format";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { formatEvidence, outcomeStyle, parsePolicyResult } from "@/lib/approvals/approval-view";
 
 const PAGE = 20;
+
+interface AuditFilters {
+  startedAfter: string;
+  startedBefore: string;
+  action: string;
+  status: string;
+  policyDecision: string;
+}
+
+const EMPTY_FILTERS: AuditFilters = {
+  startedAfter: "",
+  startedBefore: "",
+  action: "",
+  status: "",
+  policyDecision: "",
+};
+
+/** Local date input (yyyy-mm-dd) -> an ISO instant for the API's date-range filter. */
+function toIsoBound(localDate: string, endOfDay: boolean): string | undefined {
+  if (!localDate) return undefined;
+  return `${localDate}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}Z`;
+}
+
+function toQueryFilters(filters: AuditFilters): CycleListFilters {
+  return {
+    startedAfter: toIsoBound(filters.startedAfter, false),
+    startedBefore: toIsoBound(filters.startedBefore, true),
+    action: filters.action ? (filters.action as CycleListFilters["action"]) : undefined,
+    status: filters.status || undefined,
+    policyDecision: filters.policyDecision
+      ? (filters.policyDecision as CycleListFilters["policyDecision"])
+      : undefined,
+  };
+}
 
 function statusTone(status: string): BadgeTone {
   if (status === "COMPLETED") return "positive";
@@ -28,14 +68,34 @@ function readSnapshot(cycle: AgentCycle): {
 
 export function AuditTimeline() {
   const [items, setItems] = useState<AgentCycle[] | null>(null);
+  const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [nextOffset, setNextOffset] = useState<number | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [filters, setFilters] = useState<AuditFilters>(EMPTY_FILTERS);
+  const [options, setOptions] = useState<{
+    actions: string[];
+    statuses: string[];
+    policyDecisions: string[];
+  } | null>(null);
 
-  const loadFirst = useCallback(async () => {
+  useEffect(() => {
+    getConstants()
+      .then((c) =>
+        setOptions({
+          actions: c.decision_action,
+          statuses: c.cycle_status,
+          policyDecisions: c.policy_decision_type,
+        }),
+      )
+      .catch(() => setOptions(null)); // Filters still work; dropdowns just show nothing extra.
+  }, []);
+
+  const loadFirst = useCallback(async (activeFilters: AuditFilters) => {
     try {
-      const res = await listCycles({ limit: PAGE, offset: 0 });
+      const res = await listCycles({ limit: PAGE, offset: 0, ...toQueryFilters(activeFilters) });
       setItems(res.items);
+      setTotal(res.total);
       setNextOffset(res.next_offset);
       setError(null);
     } catch (e) {
@@ -44,14 +104,18 @@ export function AuditTimeline() {
   }, []);
 
   useEffect(() => {
-    void loadFirst();
-  }, [loadFirst]);
+    void loadFirst(filters);
+  }, [filters, loadFirst]);
 
   async function loadMore() {
     if (nextOffset == null) return;
     setLoadingMore(true);
     try {
-      const res = await listCycles({ limit: PAGE, offset: nextOffset });
+      const res = await listCycles({
+        limit: PAGE,
+        offset: nextOffset,
+        ...toQueryFilters(filters),
+      });
       setItems((prev) => [...(prev ?? []), ...res.items]);
       setNextOffset(res.next_offset);
     } catch (e) {
@@ -60,6 +124,8 @@ export function AuditTimeline() {
       setLoadingMore(false);
     }
   }
+
+  const filtersActive = Object.values(filters).some(Boolean);
 
   return (
     <div className="space-y-4">
@@ -71,6 +137,8 @@ export function AuditTimeline() {
           outcome.
         </p>
       </section>
+
+      <AuditFilterBar filters={filters} onChange={setFilters} options={options} />
 
       {error && (
         <div
@@ -85,8 +153,14 @@ export function AuditTimeline() {
 
       {items !== null && items.length === 0 && (
         <div className="flex h-32 items-center justify-center rounded-xl border border-dashed border-border bg-surface text-sm text-muted">
-          No agent cycles recorded yet.
+          {filtersActive ? "No cycles match these filters." : "No agent cycles recorded yet."}
         </div>
+      )}
+
+      {items !== null && items.length > 0 && (
+        <p className="text-xs text-muted">
+          {filtersActive ? `${total} matching cycle${total === 1 ? "" : "s"}` : `${total} total`}
+        </p>
       )}
 
       {items?.map((cycle) => (
@@ -104,6 +178,119 @@ export function AuditTimeline() {
         </button>
       )}
     </div>
+  );
+}
+
+function AuditFilterBar({
+  filters,
+  onChange,
+  options,
+}: {
+  filters: AuditFilters;
+  onChange: (filters: AuditFilters) => void;
+  options: { actions: string[]; statuses: string[]; policyDecisions: string[] } | null;
+}) {
+  function set<K extends keyof AuditFilters>(key: K, value: AuditFilters[K]) {
+    onChange({ ...filters, [key]: value });
+  }
+
+  const hasFilters = Object.values(filters).some(Boolean);
+  const selectClass =
+    "rounded-lg border border-border bg-surface px-2 py-1.5 text-sm";
+
+  return (
+    <section
+      aria-label="Filter the audit trail"
+      className="flex flex-wrap items-end gap-3 rounded-xl border border-border bg-surface p-4"
+    >
+      <div className="space-y-1">
+        <label htmlFor="audit-from" className="text-xs font-medium text-muted">
+          From
+        </label>
+        <input
+          id="audit-from"
+          type="date"
+          value={filters.startedAfter}
+          onChange={(e) => set("startedAfter", e.target.value)}
+          className={selectClass}
+        />
+      </div>
+      <div className="space-y-1">
+        <label htmlFor="audit-to" className="text-xs font-medium text-muted">
+          To
+        </label>
+        <input
+          id="audit-to"
+          type="date"
+          value={filters.startedBefore}
+          onChange={(e) => set("startedBefore", e.target.value)}
+          className={selectClass}
+        />
+      </div>
+      <div className="space-y-1">
+        <label htmlFor="audit-action" className="text-xs font-medium text-muted">
+          Action
+        </label>
+        <select
+          id="audit-action"
+          value={filters.action}
+          onChange={(e) => set("action", e.target.value)}
+          className={selectClass}
+        >
+          <option value="">All</option>
+          {(options?.actions ?? []).map((a) => (
+            <option key={a} value={a}>
+              {a}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="space-y-1">
+        <label htmlFor="audit-status" className="text-xs font-medium text-muted">
+          Status
+        </label>
+        <select
+          id="audit-status"
+          value={filters.status}
+          onChange={(e) => set("status", e.target.value)}
+          className={selectClass}
+        >
+          <option value="">All</option>
+          {(options?.statuses ?? []).map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div className="space-y-1">
+        <label htmlFor="audit-policy" className="text-xs font-medium text-muted">
+          Policy outcome
+        </label>
+        <select
+          id="audit-policy"
+          value={filters.policyDecision}
+          onChange={(e) => set("policyDecision", e.target.value)}
+          className={selectClass}
+        >
+          <option value="">All</option>
+          {(options?.policyDecisions ?? []).map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+      </div>
+      {hasFilters && (
+        <button
+          type="button"
+          onClick={() => onChange(EMPTY_FILTERS)}
+          className="rounded-lg border border-border px-3 py-1.5 text-sm hover:bg-surface-muted"
+        >
+          Clear filters
+        </button>
+      )}
+    </section>
   );
 }
 

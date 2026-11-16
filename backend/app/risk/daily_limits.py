@@ -16,7 +16,7 @@ Design notes:
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -31,6 +31,11 @@ def trading_day(moment: datetime | None = None) -> date:
     if moment.tzinfo is None:
         raise ValueError("trading_day needs a timezone-aware datetime")
     return moment.astimezone(MARKET_TZ).date()
+
+
+def trading_day_start(moment: datetime | None = None) -> datetime:
+    """Return midnight US/Eastern (timezone-aware) at the start of ``moment``'s trading day."""
+    return datetime.combine(trading_day(moment), time.min, tzinfo=MARKET_TZ)
 
 
 def _parse_timestamp(value: str) -> datetime:

@@ -15,7 +15,7 @@ in Settings instead - see app/core/config.py.
 
 from __future__ import annotations
 
-from app.db.enums import CycleStatus
+from app.db.enums import CycleStatus, UserRole
 
 # --- Alpaca paper-trading endpoint ---
 # The ONLY trading endpoint this app will ever submit real orders to
@@ -23,9 +23,16 @@ from app.db.enums import CycleStatus
 ALPACA_PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 ALPACA_DATA_FEED = "iex"
+# GET /v2/orders returns at most this many orders per request (Alpaca's maximum `limit`).
+ALPACA_ORDERS_PAGE_LIMIT = 500
+# Paging stops (and the read fails closed) after this many full pages, i.e. 10,000 orders.
+ALPACA_ORDERS_MAX_PAGES = 20
 
 # --- Market data ---
 DEFAULT_WATCHLIST = ["AAPL", "NVDA", "SPY"]
+# Upper bound on a user-edited watchlist (PATCH /agent/config, #141). Each symbol costs
+# one LLM call per scheduled tick plus a bars request; exposed via /meta/constants.
+MAX_WATCHLIST_SIZE = 20
 RATE_LIMIT_STATUS = 429
 
 # --- Agent cycles ---
@@ -44,8 +51,10 @@ DEFAULT_STRATEGY_VERSION = "S-001"
 DYNAMIC_STRATEGY_VERSION = "DYNAMIC"
 # Bump whenever the S-001 prompt text changes, so each cycle's audit record names the
 # exact prompt it ran. 1.1.0 (#153): per-symbol `decision_target`, no hardcoded tickers.
-# 1.2.0 (#172): account-data rules (HOLD unless data_status is LIVE, SELL only owned).
-DEFAULT_PROMPT_REVISION = "1.2.0"
+# 1.2.0 (#64/#172): live account data section; HOLD when the account is UNAVAILABLE.
+# 1.3.0 (#64/#172 reconciliation): adds the data-quality/regime evidence rules from #64
+# on top of 1.2.0's account-data HOLD rule, so the combined text gets its own revision.
+DEFAULT_PROMPT_REVISION = "1.3.0"
 
 # --- Broker credential vault ---
 ALPACA_PROVIDER = "ALPACA"
@@ -53,11 +62,20 @@ ALPACA_PROVIDER = "ALPACA"
 # --- Risk policies ---
 POLICY_VERSION = "POLICY-1.0"
 
+# --- Audit events (audit_events.event_type) ---
+# Manual override orders through POST /api/v1/broker/orders (#162): one row per attempt.
+MANUAL_ORDER_SUBMITTED = "MANUAL_ORDER_SUBMITTED"
+MANUAL_ORDER_BLOCKED = "MANUAL_ORDER_BLOCKED"  # the kill switch refused it (423)
+MANUAL_ORDER_FAILED = "MANUAL_ORDER_FAILED"  # the broker call raised (502)
+
 # --- LLM client factory ---
-SUPPORTED_PROVIDERS = ("openai", "ollama")
+SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")
 
 # --- Auth ---
 BCRYPT_MAX_PASSWORD_BYTES = 72
+# Roles allowed to act on trading: run or schedule cycles, approve or reject proposals,
+# edit the agent config (`require_operator`). Scheduled ticks skip owners outside it (#176).
+OPERATOR_ROLES = (UserRole.OPERATOR, UserRole.ADMIN)
 # How long a /auth/forgot-password token stays valid (Issue #166).
 PASSWORD_RESET_TOKEN_EXPIRY_MINUTES = 30
 

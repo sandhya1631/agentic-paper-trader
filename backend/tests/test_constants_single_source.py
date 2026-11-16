@@ -7,10 +7,12 @@ from app import schemas as app_schemas
 from app.accounts import credential_vault
 from app.agent import context, orchestrator, prompt
 from app.agent import router as agent_router
+from app.agent import scheduler as agent_scheduler
 from app.auth import schemas as auth_schemas
 from app.broker import alpaca as broker_alpaca
 from app.core import constants, paper_guard
 from app.core.config import get_settings
+from app.db.enums import UserRole
 from app.llm import factory as llm_factory
 from app.market_data import router as market_data_router
 from app.market_data.alpaca_client import DEFAULT_WATCHLIST as alpaca_client_watchlist
@@ -38,6 +40,12 @@ def test_policy_version_is_the_same_object():
 
 def test_supported_providers_is_the_same_object():
     assert llm_factory.SUPPORTED_PROVIDERS is constants.SUPPORTED_PROVIDERS
+
+
+def test_operator_roles_is_the_same_object():
+    """require_operator and the scheduler's owner-role skip (#176) share one role set."""
+    assert agent_scheduler.OPERATOR_ROLES is constants.OPERATOR_ROLES
+    assert constants.OPERATOR_ROLES == (UserRole.OPERATOR, UserRole.ADMIN)
 
 
 def test_bcrypt_limit_matches():
