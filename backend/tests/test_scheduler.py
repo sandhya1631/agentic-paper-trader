@@ -66,7 +66,7 @@ async def test_lifespan_starts_scheduler_before_yield_and_stops_it(monkeypatch):
         async def __aexit__(self, *_):
             return None
 
-    connection = SimpleNamespace(run_sync=AsyncMock())
+    connection = SimpleNamespace(run_sync=AsyncMock(), execute=AsyncMock())
     engine = SimpleNamespace(begin=lambda: AsyncContext(connection))
     db = SimpleNamespace(
         execute=AsyncMock(
