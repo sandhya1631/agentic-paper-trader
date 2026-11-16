@@ -498,7 +498,7 @@ async def test_required_buy_creates_pending_approval_without_database(trigger):
     no_expired_approvals_result.all.return_value = []
     added = []
 
-    def refresh(model):
+    def refresh(model, **_kwargs):
         if isinstance(model, AgentCycle) and model.id is None:
             model.id = uuid.uuid4()
 
@@ -556,7 +556,7 @@ async def test_scheduled_auto_buy_executes_without_human_approval(monkeypatch):
     no_expired_approvals_result.all.return_value = []
     added = []
 
-    def refresh(model):
+    def refresh(model, **_kwargs):
         if isinstance(model, AgentCycle) and model.id is None:
             model.id = uuid.uuid4()
 

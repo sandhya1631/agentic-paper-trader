@@ -173,8 +173,16 @@ class CycleOverlapError(Exception):
 
 
 async def _cycle_was_cancelled(db: AsyncSession, cycle: AgentCycle) -> bool:
-    """Reload a cycle and report whether a concurrent cancellation was requested."""
-    await db.refresh(cycle)
+    """Lock and reload a cycle; report whether a concurrent cancellation landed.
+
+    Takes the row's `SELECT ... FOR UPDATE` lock before reading its status, so this
+    check is atomic with the status commit that follows it in the caller: a concurrent
+    `POST /cycles/{id}/cancel` either already committed CANCELLED (and is observed here)
+    or blocks on the row lock until the caller's next commit releases it, after which it
+    re-reads the fresh status and cancels for real. Without the lock, a cancel landing
+    between this check and that commit would be silently overwritten (lost update).
+    """
+    await db.refresh(cycle, with_for_update=True)
     return cycle.status == CycleStatus.CANCELLED
 
 
@@ -528,6 +536,7 @@ async def _run_agent_cycle(
         )
 
         if await _cycle_was_cancelled(db, cycle):
+            set_committed_value(cycle, "approval", None)
             return cycle
 
         # 6. Execute LLM Call
@@ -539,12 +548,14 @@ async def _run_agent_cycle(
         raw_response = await llm_client.generate(prompt_input, system=system_prompt)
 
         if await _cycle_was_cancelled(db, cycle):
+            set_committed_value(cycle, "approval", None)
             return cycle
 
         # 7. Validate Output with 1-Retry Self-Repair
         cycle.status = CycleStatus.VALIDATING
         await db.commit()
         if await _cycle_was_cancelled(db, cycle):
+            set_committed_value(cycle, "approval", None)
             return cycle
         proposal: DecisionProposal
         try:
@@ -564,6 +575,7 @@ async def _run_agent_cycle(
                 repaired_response = await llm_client.generate(repair_prompt, system=system_prompt)
                 raw_response = repaired_response
                 if await _cycle_was_cancelled(db, cycle):
+                    set_committed_value(cycle, "approval", None)
                     return cycle
                 proposal = validate_decision_proposal(repaired_response)
             except ToolValidationError as repair_err:
@@ -590,6 +602,7 @@ async def _run_agent_cycle(
                 return cycle
 
         if await _cycle_was_cancelled(db, cycle):
+            set_committed_value(cycle, "approval", None)
             return cycle
 
         # 8. Persist Cycle Success & Snapshot State

@@ -645,6 +645,11 @@ async def cancel_manual_cycle(
             AgentCycle.id == cycle_id,
             TradingAccount.user_id == current_user.id,
         )
+        # Locks only the AgentCycle row, matching the orchestrator's own
+        # `_cycle_was_cancelled` row lock: whichever of the two commits first
+        # wins, and the other blocks and then re-reads the fresh status - no
+        # lost update of a cancellation racing an in-flight cycle phase.
+        .with_for_update(of=AgentCycle)
     )
     result = await db.execute(stmt)
     cycle = result.scalar_one_or_none()
