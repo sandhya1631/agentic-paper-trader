@@ -20,6 +20,7 @@ function placed(status = "accepted") {
     client_order_id: "cid-abc123",
     symbol: "AAPL",
     qty: "2",
+    notional: null,
     filled_qty: "0",
     average_fill_price: null,
     side: "SELL",

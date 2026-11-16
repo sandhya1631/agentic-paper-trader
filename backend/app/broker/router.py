@@ -1,4 +1,5 @@
-from typing import Annotated
+import logging
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy.exc import SQLAlchemyError
@@ -9,6 +10,7 @@ from app.accounts.credential_vault import (
     get_alpaca_account,
     get_decrypted_alpaca_credentials,
 )
+from app.audit import record_audit_event
 from app.auth.dependencies import get_current_user, require_operator
 from app.broker.account_snapshots import save_account_snapshot
 from app.broker.alpaca import AlpacaClient
@@ -20,9 +22,16 @@ from app.broker.schemas import (
     OrderCreate,
 )
 from app.core.config import get_settings
+from app.core.constants import (
+    MANUAL_ORDER_BLOCKED,
+    MANUAL_ORDER_FAILED,
+    MANUAL_ORDER_SUBMITTED,
+)
 from app.db.models import User
 from app.db.session import get_db
 from app.risk.kill_switch import is_kill_switch_enabled
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/broker", tags=["Broker Integration"])
 
@@ -185,18 +194,100 @@ async def place_paper_order(
     client: Annotated[AlpacaClient, Depends(get_alpaca_client)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    """Manual override order: kill switch only, no P-0xx policies. Every attempt that gets
+    this far is audited (#162) as SUBMITTED, BLOCKED (423) or FAILED (502)."""
     if await is_kill_switch_enabled(db):
+        await _audit_manual_order(
+            db,
+            current_user,
+            MANUAL_ORDER_BLOCKED,
+            order,
+            outcome="BLOCKED",
+            reason="Order submission blocked by the global kill switch",
+        )
         raise HTTPException(
             status_code=status.HTTP_423_LOCKED,
             detail="Order submission blocked by the global kill switch",
         )
     try:
-        return await client.submit_order(order)
+        placed = await client.submit_order(order)
     except Exception as exc:
+        await _audit_manual_order(
+            db,
+            current_user,
+            MANUAL_ORDER_FAILED,
+            order,
+            outcome="FAILED",
+            broker_error=_without_credentials(str(exc), client),
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Alpaca API error: {exc}",
         )
+    await _audit_manual_order(
+        db,
+        current_user,
+        MANUAL_ORDER_SUBMITTED,
+        order,
+        outcome="SUBMITTED",
+        broker_order_id=placed.id,
+        broker_status=placed.status,
+    )
+    return placed
+
+
+async def _audit_manual_order(
+    db: AsyncSession,
+    user: User,
+    event_type: str,
+    order: OrderCreate,
+    **result: Any,
+) -> None:
+    """Write and COMMIT one audit_events row for a manual order attempt.
+
+    Committed here, before any HTTPException, because the request session is never
+    committed for an error response. The order itself lives at Alpaca, so it cannot share
+    a transaction with this row: if the commit fails, the error is logged and the
+    response stays what it would have been (a placed order is still reported as placed,
+    so nobody retries it into a duplicate).
+    """
+    details: dict[str, Any] = {
+        "symbol": order.symbol.upper(),
+        "side": order.side.value,
+        "quantity": order.qty,
+        "order_type": order.type.value,
+        "time_in_force": order.time_in_force.value,
+        "limit_price": str(order.limit_price) if order.limit_price is not None else None,
+        "client_order_id": order.client_order_id,
+        **result,
+    }
+    record_audit_event(
+        db,
+        event_type=event_type,
+        entity_type="manual_order",
+        entity_id=None,
+        actor_id=user.id,
+        details=details,
+    )
+    try:
+        await db.commit()
+    except SQLAlchemyError:
+        await db.rollback()
+        logger.exception(
+            "Could not persist the %s audit event (broker order id: %s)",
+            event_type,
+            result.get("broker_order_id"),
+        )
+
+
+def _without_credentials(message: str, client: AlpacaClient) -> str:
+    """Strip the Alpaca key and secret from a broker error message, should one echo them."""
+    headers = getattr(client, "headers", None) or {}
+    for name in ("APCA-API-KEY-ID", "APCA-API-SECRET-KEY"):
+        secret = headers.get(name)
+        if secret:
+            message = message.replace(secret, "[REDACTED]")
+    return message
 
 
 @router.get(

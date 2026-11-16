@@ -68,10 +68,27 @@ export interface CycleList {
   next_offset: number | null;
 }
 
-export function listCycles(params: { limit?: number; offset?: number } = {}): Promise<CycleList> {
+export interface CycleListFilters {
+  limit?: number;
+  offset?: number;
+  /** Inclusive, ISO 8601. AND with startedBefore when both are set. */
+  startedAfter?: string;
+  startedBefore?: string;
+  action?: "BUY" | "SELL" | "HOLD";
+  status?: string;
+  /** The cycle's overall outcome, not any single policy's result (#82). */
+  policyDecision?: "ALLOW" | "DENY" | "RESIZE" | "NOT_EVALUATED";
+}
+
+export function listCycles(params: CycleListFilters = {}): Promise<CycleList> {
   const query = new URLSearchParams();
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.offset != null) query.set("offset", String(params.offset));
+  if (params.startedAfter) query.set("started_after", params.startedAfter);
+  if (params.startedBefore) query.set("started_before", params.startedBefore);
+  if (params.action) query.set("action", params.action);
+  if (params.status) query.set("status", params.status);
+  if (params.policyDecision) query.set("policy_decision", params.policyDecision);
   const qs = query.toString();
   return api.get<CycleList>(`/agent/cycles${qs ? `?${qs}` : ""}`);
 }

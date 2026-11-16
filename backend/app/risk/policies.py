@@ -100,6 +100,12 @@ def p005_allowlist(c: PolicyContext) -> PolicyEvaluation:
 
 
 def p007_max_allocation(c: PolicyContext) -> PolicyEvaluation:
+    """Per-symbol cap: projected exposure in THIS symbol <= max_symbol_allocation x equity.
+
+    Deliberately per symbol, not a portfolio-total cap (decided in #156). Across a
+    watchlist the per-symbol caps can add up; the aggregate backstop is P-008 (a BUY
+    must fit cash after the reserve), together with P-012's daily order cap.
+    """
     if c.action != DecisionAction.BUY:
         return _na("P-007", "Max symbol allocation")
     current_price = c.inp.market.current_price
@@ -114,6 +120,12 @@ def p007_max_allocation(c: PolicyContext) -> PolicyEvaluation:
 
 
 def p008_available_cash(c: PolicyContext) -> PolicyEvaluation:
+    """Aggregate backstop: a BUY must fit cash after keeping cash_reserve x equity.
+
+    For this long-only account that also caps total deployment across all symbols at
+    about (1 - cash_reserve) of equity (#156). Cash drops only when an order fills, so
+    BUYs that have not filled yet are not counted here.
+    """
     if c.action != DecisionAction.BUY:
         return _na("P-008", "Available cash")
     available = c.cash - c.equity * c.inp.agent.cash_reserve

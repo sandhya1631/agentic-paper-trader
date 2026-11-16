@@ -1,11 +1,14 @@
+import contextlib
 import os
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.agent import orchestrator
 from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import get_db
@@ -76,6 +79,27 @@ async def _test_database_lifecycle():
     await _ensure_test_database_exists()
     yield
     await test_engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _agent_cycle_lock_only_for_real_sessions(monkeypatch):
+    """Give MagicMock-session unit tests a no-op agent cycle lock.
+
+    The real lock needs a session bound to a real engine and fails closed otherwise.
+    Tests that drive run_agent_cycle with a MagicMock ``db`` get a no-op instead;
+    every real AsyncSession (``db_session``, ``client``) still takes the real lock.
+    """
+    real_lock = orchestrator.agent_cycle_lock
+
+    @contextlib.asynccontextmanager
+    async def lock(db, agent_id):
+        if isinstance(db, AsyncSession):
+            async with real_lock(db, agent_id):
+                yield
+        else:
+            yield
+
+    monkeypatch.setattr(orchestrator, "agent_cycle_lock", lock)
 
 
 @pytest_asyncio.fixture

@@ -8,7 +8,12 @@ from test_policies import failed_ids, make_ctx
 
 from app.broker.schemas import AlpacaOrderRead
 from app.db.enums import PolicyDecisionType
-from app.risk.daily_limits import count_orders_today, daily_pnl_pct, trading_day
+from app.risk.daily_limits import (
+    count_orders_today,
+    daily_pnl_pct,
+    trading_day,
+    trading_day_start,
+)
 from app.risk.policies import evaluate_policies
 
 # 2026-10-20 15:00 UTC = 11:00 US/Eastern (market open, EDT is UTC-4)
@@ -31,6 +36,15 @@ def _order(submitted_at: str | None, order_id: str = "o1") -> AlpacaOrderRead:
 
 
 # --- trading day (US/Eastern, not UTC) ---
+
+
+def test_trading_day_start_is_midnight_eastern():
+    # 02:00 UTC on the 21st is 22:00 on the 20th in New York (EDT, UTC-4).
+    start = trading_day_start(datetime(2026, 10, 21, 2, 0, tzinfo=UTC))
+    assert start.astimezone(UTC) == datetime(2026, 10, 20, 4, 0, tzinfo=UTC)
+    # After the switch back to EST (UTC-5) midnight is 05:00 UTC.
+    winter = trading_day_start(datetime(2026, 11, 9, 15, 0, tzinfo=UTC))
+    assert winter.astimezone(UTC) == datetime(2026, 11, 9, 5, 0, tzinfo=UTC)
 
 
 def test_trading_day_uses_eastern_time_not_utc():

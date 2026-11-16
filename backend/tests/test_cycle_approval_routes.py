@@ -91,6 +91,11 @@ async def test_approving_pending_cycle_submits_after_policy_allow(monkeypatch):
     assert approval.status == ApprovalStatus.APPROVED
     assert approval.policy_version == "POLICY-1.0"
     assert cycle.snapshot_json["execution_status"] == "ORDER_SUBMITTED"
+    # The signed token is never stored on the approval or the cycle (#175).
+    assert approval.policy_result_json["decision"] == "ALLOW"
+    assert "policy_token" not in approval.policy_result_json
+    assert "policy_token" not in cycle.snapshot_json["policy_evaluation"]
+    assert "policy_token" not in cycle.policy_result_json
 
 
 @pytest.mark.asyncio

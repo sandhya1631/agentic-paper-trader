@@ -5,7 +5,9 @@ import { getLlmHealth, type LlmHealth } from "@/lib/agent/observability-api";
 import { describeLlmHealth } from "@/lib/agent/scheduler-log-view";
 import { usePolling } from "@/lib/hooks/use-polling";
 
-const REFRESH_SECONDS = 30;
+// Each poll probes the provider (Ollama's tags, Anthropic's/OpenAI's models
+// endpoint), so poll less often than the cheap data views.
+const REFRESH_SECONDS = 60;
 
 interface HealthState {
   loaded: boolean;
@@ -13,7 +15,7 @@ interface HealthState {
   ok: boolean;
 }
 
-/** Compact LLM health pill for the header (#143). Polls `/llm/health`. */
+/** Compact LLM health pill for the header (#143). Polls `/llm/health?probe=true`. */
 export function LlmHealthIndicator() {
   const [state, setState] = useState<HealthState>({ loaded: false, health: null, ok: false });
 

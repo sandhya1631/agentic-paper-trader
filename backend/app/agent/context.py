@@ -1,8 +1,13 @@
 """Agent Context Builder.
 
 Compiles structured market data, technical indicators (RSI-14, SMA-20, SMA-50),
-portfolio cash/equity, open positions, and open orders into a sanitized context
-dictionary for the LLM. Strips all API keys, secrets, and credential tokens.
+portfolio cash/equity, open positions, open orders and market status into a
+sanitized context dictionary for the LLM. Strips all API keys, secrets, and
+credential tokens.
+
+When the live account could not be read (``account_info`` is None) the context says
+so (``account_data: "UNAVAILABLE"``) instead of inventing balances: fabricated cash
+or "no positions" would mislead the model, so the prompt tells it to HOLD.
 """
 
 from datetime import datetime, timezone
@@ -100,8 +105,8 @@ def build_agent_context(
     positions: list[dict[str, Any]] | None = None,
     open_orders: list[dict[str, Any]] | None = None,
     strategy_version: str = DEFAULT_STRATEGY_VERSION,
-    account_data_status: str = "NOT_PROVIDED",
-    market_open: bool | None = None,  # CHANGE 1: whether the market is open (None = unknown)
+    account_data_status: str | None = None,
+    market_open: bool | None = None,
     max_data_age_seconds: int = 900,
 ) -> dict[str, Any]:
     """Assemble sanitized market and account context for LLM prompt generation."""
@@ -175,44 +180,72 @@ def build_agent_context(
             "data_quality": _bar_quality(bars, latest_ts, max_data_age_seconds),
         }
 
-    # Sanitize account information (guarantee no credentials)
+    # Sanitize account information (guarantee no credentials). Never invent numbers:
+    # without live data the account is marked UNAVAILABLE.
+    #
+    # Two call conventions coexist here (#64/#172 reconciled with #174):
+    #   - account_data_status omitted (None): the original, simpler convention - LIVE/
+    #     UNAVAILABLE is inferred from whether account_info itself was given, and an
+    #     unavailable account is the minimal {"status": "UNAVAILABLE"} (no invented
+    #     values, not even None ones). This is what the real orchestrator pipeline's
+    #     callers that predate #174 - and most direct tests - use.
+    #   - account_data_status given explicitly: #174's richer convention - a granular
+    #     reason (e.g. "UNAVAILABLE_BROKER") is kept alongside cash/equity/etc. (real
+    #     value or null), so observability can show why. "NOT_PROVIDED" specifically
+    #     is the one case that still fills in placeholder numbers, for a caller that
+    #     explicitly says it never looked - never the default.
     acc = account_info or {}
-    account_defaults = (
-        {
-            "cash": "100000.00",
-            "equity": "100000.00",
-            "buying_power": "400000.00",
-            "daily_pnl": "0.00",
+    account_available = account_info is not None
+    if account_data_status is None:
+        if account_available:
+            sanitized_account: dict[str, Any] = {
+                key: (str(acc[key]) if acc.get(key) is not None else None)
+                for key in ("cash", "equity", "buying_power", "daily_pnl")
+            }
+        else:
+            sanitized_account = {"status": "UNAVAILABLE"}
+        account_data = "LIVE" if account_available else "UNAVAILABLE"
+    else:
+        account_defaults = (
+            {
+                "cash": "100000.00",
+                "equity": "100000.00",
+                "buying_power": "400000.00",
+                "daily_pnl": "0.00",
+            }
+            if account_data_status == "NOT_PROVIDED"
+            else {
+                "cash": None,
+                "equity": None,
+                "buying_power": None,
+                "daily_pnl": None,
+            }
+        )
+        sanitized_account = {
+            "cash": (
+                str(acc["cash"]) if acc.get("cash") is not None else account_defaults["cash"]
+            ),
+            "equity": (
+                str(acc["equity"])
+                if acc.get("equity") is not None
+                else account_defaults["equity"]
+            ),
+            "buying_power": (
+                str(acc["buying_power"])
+                if acc.get("buying_power") is not None
+                else account_defaults["buying_power"]
+            ),
+            "daily_pnl": (
+                str(acc["daily_pnl"])
+                if acc.get("daily_pnl") is not None
+                else account_defaults["daily_pnl"]
+            ),
+            "data_status": account_data_status,
         }
-        if account_data_status == "NOT_PROVIDED"
-        else {
-            "cash": None,
-            "equity": None,
-            "buying_power": None,
-            "daily_pnl": None,
-        }
-    )
-    sanitized_account = {
-        "cash": (
-            str(acc["cash"]) if acc.get("cash") is not None else account_defaults["cash"]
-        ),
-        "equity": (
-            str(acc["equity"])
-            if acc.get("equity") is not None
-            else account_defaults["equity"]
-        ),
-        "buying_power": (
-            str(acc["buying_power"])
-            if acc.get("buying_power") is not None
-            else account_defaults["buying_power"]
-        ),
-        "daily_pnl": (
-            str(acc["daily_pnl"])
-            if acc.get("daily_pnl") is not None
-            else account_defaults["daily_pnl"]
-        ),
-        "data_status": account_data_status,
-    }
+        # Flat, binary signal for the prompt's "is live account data available" rule
+        # (#64/#172): whatever granular account_data_status a caller passes, this always
+        # collapses to LIVE/UNAVAILABLE, so the prompt text never needs the specific reason.
+        account_data = "LIVE" if account_data_status == "LIVE" else "UNAVAILABLE"
 
     sanitized_positions = [
         {
@@ -226,18 +259,21 @@ def build_agent_context(
         for pos in (positions or [])
     ]
 
-    sanitized_orders = [
-        {
+    sanitized_orders: list[dict[str, Any]] = []
+    for ord in open_orders or []:
+        sanitized_order: dict[str, Any] = {
             "id": str(ord.get("id")),
             "symbol": ord.get("symbol"),
             "side": ord.get("side"),
             "qty": ord.get("qty"),
             "status": ord.get("status"),
         }
-        for ord in (open_orders or [])
-    ]
+        # A notional (dollar-amount) order has no qty; show its amount instead (#177).
+        if ord.get("notional") is not None:
+            sanitized_order["notional"] = str(ord.get("notional"))
+        sanitized_orders.append(sanitized_order)
 
-    # CHANGE 2: tell the model whether the market is open, closed or unknown.
+    # Tell the model whether the market is open, closed or unknown.
     if market_open is None:
         market_status = "UNKNOWN"
     else:
@@ -246,8 +282,9 @@ def build_agent_context(
     return {
         "strategy_version": strategy_version,
         "watchlist": symbols,
-        "market_status": market_status,  # CHANGE 2
+        "market_status": market_status,
         "market": market_context,
+        "account_data": account_data,
         "account": sanitized_account,
         "positions": sanitized_positions,
         "open_orders": sanitized_orders,

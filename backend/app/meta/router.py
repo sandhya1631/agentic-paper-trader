@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.core.constants import CURRENCY
+from app.core.constants import CURRENCY, DEFAULT_WATCHLIST, MAX_WATCHLIST_SIZE
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -30,4 +30,6 @@ async def get_constants() -> ConstantsRead:
         policy_decision_type=[v.value for v in PolicyDecisionType],
         approval_mode=[v.value for v in ApprovalMode],
         approval_status=[v.value for v in ApprovalStatus],
+        max_watchlist_size=MAX_WATCHLIST_SIZE,
+        default_watchlist=list(DEFAULT_WATCHLIST),
     )

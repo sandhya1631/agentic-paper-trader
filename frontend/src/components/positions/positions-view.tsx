@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   createOrder,
   getOrders,
@@ -9,22 +9,29 @@ import {
   type AlpacaOrder,
   type AlpacaPosition,
 } from "@/lib/broker/broker-api";
+import { formatOrderQuantity } from "@/lib/broker/order-view";
 import { getErrorMessage } from "@/lib/api/error-message";
 import { formatDateTime, formatMoney, formatPercent, formatSignedMoney, signTone } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { ConnectAccountNotice } from "@/components/ui/connect-account-notice";
 import { AutoRefreshToggle } from "@/components/ui/auto-refresh-toggle";
 import { usePolling } from "@/lib/hooks/use-polling";
+import { keepLastGood, shouldStartPoll, staleDataMessage } from "@/lib/live-refresh";
 import { ManualOrderTicket, describeOrderError } from "./manual-order-ticket";
 
 const REFRESH_SECONDS = 15;
 
 interface PositionsState {
+  /** True only until the first load completes; later refreshes update in place (#164). */
   loading: boolean;
   notConnected: boolean;
   error: string | null;
   positions: AlpacaPosition[] | null;
   orders: AlpacaOrder[] | null;
+  /** When the data on screen was last fully refreshed (epoch ms). */
+  updatedAt: number | null;
+  /** The last refresh failed, so older data is still on screen. */
+  stale: boolean;
 }
 
 const INITIAL: PositionsState = {
@@ -33,29 +40,53 @@ const INITIAL: PositionsState = {
   error: null,
   positions: null,
   orders: null,
+  updatedAt: null,
+  stale: false,
 };
 
 export function PositionsView() {
   const [state, setState] = useState<PositionsState>(INITIAL);
   const [live, setLive] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const latestLoad = useRef(0);
+  // When the outstanding refresh started (null when none): a poll tick skips while it is
+  // younger than the age limit, so a refresh slower than the interval still lands, and
+  // supersedes it after that, so a request that never settles cannot stop the polling.
+  const inFlightSince = useRef<number | null>(null);
 
+  // Refreshes (the poll, or the reload after a manual order or Close) keep the page
+  // mounted: values are swapped in place, so the ticket and Close confirmations survive.
   const load = useCallback(async () => {
-    setState((prev) => ({ ...prev, loading: true }));
+    const request = ++latestLoad.current;
+    inFlightSince.current = Date.now();
+    setRefreshing(true);
     const [positions, orders] = await Promise.allSettled([getPositions(), getOrders("open")]);
+    // A newer refresh (an explicit reload after a manual order or Close) supersedes this one.
+    if (request !== latestLoad.current) return;
+    inFlightSince.current = null;
+    setRefreshing(false);
+    const now = Date.now();
 
-    if (positions.status === "rejected" && isAccountNotConnected(positions.reason)) {
-      setState({ ...INITIAL, loading: false, notConnected: true });
-      return;
-    }
-    setState({
-      loading: false,
-      notConnected: false,
-      error:
-        positions.status === "rejected"
-          ? getErrorMessage(positions.reason, "Could not load positions.")
-          : null,
-      positions: positions.status === "fulfilled" ? positions.value : null,
-      orders: orders.status === "fulfilled" ? orders.value : null,
+    setState((prev) => {
+      if (positions.status === "rejected" && isAccountNotConnected(positions.reason)) {
+        return { ...INITIAL, loading: false, notConnected: true, updatedAt: now };
+      }
+      // A part that fails to refresh keeps its last good value instead of blanking.
+      const nextPositions = keepLastGood(positions, prev.positions);
+      const nextOrders = keepLastGood(orders, prev.orders);
+      const stale = nextPositions.kept || nextOrders.kept;
+      return {
+        loading: false,
+        notConnected: false,
+        error:
+          positions.status === "rejected" && !nextPositions.kept
+            ? getErrorMessage(positions.reason, "Could not load positions.")
+            : null,
+        positions: nextPositions.value,
+        orders: nextOrders.value,
+        updatedAt: stale ? prev.updatedAt : now,
+        stale,
+      };
     });
   }, []);
 
@@ -63,7 +94,13 @@ export function PositionsView() {
     void load();
   }, [load]);
 
-  usePolling(() => void load(), REFRESH_SECONDS * 1000, live);
+  usePolling(
+    () => {
+      if (shouldStartPoll(inFlightSince.current, Date.now())) void load();
+    },
+    REFRESH_SECONDS * 1000,
+    live,
+  );
 
   if (state.loading) return <p className="text-sm text-muted">Loading positions...</p>;
   if (state.notConnected) return <ConnectAccountNotice />;
@@ -74,8 +111,18 @@ export function PositionsView() {
         <div>
           <h2 className="text-lg font-semibold">Positions &amp; orders</h2>
           <p className="text-sm text-muted">Open positions and orders, refreshing live.</p>
+          {state.stale && (
+            <p role="status" className="mt-1 text-xs text-negative">
+              {staleDataMessage(state.updatedAt)}
+            </p>
+          )}
         </div>
-        <AutoRefreshToggle enabled={live} onChange={setLive} seconds={REFRESH_SECONDS} />
+        <AutoRefreshToggle
+          enabled={live}
+          onChange={setLive}
+          seconds={REFRESH_SECONDS}
+          updating={refreshing}
+        />
       </section>
 
       <section className="space-y-3">
@@ -151,7 +198,7 @@ export function PositionsView() {
                         {o.side.toUpperCase()}
                       </Badge>
                     </td>
-                    <td className="px-4 py-3">{o.qty}</td>
+                    <td className="px-4 py-3">{formatOrderQuantity(o)}</td>
                     <td className="px-4 py-3">{o.filled_qty}</td>
                     <td className="px-4 py-3">{o.status}</td>
                     <td className="px-4 py-3 text-muted">{formatDateTime(o.submitted_at)}</td>
