@@ -413,6 +413,57 @@ def test_scheduler_dispatch_releases_deduplication_key_on_enqueue_error(monkeypa
     assert redis_client.deleted == ["agent-scheduler:global:6"]
 
 
+def test_clear_runtime_state_revokes_tasks_and_deletes_app_keys(monkeypatch):
+    class FakeRedis:
+        def __init__(self):
+            self.deleted = []
+
+        def scan_iter(self, *, match):
+            keys = {
+                "agent-scheduler:tick-history:global",
+                "celery-task-meta-result",
+                "unacked",
+            }
+            return iter(key.encode() for key in keys if match.rstrip("*") in key)
+
+        def delete(self, *keys):
+            self.deleted.extend(keys)
+
+        def close(self):
+            pass
+
+    inspector = SimpleNamespace(
+        active=lambda: {"worker": [{"id": "active-task"}]},
+        reserved=lambda: {"worker": [{"id": "reserved-task"}]},
+        scheduled=lambda: {
+            "worker": [{"request": {"id": "scheduled-task"}}]
+        },
+    )
+    control = SimpleNamespace(
+        inspect=lambda: inspector,
+        revoke=MagicMock(),
+        purge=MagicMock(return_value=4),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "celery_app",
+        SimpleNamespace(control=control),
+    )
+    redis_client = FakeRedis()
+    monkeypatch.setattr(scheduler, "_new_redis_client", lambda: redis_client)
+
+    result = scheduler.clear_runtime_state()
+
+    assert result["purged_tasks"] == 4
+    assert result["revoked_task_ids"] == [
+        "active-task",
+        "reserved-task",
+        "scheduled-task",
+    ]
+    assert len(result["deleted_redis_keys"]) == 3
+    assert control.revoke.call_count == 3
+
+
 def test_scheduler_tick_history_is_shared_through_redis(monkeypatch):
     class FakeRedis:
         values = {}

@@ -3,6 +3,7 @@
 Exposes HTTP endpoints for triggering manual agent cycles and querying cycle details.
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -23,7 +24,7 @@ from app.agent.approval import evaluate_and_submit_cycle_trade
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition
 from app.agent.replay import ReplaySample, evaluate_replay
-from app.auth.dependencies import get_current_user, require_operator
+from app.auth.dependencies import get_current_user, require_operator, require_roles
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
 from app.core.constants import (
@@ -1101,6 +1102,28 @@ async def get_scheduler_status(
             "against live risk policies before paper-order submission."
         ),
     )
+
+
+@router.get(
+    "/scheduler/runtime",
+    summary="Inspect Celery workers, tasks, and application Redis keys",
+)
+async def get_scheduler_runtime(
+    _current_user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> dict[str, Any]:
+    """Inspect local scheduler runtime state without exposing Redis values."""
+    return await asyncio.to_thread(scheduler_service.inspect_runtime_state)
+
+
+@router.post(
+    "/scheduler/runtime/clear",
+    summary="Clear Celery tasks and application scheduler Redis state",
+)
+async def clear_scheduler_runtime(
+    _current_user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> dict[str, Any]:
+    """Revoke active tasks, purge queued tasks, and delete app-owned Redis keys."""
+    return await asyncio.to_thread(scheduler_service.clear_runtime_state)
 
 
 @router.get(
