@@ -200,6 +200,50 @@ describe("AuditTimeline", () => {
     expect(screen.queryByRole("alert")).toBeNull(); // not a blocking error
   });
 
+  it("shows the fixed strategy and revision used (#189)", async () => {
+    mockList.mockResolvedValue({ items: [baseCycle()], total: 1, limit: 20, offset: 0, next_offset: null });
+    mockGet.mockResolvedValue(baseCycle({ prompt_version: "S-003", prompt_revision: "3.0.0" }));
+
+    render(<AuditTimeline />);
+    fireEvent.click(await screen.findByRole("button", { name: /BUY AAPL/ }));
+
+    expect(await screen.findByText("S-003")).toBeTruthy();
+    expect(screen.getByText("(rev 3.0.0)")).toBeTruthy();
+    expect(screen.queryByText(/selected strategy/i)).toBeNull(); // FIXED mode: no DYNAMIC detail
+  });
+
+  it("shows the DYNAMIC selection, reason and market regime (#189)", async () => {
+    mockList.mockResolvedValue({ items: [baseCycle()], total: 1, limit: 20, offset: 0, next_offset: null });
+    mockGet.mockResolvedValue(
+      // The orchestrator sets prompt_version/revision from the agent's configured mode
+      // ("DYNAMIC", with the *selected* strategy's prompt revision); the concrete
+      // strategy actually used that cycle lives in snapshot_json.strategy_selection.
+      baseCycle({
+        prompt_version: "DYNAMIC",
+        prompt_revision: "4.0.0",
+        snapshot_json: {
+          market: {
+            AAPL: { latest_price: 335, regime: "UPTREND" },
+          },
+          strategy_selection: {
+            mode: "DYNAMIC",
+            selected_strategy: "S-004",
+            reason: "Selected the breakout strategy because relative volume confirms unusual activity.",
+          },
+        },
+      }),
+    );
+
+    render(<AuditTimeline />);
+    fireEvent.click(await screen.findByRole("button", { name: /BUY AAPL/ }));
+
+    expect(await screen.findByText("DYNAMIC")).toBeTruthy();
+    expect(screen.getByText("Selected strategy")).toBeTruthy();
+    expect(screen.getByText("S-004")).toBeTruthy();
+    expect(screen.getByText("UPTREND")).toBeTruthy();
+    expect(screen.getByText(/relative volume confirms unusual activity/)).toBeTruthy();
+  });
+
   it("falls back to the approval's policy results when the cycle field is empty", async () => {
     mockList.mockResolvedValue({
       items: [baseCycle({ id: "c4", status: "REJECTED" })],
