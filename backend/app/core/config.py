@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +17,11 @@ class Settings(BaseSettings):
     app_name: str = "Agentic Paper Trader API"
     scheduler_enabled: bool = False
     scheduler_interval_minutes: int = Field(default=15, ge=1)
+    # Where scheduled ticks run (#184). "celery" hands each tick to a Celery worker
+    # through Redis (Compose/local). "inline" runs the tick inside the API process
+    # (Render free tier, which has no background workers).
+    scheduler_executor: Literal["celery", "inline"] = "celery"
+    # In "inline" mode Redis is optional: set REDIS_URL= (empty) to run without it.
     redis_url: str = "redis://localhost:6379/0"
     kill_switch_enabled: bool = False
     # Hard cap on orders per US/Eastern trading day (policy P-012).

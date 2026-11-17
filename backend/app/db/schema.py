@@ -26,6 +26,13 @@ async def ensure_agent_cycle_prompt_columns(conn: AsyncConnection) -> None:
     )
 
 
+async def ensure_cycle_cancelled_status(conn: AsyncConnection) -> None:
+    """Add the cancellation value to databases created before manual cancel support."""
+    await conn.execute(
+        text("ALTER TYPE cyclestatus ADD VALUE IF NOT EXISTS 'CANCELLED'")
+    )
+
+
 async def ensure_agent_cycle_policy_columns(conn: AsyncConnection) -> None:
     """Add the per-cycle policy audit columns (#121) to pre-existing databases."""
     await conn.execute(

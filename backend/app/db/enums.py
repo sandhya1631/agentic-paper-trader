@@ -69,6 +69,7 @@ class CycleStatus(StrEnum):
     FAILED = "FAILED"
     SKIPPED = "SKIPPED"
     RECONCILING = "RECONCILING"
+    CANCELLED = "CANCELLED"
 
 
 class PolicyOutcome(StrEnum):

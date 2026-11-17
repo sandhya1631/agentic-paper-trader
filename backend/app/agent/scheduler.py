@@ -1,10 +1,18 @@
-"""Periodic entry point for enabled agent cycles."""
+"""Periodic entry point for enabled agent cycles.
 
+Each tick runs either on a Celery worker (``SCHEDULER_EXECUTOR=celery``, the default)
+or inside the API process (``SCHEDULER_EXECUTOR=inline``, #184). Both paths call the
+same ``run_scheduled_cycles`` / ``run_agent_schedule`` functions, so the kill-switch,
+market-closed and owner-role skips and the per-agent cycle lock apply either way.
+"""
+
+import asyncio
 import logging
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -14,6 +22,7 @@ from sqlalchemy import select
 from app.agent.orchestrator import CycleOverlapError, run_watchlist_cycles
 from app.agent.tasks import run_agent_schedule_task, run_scheduled_cycles_task
 from app.broker.alpaca import AlpacaClient
+from app.celery_app import celery_app
 from app.core.config import Settings, get_settings
 from app.core.constants import OPERATOR_ROLES
 from app.db.enums import CycleTrigger
@@ -34,6 +43,13 @@ _schedule_tick_statuses: dict[UUID, SchedulerTickStatus] = {}
 _tick_history: dict[UUID | None, deque[SchedulerTickStatus]] = defaultdict(
     lambda: deque(maxlen=100)
 )
+# Last interval slot each job ran in, for inline mode in this process (#184).
+_claimed_inline_slots: dict[str, int] = {}
+
+
+def _redis_configured() -> bool:
+    """Redis is required for Celery, but optional for the inline executor."""
+    return bool(get_settings().redis_url)
 
 
 def _tick_history_key(schedule_id: UUID | None) -> str:
@@ -49,6 +65,8 @@ def _new_redis_client() -> Redis:
 
 
 def get_last_tick_status(schedule_id: UUID | None = None) -> SchedulerTickStatus | None:
+    if not _redis_configured():
+        return _local_last_tick_status(schedule_id)
     try:
         redis_client = _new_redis_client()
         try:
@@ -59,6 +77,10 @@ def get_last_tick_status(schedule_id: UUID | None = None) -> SchedulerTickStatus
             return SchedulerTickStatus.model_validate_json(values[0])
     except Exception:
         logger.exception("Unable to read scheduler tick status from Redis")
+    return _local_last_tick_status(schedule_id)
+
+
+def _local_last_tick_status(schedule_id: UUID | None) -> SchedulerTickStatus | None:
     if schedule_id is not None:
         return _schedule_tick_statuses.get(schedule_id)
     return _last_tick_status
@@ -68,6 +90,8 @@ def get_tick_history(
     schedule_id: UUID | None = None, *, limit: int = 50
 ) -> list[SchedulerTickStatus]:
     """Return recent shared tick summaries, newest first."""
+    if not _redis_configured():
+        return list(_tick_history[schedule_id])[-limit:][::-1]
     try:
         redis_client = _new_redis_client()
         try:
@@ -88,6 +112,8 @@ def _store_tick_status(
     schedule_id: UUID | None,
     tick: SchedulerTickStatus,
 ) -> None:
+    if not _redis_configured():
+        return
     redis_client = _new_redis_client()
     try:
         key = _tick_history_key(schedule_id)
@@ -98,6 +124,82 @@ def _store_tick_status(
         logger.exception("Unable to persist scheduler tick status in Redis")
     finally:
         redis_client.close()
+
+
+_RUNTIME_REDIS_PATTERNS = (
+    "agent-scheduler:*",
+    "celery-task-meta-*",
+    "unacked",
+    "unacked_index",
+)
+
+
+def _decode_redis_key(key: bytes | str) -> str:
+    return key.decode() if isinstance(key, bytes) else key
+
+
+def inspect_runtime_state() -> dict[str, Any]:
+    """Return Celery task state and application-owned Redis key names."""
+    inspector = celery_app.control.inspect()
+    redis_client = _new_redis_client()
+    try:
+        redis_keys: set[str] = set()
+        for pattern in _RUNTIME_REDIS_PATTERNS:
+            redis_keys.update(
+                _decode_redis_key(key)
+                for key in redis_client.scan_iter(match=pattern)
+            )
+        return {
+            "workers": inspector.stats() or {},
+            "active": inspector.active() or {},
+            "reserved": inspector.reserved() or {},
+            "scheduled": inspector.scheduled() or {},
+            "redis_keys": sorted(redis_keys),
+        }
+    finally:
+        redis_client.close()
+
+
+def clear_runtime_state() -> dict[str, Any]:
+    """Revoke Celery tasks, purge queued work, and delete application Redis keys."""
+    inspector = celery_app.control.inspect()
+    active = inspector.active() or {}
+    reserved = inspector.reserved() or {}
+    scheduled = inspector.scheduled() or {}
+    task_ids = {
+        task["id"]
+        for task_list in [*active.values(), *reserved.values()]
+        for task in task_list
+        if isinstance(task, dict) and task.get("id")
+    }
+    task_ids.update(
+        entry["request"]["id"]
+        for task_list in scheduled.values()
+        for entry in task_list
+        if isinstance(entry, dict)
+        and isinstance(entry.get("request"), dict)
+        and entry["request"].get("id")
+    )
+    for task_id in task_ids:
+        celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+
+    purged_tasks = celery_app.control.purge() or 0
+    redis_client = _new_redis_client()
+    deleted_keys: set[str] = set()
+    try:
+        for pattern in _RUNTIME_REDIS_PATTERNS:
+            keys = list(redis_client.scan_iter(match=pattern))
+            if keys:
+                redis_client.delete(*keys)
+                deleted_keys.update(_decode_redis_key(key) for key in keys)
+    finally:
+        redis_client.close()
+
+    return {
+        "revoked_task_ids": sorted(task_ids),
+        "purged_tasks": purged_tasks,
+        "deleted_redis_keys": sorted(deleted_keys),
+    }
 
 
 async def _fetch_market_clock(settings: Settings) -> MarketClock:
@@ -346,19 +448,86 @@ def _dispatch_once(
     return True
 
 
-def dispatch_agent_schedule(schedule_id: UUID, interval_minutes: int) -> None:
-    """Queue one persisted schedule for execution by a Celery worker."""
-    _dispatch_once(
-        f"schedule-{schedule_id}",
+def _claim_inline_slot(job_id: str, interval_minutes: int) -> bool:
+    """Claim this interval slot for an inline tick; False if it already ran.
+
+    The in-process record catches a duplicate in this API instance. With Redis it
+    also takes the shared ``SET NX`` key, so a second instance would skip too. If
+    Redis is configured but down, the tick still runs (one Render instance).
+    """
+    interval_seconds = interval_minutes * 60
+    slot = int(time.time() // interval_seconds)
+    if _claimed_inline_slots.get(job_id) == slot:
+        logger.info("Skipping duplicate inline scheduler dispatch for %s", job_id)
+        return False
+    if _redis_configured():
+        key = f"agent-scheduler:{job_id}:{slot}"
+        try:
+            redis_client = _new_redis_client()
+            try:
+                acquired = redis_client.set(key, "running", nx=True, ex=interval_seconds * 2)
+            finally:
+                redis_client.close()
+        except Exception:
+            logger.warning(
+                "Redis unavailable for scheduler dedup of %s; running the tick anyway",
+                job_id,
+                exc_info=True,
+            )
+        else:
+            if not acquired:
+                logger.info("Skipping duplicate inline scheduler dispatch for %s", job_id)
+                _claimed_inline_slots[job_id] = slot
+                return False
+    _claimed_inline_slots[job_id] = slot
+    return True
+
+
+async def _run_inline_once(
+    job_id: str,
+    interval_minutes: int,
+    run: Callable[[], Awaitable[object]],
+) -> bool:
+    """Run one tick inside the API process, once per interval slot."""
+    if not await asyncio.to_thread(_claim_inline_slot, job_id, interval_minutes):
+        return False
+    try:
+        await run()
+    except Exception:
+        # The tick functions record their own failures; this only guards the
+        # APScheduler job so one bad tick never stops later ones.
+        logger.exception("Inline scheduled tick failed for %s", job_id)
+    return True
+
+
+def _inline_executor() -> bool:
+    return get_settings().scheduler_executor == "inline"
+
+
+async def dispatch_agent_schedule(schedule_id: UUID, interval_minutes: int) -> None:
+    """Run one persisted schedule's tick, on a Celery worker or inline."""
+    job_id = f"schedule-{schedule_id}"
+    if _inline_executor():
+        await _run_inline_once(
+            job_id, interval_minutes, lambda: run_agent_schedule(schedule_id)
+        )
+        return
+    await asyncio.to_thread(
+        _dispatch_once,
+        job_id,
         interval_minutes,
         run_agent_schedule_task.delay,
         str(schedule_id),
     )
 
 
-def dispatch_scheduled_cycles(interval_minutes: int) -> None:
-    """Queue a global scheduled tick for execution by a Celery worker."""
-    _dispatch_once(
+async def dispatch_scheduled_cycles(interval_minutes: int) -> None:
+    """Run a global scheduled tick, on a Celery worker or inline."""
+    if _inline_executor():
+        await _run_inline_once("global", interval_minutes, run_scheduled_cycles)
+        return
+    await asyncio.to_thread(
+        _dispatch_once,
         "global",
         interval_minutes,
         run_scheduled_cycles_task.delay,
