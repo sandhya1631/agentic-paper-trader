@@ -69,6 +69,8 @@ class StrategyRead(APIModel):
 
     version: str
     revision: str
+    name: str
+    summary: str
     selectable_mode: str = "FIXED"
 
 

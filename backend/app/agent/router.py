@@ -105,13 +105,23 @@ async def list_strategies(
 ) -> list[StrategyRead]:
     """Return strategy versions available for agent selection."""
     strategies = [
-        StrategyRead(version=version, revision=definition.revision)
+        StrategyRead(
+            version=version,
+            revision=definition.revision,
+            name=definition.name,
+            summary=definition.summary,
+        )
         for version, definition in STRATEGY_REGISTRY.items()
     ]
     strategies.append(
         StrategyRead(
             version=DYNAMIC_STRATEGY_VERSION,
             revision="runtime",
+            name="Dynamic (auto-selected)",
+            summary=(
+                "Each cycle picks a strategy automatically from data quality, "
+                "market regime, and relative volume."
+            ),
             selectable_mode="DYNAMIC",
         )
     )
@@ -163,8 +173,25 @@ async def update_agent_strategy(
             detail="Cannot change strategy while the agent has an active cycle.",
         )
 
+    previous_strategy_version = agent.strategy_version
     agent.strategy_version = body.strategy_version
     agent.version += 1
+    if previous_strategy_version != body.strategy_version:
+        record_audit_event(
+            db,
+            event_type="AGENT_STRATEGY_UPDATED",
+            entity_type="agent_config",
+            entity_id=agent.id,
+            actor_id=current_user.id,
+            details={
+                "changes": {
+                    "strategy_version": {
+                        "from": previous_strategy_version,
+                        "to": body.strategy_version,
+                    }
+                }
+            },
+        )
     await db.commit()
     await db.refresh(agent)
     return AgentConfigRead.model_validate(agent)
