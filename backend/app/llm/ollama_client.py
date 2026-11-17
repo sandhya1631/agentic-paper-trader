@@ -3,6 +3,7 @@ from typing import Any
 import httpx
 
 from app.llm.base import LLMClient, LLMHealth
+from app.schemas import DecisionProposal
 
 
 class OllamaClient(LLMClient):
@@ -49,7 +50,7 @@ class OllamaClient(LLMClient):
         }
         payload["options"]["num_ctx"] = self._num_ctx
         if self._json_format:
-            payload["format"] = "json"
+            payload["format"] = DecisionProposal.model_json_schema()
         async with httpx.AsyncClient(timeout=180.0) as client:
             response = await client.post(f"{self._base_url}/api/chat", json=payload)
             response.raise_for_status()

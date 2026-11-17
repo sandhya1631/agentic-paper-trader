@@ -66,7 +66,7 @@ def _mock_db_for_fresh_cycle() -> MagicMock:
     no_expired_approvals_result = MagicMock()
     no_expired_approvals_result.all.return_value = []
 
-    def refresh(model):
+    def refresh(model, **_kwargs):
         if isinstance(model, AgentCycle) and model.id is None:
             model.id = uuid.uuid4()
 
