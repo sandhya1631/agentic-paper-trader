@@ -5,7 +5,7 @@ vi.mock("@/lib/api/client", () => ({
 }));
 
 import { api } from "@/lib/api/client";
-import { getCycle, listCycles } from "./cycles-api";
+import { getCycle, getCycleTokenUsage, listCycles } from "./cycles-api";
 
 const mockedApi = vi.mocked(api);
 
@@ -63,5 +63,17 @@ describe("getCycle", () => {
 
     expect(mockedApi.get).toHaveBeenCalledWith("/agent/cycles/c1");
     expect(result).toBe(cycle);
+  });
+});
+
+describe("getCycleTokenUsage", () => {
+  it("fetches a single cycle's token usage by id", async () => {
+    const usage = { cycle_id: "c1", estimated_input_tokens: 900 };
+    mockedApi.get.mockResolvedValue(usage);
+
+    const result = await getCycleTokenUsage("c1");
+
+    expect(mockedApi.get).toHaveBeenCalledWith("/agent/cycles/c1/token-usage");
+    expect(result).toBe(usage);
   });
 });

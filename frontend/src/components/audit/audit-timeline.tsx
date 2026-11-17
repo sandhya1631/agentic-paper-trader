@@ -3,15 +3,18 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   getCycle,
+  getCycleTokenUsage,
   listCycles,
   type AgentCycle,
   type CycleListFilters,
+  type CycleTokenUsage,
 } from "@/lib/agent/cycles-api";
 import { getConstants } from "@/lib/meta/meta-api";
 import { getErrorMessage } from "@/lib/api/error-message";
 import { formatDateTime } from "@/lib/format";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { formatEvidence, outcomeStyle, parsePolicyResult } from "@/lib/approvals/approval-view";
+import { tokenUsagePercent } from "@/lib/agent/token-usage-view";
 
 const PAGE = 20;
 
@@ -329,6 +332,7 @@ function CycleRow({ summary }: { summary: AgentCycle }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<AgentCycle | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [tokenUsage, setTokenUsage] = useState<CycleTokenUsage | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function toggle() {
@@ -337,10 +341,19 @@ function CycleRow({ summary }: { summary: AgentCycle }) {
     if (willOpen && detail === null && !loading) {
       setLoading(true);
       try {
-        setDetail(await getCycle(summary.id));
-        setDetailError(null);
-      } catch (e) {
-        setDetailError(getErrorMessage(e, "Could not load cycle detail."));
+        // Fetched together, but independently: a cycle with no persisted token usage yet
+        // (404/409 - it never built model context) must not block the rest of the detail.
+        const [cycleResult, tokenResult] = await Promise.allSettled([
+          getCycle(summary.id),
+          getCycleTokenUsage(summary.id),
+        ]);
+        if (cycleResult.status === "fulfilled") {
+          setDetail(cycleResult.value);
+          setDetailError(null);
+        } else {
+          setDetailError(getErrorMessage(cycleResult.reason, "Could not load cycle detail."));
+        }
+        setTokenUsage(tokenResult.status === "fulfilled" ? tokenResult.value : null);
       } finally {
         setLoading(false);
       }
@@ -379,14 +392,20 @@ function CycleRow({ summary }: { summary: AgentCycle }) {
               {detailError}
             </div>
           )}
-          {!loading && !detailError && <CycleDetail cycle={cycle} />}
+          {!loading && !detailError && <CycleDetail cycle={cycle} tokenUsage={tokenUsage} />}
         </div>
       )}
     </article>
   );
 }
 
-function CycleDetail({ cycle }: { cycle: AgentCycle }) {
+function CycleDetail({
+  cycle,
+  tokenUsage,
+}: {
+  cycle: AgentCycle;
+  tokenUsage: CycleTokenUsage | null;
+}) {
   const { market, executionStatus } = readSnapshot(cycle);
   const strategySelection = readStrategySelection(cycle, market);
   const policy =
@@ -490,6 +509,46 @@ function CycleDetail({ cycle }: { cycle: AgentCycle }) {
               </tbody>
             </table>
           </div>
+        </section>
+      )}
+
+      {tokenUsage && (
+        <section>
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">
+            Context usage
+          </h4>
+          <p className="mt-1">
+            {tokenUsage.estimated_input_tokens.toLocaleString()} /{" "}
+            {tokenUsage.model_window_tokens.toLocaleString()} tokens
+            <span className="text-muted">
+              {" "}
+              ({tokenUsage.remaining_context_tokens.toLocaleString()} remaining)
+            </span>
+          </p>
+          <div
+            role="progressbar"
+            aria-label="Context window used"
+            aria-valuenow={tokenUsagePercent(tokenUsage)}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            className="mt-1 h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-surface-muted"
+          >
+            <div
+              className={`h-full rounded-full ${
+                tokenUsage.context_over_limit ? "bg-negative" : "bg-brand"
+              }`}
+              style={{ width: `${tokenUsagePercent(tokenUsage)}%` }}
+            />
+          </div>
+          {(tokenUsage.context_over_limit || tokenUsage.context_truncated) && (
+            <p className="mt-1 text-negative">
+              {tokenUsage.context_over_limit && tokenUsage.context_truncated
+                ? "Over the model's context window; the context was truncated."
+                : tokenUsage.context_over_limit
+                  ? "Over the model's context window."
+                  : "The context was truncated."}
+            </p>
+          )}
         </section>
       )}
 
