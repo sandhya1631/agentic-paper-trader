@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.accounts.credential_vault import CredentialVaultError
 from app.broker.alpaca import AlpacaClient
 from app.broker.schemas import AlpacaOrderRead
 from app.core.constants import (
@@ -166,6 +167,34 @@ async def test_a_kill_switch_block_writes_one_committed_blocked_row(
     assert row.details["symbol"] == "AAPL"
     assert row.details["quantity"] == 2
     assert "broker_order_id" not in row.details
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_checked_before_credential_decryption(
+    client: AsyncClient, monkeypatch
+):
+    """423 even when the account's stored credentials can't be decrypted (#161): the vault
+    is never read and the broker is never called when the switch is on."""
+    token, user = await _operator(client)
+    monkeypatch.setattr(
+        "app.broker.router.is_kill_switch_enabled", AsyncMock(return_value=True)
+    )
+    decrypt = AsyncMock(side_effect=CredentialVaultError("ciphertext cannot be decrypted"))
+    monkeypatch.setattr("app.broker.router.get_decrypted_alpaca_credentials", decrypt)
+    submit = AsyncMock()
+
+    with patch.object(AlpacaClient, "submit_order", submit):
+        response = await client.post(
+            ORDERS_URL, json=ORDER, headers={"Authorization": f"Bearer {token}"}
+        )
+
+    assert response.status_code == 423
+    assert response.json()["detail"] == "Order submission blocked by the global kill switch"
+    decrypt.assert_not_awaited()  # the vault is never read
+    submit.assert_not_awaited()
+    [row] = await _audit_rows()
+    assert row.event_type == MANUAL_ORDER_BLOCKED
+    assert row.actor_id == user.id
 
 
 @pytest.mark.asyncio

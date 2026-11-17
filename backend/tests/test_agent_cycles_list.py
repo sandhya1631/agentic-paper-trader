@@ -9,7 +9,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 
 from app.db.enums import CycleStatus, CycleTrigger, UserRole
-from app.db.models import AgentConfig, AgentCycle, PolicySet, TradingAccount, User
+from app.db.models import AgentConfig, AgentCycle, AuditEvent, PolicySet, TradingAccount, User
 
 
 async def _register_and_login(client: AsyncClient, email: str) -> str:
@@ -193,7 +193,8 @@ async def test_strategy_selection_lists_and_updates_owned_agent(client: AsyncCli
     headers = {"Authorization": f"Bearer {token}"}
     strategies = await client.get("/agent/strategies", headers=headers)
     assert strategies.status_code == 200
-    assert {item["version"] for item in strategies.json()} >= {
+    by_version = {item["version"]: item for item in strategies.json()}
+    assert by_version.keys() >= {
         "S-001",
         "S-002",
         "S-003",
@@ -203,6 +204,12 @@ async def test_strategy_selection_lists_and_updates_owned_agent(client: AsyncCli
         "S-007",
         "DYNAMIC",
     }
+    # Every strategy, including DYNAMIC, carries a name and a one-line summary
+    # (#189) - enough to choose from without reading the prompt source.
+    for item in by_version.values():
+        assert item["name"]
+        assert item["summary"]
+    assert by_version["DYNAMIC"]["selectable_mode"] == "DYNAMIC"
 
     response = await client.put(
         f"/agent/{agent_id}/strategy",
@@ -277,6 +284,83 @@ async def test_scheduled_cycle_cannot_be_cancelled_by_manual_endpoint(
     response = await client.post(
         f"/agent/cycles/{cycle_id}/cancel",
         headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_strategy_update_records_one_audit_event(client: AsyncClient):
+    token = await _register_and_login(client, "strategy-audit@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "strategy-audit@example.com")
+        user = (
+            await db.execute(
+                select(User).where(User.email == "strategy-audit@example.com")
+            )
+        ).scalar_one()
+        user.role = UserRole.OPERATOR
+        await db.commit()
+        agent_id = agent.id
+        user_id = user.id
+
+    response = await client.put(
+        f"/agent/{agent_id}/strategy",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"strategy_version": "S-002"},
+    )
+    assert response.status_code == 200
+
+    async with TestSessionLocal() as db:
+        events = (
+            await db.execute(select(AuditEvent).where(AuditEvent.entity_id == agent_id))
+        ).scalars().all()
+    assert len(events) == 1
+    event = events[0]
+    assert event.event_type == "AGENT_STRATEGY_UPDATED"
+    assert event.entity_type == "agent_config"
+    assert event.actor_id == user_id
+    assert event.details == {
+        "changes": {"strategy_version": {"from": "S-001", "to": "S-002"}}
+    }
+
+
+@pytest.mark.asyncio
+async def test_strategy_update_requires_operator(client: AsyncClient):
+    """A VIEWER (the default role) cannot change an agent's strategy."""
+    token = await _register_and_login(client, "strategy-viewer@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "strategy-viewer@example.com")
+        agent_id = agent.id
+
+    response = await client.put(
+        f"/agent/{agent_id}/strategy",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"strategy_version": "S-002"},
+    )
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_strategy_update_rejects_while_cycle_active(client: AsyncClient):
+    token = await _register_and_login(client, "strategy-active@example.com")
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, "strategy-active@example.com")
+        user = (
+            await db.execute(
+                select(User).where(User.email == "strategy-active@example.com")
+            )
+        ).scalar_one()
+        user.role = UserRole.OPERATOR
+        db.add(_cycle(agent.id, minutes_ago=1, status=CycleStatus.REASONING))
+        await db.commit()
+        agent_id = agent.id
+
+    response = await client.put(
+        f"/agent/{agent_id}/strategy",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"strategy_version": "S-002"},
     )
 
     assert response.status_code == 409

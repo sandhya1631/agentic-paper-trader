@@ -26,6 +26,8 @@ vi.mock("@/lib/agent/observability-api", () => ({ getSchedulerLogs: vi.fn() }));
 vi.mock("@/lib/agent/agent-config-api", () => ({
   getAgentConfig: vi.fn(),
   updateAgentConfig: vi.fn(),
+  listStrategies: vi.fn(),
+  updateAgentStrategy: vi.fn(),
 }));
 vi.mock("@/lib/meta/meta-api", () => ({ getConstants: vi.fn() }));
 
@@ -44,7 +46,7 @@ import {
 } from "@/lib/accounts/accounts-api";
 import { getSchedulerStatus, startSchedule, stopSchedule } from "@/lib/agent/scheduler-api";
 import { listCycles } from "@/lib/agent/cycles-api";
-import { getAgentConfig } from "@/lib/agent/agent-config-api";
+import { getAgentConfig, listStrategies } from "@/lib/agent/agent-config-api";
 import { getConstants } from "@/lib/meta/meta-api";
 import { SettingsView } from "./settings-view";
 
@@ -62,6 +64,7 @@ const mockStop = vi.mocked(stopSchedule);
 const mockCycles = vi.mocked(listCycles);
 const mockLogs = vi.mocked(getSchedulerLogs);
 const mockAgentConfig = vi.mocked(getAgentConfig);
+const mockListStrategies = vi.mocked(listStrategies);
 const mockConstants = vi.mocked(getConstants);
 
 function notFound() {
@@ -144,6 +147,9 @@ beforeEach(() => {
     enabled: true,
     watchlist: ["AAPL", "NVDA", "SPY"],
   });
+  mockListStrategies.mockResolvedValue([
+    { version: "S-001", revision: "1.5.0", name: "Momentum Confluence", summary: "RSI + SMA.", selectable_mode: "FIXED" },
+  ]);
   mockConstants.mockResolvedValue({
     approval_mode: ["OBSERVE_ONLY", "REQUIRED", "AUTO"],
     max_watchlist_size: 20,

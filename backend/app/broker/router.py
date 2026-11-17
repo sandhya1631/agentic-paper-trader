@@ -191,11 +191,25 @@ async def get_market_snapshot(
 async def place_paper_order(
     order: OrderCreate,
     current_user: Annotated[User, Depends(require_operator)],
-    client: Annotated[AlpacaClient, Depends(get_alpaca_client)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    x_alpaca_api_key: str | None = Header(
+        default=None,
+        alias="X-Alpaca-API-Key",
+        description="Dev-only Alpaca API Key override (ignored outside development).",
+    ),
+    x_alpaca_api_secret: str | None = Header(
+        default=None,
+        alias="X-Alpaca-API-Secret",
+        description="Dev-only Alpaca API Secret override (ignored outside development).",
+    ),
 ):
     """Manual override order: kill switch only, no P-0xx policies. Every attempt that gets
-    this far is audited (#162) as SUBMITTED, BLOCKED (423) or FAILED (502)."""
+    this far is audited (#162) as SUBMITTED, BLOCKED (423) or FAILED (502).
+
+    The kill switch is checked before the broker client is built (#161): `client` is not a
+    `Depends` parameter here, because FastAPI resolves parameter dependencies before this
+    body runs, which would decrypt the user's vault credentials even when the switch is on.
+    """
     if await is_kill_switch_enabled(db):
         await _audit_manual_order(
             db,
@@ -209,6 +223,7 @@ async def place_paper_order(
             status_code=status.HTTP_423_LOCKED,
             detail="Order submission blocked by the global kill switch",
         )
+    client = await get_alpaca_client(current_user, db, x_alpaca_api_key, x_alpaca_api_secret)
     try:
         placed = await client.submit_order(order)
     except Exception as exc:

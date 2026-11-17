@@ -8,6 +8,8 @@ import { ApiError } from "@/lib/api/errors";
 vi.mock("@/lib/agent/agent-config-api", () => ({
   getAgentConfig: vi.fn(),
   updateAgentConfig: vi.fn(),
+  listStrategies: vi.fn(),
+  updateAgentStrategy: vi.fn(),
 }));
 vi.mock("@/lib/meta/meta-api", () => ({ getConstants: vi.fn() }));
 vi.mock("@/lib/market-data/market-data-api", async (importOriginal) => {
@@ -15,7 +17,14 @@ vi.mock("@/lib/market-data/market-data-api", async (importOriginal) => {
   return { ...actual, getBars: vi.fn(), getSnapshot: vi.fn() };
 });
 
-import { getAgentConfig, updateAgentConfig, type AgentConfig } from "@/lib/agent/agent-config-api";
+import {
+  getAgentConfig,
+  listStrategies,
+  updateAgentConfig,
+  updateAgentStrategy,
+  type AgentConfig,
+  type Strategy,
+} from "@/lib/agent/agent-config-api";
 import { getConstants, type Constants } from "@/lib/meta/meta-api";
 import { getBars, getSnapshot, type MarketSnapshot } from "@/lib/market-data/market-data-api";
 import { AgentConfigCard } from "./agent-config-card";
@@ -25,6 +34,8 @@ const mockUpdate = vi.mocked(updateAgentConfig);
 const mockConstants = vi.mocked(getConstants);
 const mockBars = vi.mocked(getBars);
 const mockSnapshot = vi.mocked(getSnapshot);
+const mockListStrategies = vi.mocked(listStrategies);
+const mockUpdateStrategy = vi.mocked(updateAgentStrategy);
 
 function config(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
@@ -68,8 +79,18 @@ function snapshot(overrides: Partial<MarketSnapshot> = {}): MarketSnapshot {
   };
 }
 
+const STRATEGIES: Strategy[] = [
+  { version: "S-001", revision: "1.5.0", name: "Momentum Confluence", summary: "RSI + SMA.", selectable_mode: "FIXED" },
+  { version: "S-002", revision: "2.0.0", name: "RSI & SMA Crossover", summary: "Terser RSI/SMA.", selectable_mode: "FIXED" },
+  { version: "DYNAMIC", revision: "runtime", name: "Dynamic (auto-selected)", summary: "Auto-picks per cycle.", selectable_mode: "DYNAMIC" },
+];
+
 function saveButton() {
   return screen.getByRole("button", { name: /^save$/i }) as HTMLButtonElement;
+}
+
+function saveStrategyButton() {
+  return screen.getByRole("button", { name: /^save strategy$/i }) as HTMLButtonElement;
 }
 
 beforeEach(() => {
@@ -78,10 +99,13 @@ beforeEach(() => {
   mockConstants.mockReset();
   mockBars.mockReset();
   mockSnapshot.mockReset();
+  mockListStrategies.mockReset();
+  mockUpdateStrategy.mockReset();
   mockGetConfig.mockResolvedValue(config());
   mockConstants.mockResolvedValue(CONSTANTS);
   mockSnapshot.mockResolvedValue(snapshot());
   mockBars.mockResolvedValue({});
+  mockListStrategies.mockResolvedValue(STRATEGIES);
 });
 afterEach(() => cleanup());
 
@@ -306,5 +330,77 @@ describe("AgentConfigCard", () => {
     );
     expect((screen.getByLabelText(/add symbol/i) as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByLabelText(/approval mode/i) as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByLabelText(/^strategy$/i) as HTMLSelectElement).disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: /^save strategy$/i })).toBeNull();
+  });
+
+  describe("strategy picker (#189)", () => {
+    it("loads the strategy list and shows the current strategy's summary", async () => {
+      render(<AgentConfigCard canEdit />);
+      await screen.findByText("AAPL");
+
+      const select = screen.getByLabelText(/^strategy$/i) as HTMLSelectElement;
+      expect(select.value).toBe("S-001");
+      expect(Array.from(select.options).map((o) => o.value)).toEqual([
+        "S-001",
+        "S-002",
+        "DYNAMIC",
+      ]);
+      expect(screen.getByText("RSI + SMA.")).toBeTruthy();
+      expect(saveStrategyButton().disabled).toBe(true); // nothing changed yet
+    });
+
+    it("falls back to the agent's current strategy when the list fails to load", async () => {
+      mockListStrategies.mockRejectedValue(new Error("strategies down"));
+      render(<AgentConfigCard canEdit />);
+      await screen.findByText("AAPL");
+
+      const select = screen.getByLabelText(/^strategy$/i) as HTMLSelectElement;
+      expect(Array.from(select.options).map((o) => o.value)).toEqual(["S-001"]);
+      expect(screen.getByText("strategies down")).toBeTruthy();
+    });
+
+    it("saves a chosen strategy with PUT /agent/{id}/strategy", async () => {
+      mockUpdateStrategy.mockResolvedValue(config({ strategy_version: "S-002" }));
+      render(<AgentConfigCard canEdit />);
+      await screen.findByText("AAPL");
+
+      fireEvent.change(screen.getByLabelText(/^strategy$/i), { target: { value: "S-002" } });
+      expect(screen.getByText("Terser RSI/SMA.")).toBeTruthy();
+      expect(saveStrategyButton().disabled).toBe(false);
+
+      fireEvent.click(saveStrategyButton());
+
+      await waitFor(() => expect(mockUpdateStrategy).toHaveBeenCalledWith("a1", "S-002"));
+      expect((await screen.findByRole("status")).textContent).toMatch(/saved/i);
+      expect(saveStrategyButton().disabled).toBe(true); // saved state is the new baseline
+    });
+
+    it("shows a clear message on a 409 (active cycle)", async () => {
+      mockUpdateStrategy.mockRejectedValue(
+        new ApiError(
+          409,
+          "Conflict",
+          { detail: "Cannot change strategy while the agent has an active cycle." },
+          "http://x",
+        ),
+      );
+      render(<AgentConfigCard canEdit />);
+      await screen.findByText("AAPL");
+
+      fireEvent.change(screen.getByLabelText(/^strategy$/i), { target: { value: "S-002" } });
+      fireEvent.click(saveStrategyButton());
+
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toMatch(/active cycle/i);
+    });
+
+    it("is read-only for viewers, with no Save strategy button", async () => {
+      render(<AgentConfigCard canEdit={false} />);
+      await screen.findByText("AAPL");
+
+      expect((screen.getByLabelText(/^strategy$/i) as HTMLSelectElement).disabled).toBe(true);
+      expect(screen.queryByRole("button", { name: /^save strategy$/i })).toBeNull();
+    });
   });
 });
