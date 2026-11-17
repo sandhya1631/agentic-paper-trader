@@ -3,9 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getAgentConfig,
+  listStrategies,
   updateAgentConfig,
+  updateAgentStrategy,
   type AgentConfig,
   type AgentConfigUpdate,
+  type Strategy,
 } from "@/lib/agent/agent-config-api";
 import {
   AUTO_WARNING,
@@ -15,10 +18,13 @@ import {
   buildConfigPatch,
   describeAgentConfigError,
   describeApprovalMode,
+  describeStrategyError,
+  findStrategy,
   formatFraction,
   isAutoMode,
   isNoAgentError,
   normalizeSymbol,
+  strategySelectOptions,
   summarizePreview,
   validateSymbol,
   validateWatchlist,
@@ -57,21 +63,38 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
   const [confirmingAuto, setConfirmingAuto] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [strategies, setStrategies] = useState<Strategy[]>([]);
+  const [strategiesError, setStrategiesError] = useState<string | null>(null);
+  const [draftStrategy, setDraftStrategy] = useState("");
+  const [strategySaving, setStrategySaving] = useState(false);
+  const [strategyFeedback, setStrategyFeedback] = useState<Feedback | null>(null);
   const previewRequest = useRef(0);
 
   const applyConfig = useCallback((cfg: AgentConfig) => {
     setConfig(cfg);
     setDraftWatchlist(cfg.watchlist);
     setDraftMode(cfg.approval_mode);
+    setDraftStrategy(cfg.strategy_version);
   }, []);
 
   const load = useCallback(async () => {
     setStatus("loading");
     setLoadError(null);
-    // allSettled: constants are optional (the select falls back to the current mode).
-    const [cfg, meta] = await Promise.allSettled([getAgentConfig(), getConstants()]);
+    // allSettled: constants and strategies are optional (the selects fall back gracefully).
+    const [cfg, meta, strategyList] = await Promise.allSettled([
+      getAgentConfig(),
+      getConstants(),
+      listStrategies(),
+    ]);
     const constants = meta.status === "fulfilled" ? meta.value : null;
     setMaxSize(constants?.max_watchlist_size ?? null);
+    if (strategyList.status === "fulfilled") {
+      setStrategies(strategyList.value);
+      setStrategiesError(null);
+    } else {
+      setStrategies([]);
+      setStrategiesError(describeStrategyError(strategyList.reason, "load"));
+    }
     if (cfg.status === "fulfilled") {
       applyConfig(cfg.value);
       setModes(approvalModeOptions(constants?.approval_mode, cfg.value.approval_mode));
@@ -165,6 +188,30 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
     }
     setConfirmingAuto(false);
     setSaving(false);
+  }
+
+  const strategyOptions = strategySelectOptions(strategies, draftStrategy);
+  const selectedStrategy = findStrategy(strategyOptions, draftStrategy);
+  const strategyDirty = !!config && draftStrategy !== config.strategy_version;
+  const canSaveStrategy = canEdit && !strategySaving && strategyDirty;
+
+  function onStrategyChange(version: string) {
+    setDraftStrategy(version);
+    setStrategyFeedback(null);
+  }
+
+  async function saveStrategy() {
+    if (!config || !canSaveStrategy) return;
+    setStrategySaving(true);
+    setStrategyFeedback(null);
+    const [res] = await Promise.allSettled([updateAgentStrategy(config.id, draftStrategy)]);
+    if (res.status === "fulfilled") {
+      applyConfig(res.value);
+      setStrategyFeedback({ tone: "success", message: SAVED_MESSAGE });
+    } else {
+      setStrategyFeedback({ tone: "error", message: describeStrategyError(res.reason, "save") });
+    }
+    setStrategySaving(false);
   }
 
   return (
@@ -311,6 +358,49 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
               describeApprovalMode(draftMode).help && (
                 <p className="mt-1 text-sm text-muted">{describeApprovalMode(draftMode).help}</p>
               )
+            )}
+          </div>
+
+          <div>
+            <label htmlFor="agent-strategy" className="text-xs font-medium text-muted">
+              Strategy
+            </label>
+            <select
+              id="agent-strategy"
+              value={draftStrategy}
+              disabled={!canEdit || strategySaving}
+              onChange={(e) => onStrategyChange(e.target.value)}
+              className={`${inputClass} max-w-xs`}
+            >
+              {strategyOptions.map((s) => (
+                <option key={s.version} value={s.version}>
+                  {s.name || s.version}
+                </option>
+              ))}
+            </select>
+            {selectedStrategy?.summary && (
+              <p className="mt-1 text-sm text-muted">{selectedStrategy.summary}</p>
+            )}
+            {strategiesError && <p className="mt-1 text-sm text-negative">{strategiesError}</p>}
+            {strategyFeedback && (
+              <p
+                role={strategyFeedback.tone === "error" ? "alert" : "status"}
+                className={`mt-1 text-sm ${
+                  strategyFeedback.tone === "error" ? "text-negative" : "text-positive"
+                }`}
+              >
+                {strategyFeedback.message}
+              </p>
+            )}
+            {canEdit && (
+              <button
+                type="button"
+                disabled={!canSaveStrategy}
+                onClick={() => void saveStrategy()}
+                className={`mt-2 ${secondaryButton}`}
+              >
+                {strategySaving ? "Saving..." : "Save strategy"}
+              </button>
             )}
           </div>
 

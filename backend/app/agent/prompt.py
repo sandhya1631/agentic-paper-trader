@@ -19,6 +19,8 @@ class PromptDefinition:
 
     revision: str
     text: str
+    name: str = ""
+    summary: str = ""
 
 
 SYSTEM_PROMPT_S001 = """STRATEGY: Technical Momentum Confluence
@@ -176,14 +178,65 @@ trade a symbol outside the watchlist. Return only valid JSON with exact evidence
 
 STRATEGY_REGISTRY: dict[str, PromptDefinition] = {
     DEFAULT_STRATEGY_VERSION: PromptDefinition(
-        revision=DEFAULT_PROMPT_REVISION, text=SYSTEM_PROMPT_S001
+        revision=DEFAULT_PROMPT_REVISION,
+        text=SYSTEM_PROMPT_S001,
+        name="Momentum Confluence",
+        summary=(
+            "Buys on RSI recovery with price above a rising SMA; sells on "
+            "overbought RSI or a break below SMA-20."
+        ),
     ),
-    "S-002": PromptDefinition(revision="2.0.0", text=SYSTEM_PROMPT_S002),
-    "S-003": PromptDefinition(revision="3.0.0", text=SYSTEM_PROMPT_S003),
-    "S-004": PromptDefinition(revision="4.0.0", text=SYSTEM_PROMPT_S004),
-    "S-005": PromptDefinition(revision="5.0.0", text=SYSTEM_PROMPT_S005),
-    "S-006": PromptDefinition(revision="6.0.0", text=SYSTEM_PROMPT_S006),
-    "S-007": PromptDefinition(revision="7.0.0", text=SYSTEM_PROMPT_S007),
+    "S-002": PromptDefinition(
+        revision="2.0.0",
+        text=SYSTEM_PROMPT_S002,
+        name="RSI & SMA Crossover",
+        summary="A terser restatement of S-001's RSI/SMA confluence rules.",
+    ),
+    "S-003": PromptDefinition(
+        revision="3.0.0",
+        text=SYSTEM_PROMPT_S003,
+        name="Conservative Trend Following",
+        summary=(
+            "Trades only with a confirmed UPTREND/DOWNTREND regime, SMA "
+            "alignment, and a positive MACD histogram."
+        ),
+    ),
+    "S-004": PromptDefinition(
+        revision="4.0.0",
+        text=SYSTEM_PROMPT_S004,
+        name="Volume-Confirmed Breakout",
+        summary=(
+            "Requires a volume-confirmed breakout (relative volume >= 1.5) "
+            "above SMA-20 with a positive MACD histogram."
+        ),
+    ),
+    "S-005": PromptDefinition(
+        revision="5.0.0",
+        text=SYSTEM_PROMPT_S005,
+        name="Range-Bound Mean Reversion",
+        summary=(
+            "Buys oversold dips and sells overbought rallies, only while "
+            "the regime is RANGE-bound."
+        ),
+    ),
+    "S-006": PromptDefinition(
+        revision="6.0.0",
+        text=SYSTEM_PROMPT_S006,
+        name="Momentum Continuation",
+        summary=(
+            "Requires SMA, RSI band, MACD, and relative volume to all agree "
+            "before continuing an existing momentum move."
+        ),
+    ),
+    "S-007": PromptDefinition(
+        revision="7.0.0",
+        text=SYSTEM_PROMPT_S007,
+        name="Capital Preservation",
+        summary=(
+            "Defaults to HOLD; trades only the narrowest, most-confirmed "
+            "RSI/SMA/MACD setup."
+        ),
+    ),
 }
 
 
@@ -204,6 +257,8 @@ def get_prompt_definition(strategy_version: str = DEFAULT_STRATEGY_VERSION) -> P
             "================================================================================\n"
             f"{definition.text}"
         ),
+        name=definition.name,
+        summary=definition.summary,
     )
 
 

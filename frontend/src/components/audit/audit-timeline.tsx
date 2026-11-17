@@ -66,6 +66,37 @@ function readSnapshot(cycle: AgentCycle): {
   };
 }
 
+interface StrategySelection {
+  mode: string;
+  selectedStrategy: string | null;
+  reason: string | null;
+  /** Distinct `regime` values across the snapshot's market symbols (#189). */
+  regimes: string[];
+}
+
+/** The snapshot's `strategy_selection` (orchestrator.py's DYNAMIC-mode audit record). */
+function readStrategySelection(
+  cycle: AgentCycle,
+  market: Record<string, Record<string, unknown>>,
+): StrategySelection {
+  const snap = (cycle.snapshot_json ?? {}) as Record<string, unknown>;
+  const selection = (snap.strategy_selection ?? {}) as Record<string, unknown>;
+  const regimes = Array.from(
+    new Set(
+      Object.values(market)
+        .map((m) => (typeof m.regime === "string" ? m.regime : null))
+        .filter((regime): regime is string => regime !== null),
+    ),
+  );
+  return {
+    mode: typeof selection.mode === "string" ? selection.mode : "FIXED",
+    selectedStrategy:
+      typeof selection.selected_strategy === "string" ? selection.selected_strategy : null,
+    reason: typeof selection.reason === "string" ? selection.reason : null,
+    regimes,
+  };
+}
+
 export function AuditTimeline() {
   const [items, setItems] = useState<AgentCycle[] | null>(null);
   const [total, setTotal] = useState(0);
@@ -357,6 +388,7 @@ function CycleRow({ summary }: { summary: AgentCycle }) {
 
 function CycleDetail({ cycle }: { cycle: AgentCycle }) {
   const { market, executionStatus } = readSnapshot(cycle);
+  const strategySelection = readStrategySelection(cycle, market);
   const policy =
     parsePolicyResult(cycle.policy_result_json) ??
     parsePolicyResult(cycle.approval?.policy_result_json ?? null);
@@ -370,6 +402,38 @@ function CycleDetail({ cycle }: { cycle: AgentCycle }) {
           {cycle.failure_code}
           {cycle.failure_message ? `: ${cycle.failure_message}` : ""}
         </div>
+      )}
+
+      {cycle.prompt_version && (
+        <section>
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-muted">Strategy</h4>
+          <p className="mt-1">
+            <span className="font-medium">{cycle.prompt_version}</span>
+            {cycle.prompt_revision ? (
+              <span className="text-muted"> (rev {cycle.prompt_revision})</span>
+            ) : null}
+          </p>
+          {strategySelection.mode === "DYNAMIC" && (
+            <dl className="mt-2 grid gap-x-4 gap-y-1 text-sm sm:grid-cols-2">
+              <div>
+                <dt className="text-xs text-muted">Selected strategy</dt>
+                <dd>{strategySelection.selectedStrategy ?? "—"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs text-muted">Market regime</dt>
+                <dd>
+                  {strategySelection.regimes.length > 0
+                    ? strategySelection.regimes.join(", ")
+                    : "—"}
+                </dd>
+              </div>
+              <div className="sm:col-span-2">
+                <dt className="text-xs text-muted">Selection reason</dt>
+                <dd>{strategySelection.reason ?? "—"}</dd>
+              </div>
+            </dl>
+          )}
+        </section>
       )}
 
       {cycle.proposal_json?.reasoning && (

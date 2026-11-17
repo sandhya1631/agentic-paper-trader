@@ -10,7 +10,7 @@ import { getErrorMessage } from "@/lib/api/error-message";
 import { isAccountNotConnected } from "@/lib/broker/broker-api";
 import { toNumber } from "@/lib/format";
 import type { BarsResponse, MarketSnapshot } from "@/lib/market-data/market-data-api";
-import type { AgentConfig, AgentConfigUpdate } from "./agent-config-api";
+import type { AgentConfig, AgentConfigUpdate, Strategy } from "./agent-config-api";
 
 /** Mirrors the backend `Ticker` type (schemas.py) after it upper-cases the input. */
 export const TICKER_PATTERN = /^[A-Z][A-Z0-9.]{0,9}$/;
@@ -150,6 +150,47 @@ export function describeAgentConfigError(error: unknown, action: "load" | "save"
     }
     // 422 and anything else: prefer the backend's detail. Without one, avoid
     // getErrorMessage's login-specific wording for 401/409.
+    return hasDetail(error) ? getErrorMessage(error, fallback) : fallback;
+  }
+  return getErrorMessage(error, fallback);
+}
+
+/** Find a loaded strategy by version; undefined while the list hasn't loaded yet. */
+export function findStrategy(
+  strategies: readonly Strategy[],
+  version: string,
+): Strategy | undefined {
+  return strategies.find((s) => s.version === version);
+}
+
+/**
+ * Select options for the strategy picker: the loaded strategies, always including the
+ * agent's current value even if `GET /agent/strategies` failed or hasn't returned it.
+ */
+export function strategySelectOptions(
+  strategies: readonly Strategy[],
+  current: string,
+): Strategy[] {
+  if (!current || strategies.some((s) => s.version === current)) return [...strategies];
+  return [
+    ...strategies,
+    { version: current, revision: "", name: current, summary: "", selectable_mode: "FIXED" },
+  ];
+}
+
+/** Map a failed strategy load/save to a distinct, readable message. */
+export function describeStrategyError(error: unknown, action: "load" | "save"): string {
+  const fallback =
+    action === "load" ? "Could not load the available strategies." : "Could not change the strategy.";
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      return "Only operators and admins can change the agent's strategy.";
+    }
+    if (error.status === 409) {
+      return hasDetail(error)
+        ? getErrorMessage(error, fallback)
+        : "Cannot change strategy while the agent has an active cycle.";
+    }
     return hasDetail(error) ? getErrorMessage(error, fallback) : fallback;
   }
   return getErrorMessage(error, fallback);

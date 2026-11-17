@@ -28,10 +28,33 @@ export interface AgentConfigUpdate {
   approval_mode?: string;
 }
 
+/** `GET /agent/strategies` entry (#189): a registered prompt, or the DYNAMIC pseudo-strategy. */
+export interface Strategy {
+  version: string;
+  revision: string;
+  name: string;
+  summary: string;
+  /** "FIXED" for a registered prompt, "DYNAMIC" for the auto-selecting pseudo-strategy. */
+  selectable_mode: string;
+}
+
 export function getAgentConfig(): Promise<AgentConfig> {
   return api.get<AgentConfig>("/agent/config");
 }
 
 export function updateAgentConfig(update: AgentConfigUpdate): Promise<AgentConfig> {
   return api.patch<AgentConfig>("/agent/config", update);
+}
+
+export function listStrategies(): Promise<Strategy[]> {
+  return api.get<Strategy[]>("/agent/strategies");
+}
+
+export function updateAgentStrategy(
+  agentId: string,
+  strategyVersion: string,
+): Promise<AgentConfig> {
+  return api.put<AgentConfig>(`/agent/${agentId}/strategy`, {
+    strategy_version: strategyVersion,
+  });
 }
