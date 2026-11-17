@@ -380,12 +380,15 @@ async def test_get_orders_requires_auth(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_place_order_is_blocked_by_global_kill_switch(monkeypatch):
-    submit_order = AsyncMock()
     db = SimpleNamespace(add=MagicMock(), commit=AsyncMock(), rollback=AsyncMock())
     monkeypatch.setattr(
         "app.broker.router.is_kill_switch_enabled",
         AsyncMock(return_value=True),
     )
+    # #161: the broker client (and the vault decryption behind it) must never be built
+    # when the switch is on - the check happens first in the handler, not as a Depends.
+    get_client = AsyncMock()
+    monkeypatch.setattr("app.broker.router.get_alpaca_client", get_client)
 
     with pytest.raises(HTTPException) as error:
         await place_paper_order(
@@ -396,12 +399,11 @@ async def test_place_order_is_blocked_by_global_kill_switch(monkeypatch):
                 client_order_id="blocked-order",
             ),
             current_user=SimpleNamespace(id=None),  # an operator double
-            client=SimpleNamespace(submit_order=submit_order),
             db=db,
         )
 
     assert error.value.status_code == 423
-    submit_order.assert_not_awaited()
+    get_client.assert_not_awaited()
     # The attempt is audited (#162) and committed before the 423 is raised.
     db.add.assert_called_once()
     db.commit.assert_awaited_once()
