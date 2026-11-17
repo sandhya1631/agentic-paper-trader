@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
+  cancelCycle,
   getCycle,
   getCycleTokenUsage,
+  isCancellableCycle,
   listCycles,
   type AgentCycle,
   type CycleListFilters,
@@ -198,7 +200,13 @@ export function AuditTimeline() {
       )}
 
       {items?.map((cycle) => (
-        <CycleRow key={cycle.id} summary={cycle} />
+        <CycleRow
+          key={cycle.id}
+          summary={cycle}
+          onCancelled={(updated) =>
+            setItems((prev) => prev?.map((c) => (c.id === updated.id ? updated : c)) ?? prev)
+          }
+        />
       ))}
 
       {nextOffset != null && (
@@ -328,12 +336,21 @@ function AuditFilterBar({
   );
 }
 
-function CycleRow({ summary }: { summary: AgentCycle }) {
+function CycleRow({
+  summary,
+  onCancelled,
+}: {
+  summary: AgentCycle;
+  /** Called with the cycle's fresh state after a cancel attempt (success or 409). */
+  onCancelled: (updated: AgentCycle) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<AgentCycle | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [tokenUsage, setTokenUsage] = useState<CycleTokenUsage | null>(null);
   const [loading, setLoading] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   async function toggle() {
     const willOpen = !open;
@@ -364,25 +381,70 @@ function CycleRow({ summary }: { summary: AgentCycle }) {
   const action = cycle.proposal_json?.action;
   const symbol = cycle.proposal_json?.symbol;
 
+  async function onCancel() {
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      const updated = await cancelCycle(summary.id);
+      setDetail(updated);
+      onCancelled(updated);
+    } catch (e) {
+      setCancelError(getErrorMessage(e, "Could not cancel the cycle."));
+      // A 409 usually means the cycle already moved past a cancellable state (or
+      // another request cancelled it first) - refresh to what actually happened,
+      // rather than leaving a stale status next to the error.
+      try {
+        const current = await getCycle(summary.id);
+        setDetail(current);
+        onCancelled(current);
+      } catch {
+        // Keep the existing display; the error above already explains the failure.
+      }
+    } finally {
+      setCancelling(false);
+    }
+  }
+
   return (
     <article className="rounded-xl border border-border bg-surface">
-      <button
-        type="button"
-        onClick={() => void toggle()}
-        aria-expanded={open}
-        className="flex w-full flex-wrap items-center justify-between gap-3 px-5 py-4 text-left"
-      >
-        <span className="flex items-center gap-3">
-          <span className="text-sm text-muted">{formatDateTime(cycle.started_at)}</span>
-          <span className="text-xs text-muted">{cycle.trigger}</span>
-          {action ? (
-            <span className="font-medium">
-              {action} {symbol}
-            </span>
-          ) : null}
-        </span>
-        <Badge tone={statusTone(cycle.status)}>{cycle.status}</Badge>
-      </button>
+      <div className="flex w-full flex-wrap items-center justify-between gap-3 px-5 py-4">
+        <button
+          type="button"
+          onClick={() => void toggle()}
+          aria-expanded={open}
+          className="flex flex-1 flex-wrap items-center justify-between gap-3 text-left"
+        >
+          <span className="flex items-center gap-3">
+            <span className="text-sm text-muted">{formatDateTime(cycle.started_at)}</span>
+            <span className="text-xs text-muted">{cycle.trigger}</span>
+            {action ? (
+              <span className="font-medium">
+                {action} {symbol}
+              </span>
+            ) : null}
+          </span>
+          <Badge tone={statusTone(cycle.status)}>{cycle.status}</Badge>
+        </button>
+        {isCancellableCycle(cycle) && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              void onCancel();
+            }}
+            disabled={cancelling}
+            className="shrink-0 rounded-lg border border-negative/40 px-3 py-1.5 text-xs font-medium text-negative hover:bg-negative/10 disabled:opacity-50"
+          >
+            {cancelling ? "Cancelling..." : "Cancel"}
+          </button>
+        )}
+      </div>
+
+      {cancelError && (
+        <div role="alert" className="border-t border-border px-5 py-2 text-sm text-negative">
+          {cancelError}
+        </div>
+      )}
 
       {open && (
         <div className="space-y-4 border-t border-border p-5 text-sm">

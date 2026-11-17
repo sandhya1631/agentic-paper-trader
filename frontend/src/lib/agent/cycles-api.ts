@@ -1,7 +1,8 @@
 /**
  * Agent-cycle API seam. `listCycles` backs the dashboard history and the audit
  * timeline (#79/#81); `getCycle` fetches full detail on expand (#81); `getCycleTokenUsage`
- * fetches the same cycle's persisted model-context measurements on expand (#195). The
+ * fetches the same cycle's persisted model-context measurements on expand (#195);
+ * `cancelCycle` cancels an owned, still-running MANUAL cycle (#199, backend #192). The
  * shared api client attaches the Bearer token and handles 401 globally.
  */
 import { api } from "@/lib/api/client";
@@ -96,6 +97,26 @@ export function listCycles(params: CycleListFilters = {}): Promise<CycleList> {
 
 export function getCycle(id: string): Promise<AgentCycle> {
   return api.get<AgentCycle>(`/agent/cycles/${id}`);
+}
+
+/**
+ * Statuses `POST /agent/cycles/{id}/cancel` accepts (backend #192). A `SCHEDULED` cycle,
+ * or one already `EXECUTING`/`RECONCILING`/`PENDING_APPROVAL`/terminal, answers 409.
+ */
+export const CANCELLABLE_CYCLE_STATUSES: readonly string[] = [
+  "PENDING",
+  "COLLECTING",
+  "REASONING",
+  "VALIDATING",
+];
+
+/** Only an owned, still-running `MANUAL` cycle can be cancelled from here (#199). */
+export function isCancellableCycle(cycle: Pick<AgentCycle, "trigger" | "status">): boolean {
+  return cycle.trigger === "MANUAL" && CANCELLABLE_CYCLE_STATUSES.includes(cycle.status);
+}
+
+export function cancelCycle(id: string): Promise<AgentCycle> {
+  return api.post<AgentCycle>(`/agent/cycles/${id}/cancel`);
 }
 
 /** `GET /agent/cycles/{id}/token-usage` response: one cycle's model-context budget. */
