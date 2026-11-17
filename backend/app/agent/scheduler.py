@@ -5,6 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -14,6 +15,7 @@ from sqlalchemy import select
 from app.agent.orchestrator import CycleOverlapError, run_watchlist_cycles
 from app.agent.tasks import run_agent_schedule_task, run_scheduled_cycles_task
 from app.broker.alpaca import AlpacaClient
+from app.celery_app import celery_app
 from app.core.config import Settings, get_settings
 from app.core.constants import OPERATOR_ROLES
 from app.db.enums import CycleTrigger
@@ -98,6 +100,82 @@ def _store_tick_status(
         logger.exception("Unable to persist scheduler tick status in Redis")
     finally:
         redis_client.close()
+
+
+_RUNTIME_REDIS_PATTERNS = (
+    "agent-scheduler:*",
+    "celery-task-meta-*",
+    "unacked",
+    "unacked_index",
+)
+
+
+def _decode_redis_key(key: bytes | str) -> str:
+    return key.decode() if isinstance(key, bytes) else key
+
+
+def inspect_runtime_state() -> dict[str, Any]:
+    """Return Celery task state and application-owned Redis key names."""
+    inspector = celery_app.control.inspect()
+    redis_client = _new_redis_client()
+    try:
+        redis_keys: set[str] = set()
+        for pattern in _RUNTIME_REDIS_PATTERNS:
+            redis_keys.update(
+                _decode_redis_key(key)
+                for key in redis_client.scan_iter(match=pattern)
+            )
+        return {
+            "workers": inspector.stats() or {},
+            "active": inspector.active() or {},
+            "reserved": inspector.reserved() or {},
+            "scheduled": inspector.scheduled() or {},
+            "redis_keys": sorted(redis_keys),
+        }
+    finally:
+        redis_client.close()
+
+
+def clear_runtime_state() -> dict[str, Any]:
+    """Revoke Celery tasks, purge queued work, and delete application Redis keys."""
+    inspector = celery_app.control.inspect()
+    active = inspector.active() or {}
+    reserved = inspector.reserved() or {}
+    scheduled = inspector.scheduled() or {}
+    task_ids = {
+        task["id"]
+        for task_list in [*active.values(), *reserved.values()]
+        for task in task_list
+        if isinstance(task, dict) and task.get("id")
+    }
+    task_ids.update(
+        entry["request"]["id"]
+        for task_list in scheduled.values()
+        for entry in task_list
+        if isinstance(entry, dict)
+        and isinstance(entry.get("request"), dict)
+        and entry["request"].get("id")
+    )
+    for task_id in task_ids:
+        celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+
+    purged_tasks = celery_app.control.purge() or 0
+    redis_client = _new_redis_client()
+    deleted_keys: set[str] = set()
+    try:
+        for pattern in _RUNTIME_REDIS_PATTERNS:
+            keys = list(redis_client.scan_iter(match=pattern))
+            if keys:
+                redis_client.delete(*keys)
+                deleted_keys.update(_decode_redis_key(key) for key in keys)
+    finally:
+        redis_client.close()
+
+    return {
+        "revoked_task_ids": sorted(task_ids),
+        "purged_tasks": purged_tasks,
+        "deleted_redis_keys": sorted(deleted_keys),
+    }
 
 
 async def _fetch_market_clock(settings: Settings) -> MarketClock:

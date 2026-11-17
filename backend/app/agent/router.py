@@ -3,6 +3,7 @@
 Exposes HTTP endpoints for triggering manual agent cycles and querying cycle details.
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -25,7 +26,7 @@ from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition
 from app.agent.replay import ReplaySample, evaluate_replay
 from app.agent.watchlist import normalize_watchlist
 from app.audit import record_audit_event
-from app.auth.dependencies import get_current_user, require_operator
+from app.auth.dependencies import get_current_user, require_operator, require_roles
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
 from app.core.constants import (
@@ -651,6 +652,64 @@ async def get_cycle_status(
     return cycle
 
 
+@router.post(
+    "/cycles/{cycle_id}/cancel",
+    response_model=CycleRead,
+    summary="Cancel an active manual agent cycle",
+)
+async def cancel_manual_cycle(
+    cycle_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> CycleRead:
+    """Cancel an owned manual cycle before it can validate or execute a trade."""
+    stmt = (
+        select(AgentCycle)
+        .join(AgentConfig, AgentCycle.agent_id == AgentConfig.id)
+        .join(TradingAccount, AgentConfig.account_id == TradingAccount.id)
+        .options(selectinload(AgentCycle.approval))
+        .where(
+            AgentCycle.id == cycle_id,
+            TradingAccount.user_id == current_user.id,
+        )
+        # Locks only the AgentCycle row, matching the orchestrator's own
+        # `_cycle_was_cancelled` row lock: whichever of the two commits first
+        # wins, and the other blocks and then re-reads the fresh status - no
+        # lost update of a cancellation racing an in-flight cycle phase.
+        .with_for_update(of=AgentCycle)
+    )
+    result = await db.execute(stmt)
+    cycle = result.scalar_one_or_none()
+    if cycle is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"AgentCycle '{cycle_id}' not found.",
+        )
+    if cycle.trigger != CycleTrigger.MANUAL:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only manually triggered cycles can be cancelled.",
+        )
+    if cycle.status not in {
+        CycleStatus.PENDING,
+        CycleStatus.COLLECTING,
+        CycleStatus.REASONING,
+        CycleStatus.VALIDATING,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cycle cannot be cancelled from status {cycle.status}.",
+        )
+
+    cycle.status = CycleStatus.CANCELLED
+    cycle.failure_code = "MANUAL_CYCLE_CANCELLED"
+    cycle.failure_message = "Cancelled by the authenticated user."
+    cycle.completed_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(cycle)
+    return CycleRead.model_validate(cycle)
+
+
 @router.get(
     "/cycles/{cycle_id}/token-usage",
     response_model=CycleTokenUsageRead,
@@ -1224,6 +1283,28 @@ async def get_scheduler_status(
             "against live risk policies before paper-order submission."
         ),
     )
+
+
+@router.get(
+    "/scheduler/runtime",
+    summary="Inspect Celery workers, tasks, and application Redis keys",
+)
+async def get_scheduler_runtime(
+    _current_user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> dict[str, Any]:
+    """Inspect local scheduler runtime state without exposing Redis values."""
+    return await asyncio.to_thread(scheduler_service.inspect_runtime_state)
+
+
+@router.post(
+    "/scheduler/runtime/clear",
+    summary="Clear Celery tasks and application scheduler Redis state",
+)
+async def clear_scheduler_runtime(
+    _current_user: User = Depends(require_roles(UserRole.ADMIN)),
+) -> dict[str, Any]:
+    """Revoke active tasks, purge queued tasks, and delete app-owned Redis keys."""
+    return await asyncio.to_thread(scheduler_service.clear_runtime_state)
 
 
 @router.get(
