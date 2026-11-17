@@ -1,7 +1,8 @@
 /**
  * Agent-cycle API seam. `listCycles` backs the dashboard history and the audit
- * timeline (#79/#81); `getCycle` fetches full detail on expand (#81). The shared
- * api client attaches the Bearer token and handles 401 globally.
+ * timeline (#79/#81); `getCycle` fetches full detail on expand (#81); `getCycleTokenUsage`
+ * fetches the same cycle's persisted model-context measurements on expand (#195). The
+ * shared api client attaches the Bearer token and handles 401 globally.
  */
 import { api } from "@/lib/api/client";
 
@@ -95,4 +96,29 @@ export function listCycles(params: CycleListFilters = {}): Promise<CycleList> {
 
 export function getCycle(id: string): Promise<AgentCycle> {
   return api.get<AgentCycle>(`/agent/cycles/${id}`);
+}
+
+/** `GET /agent/cycles/{id}/token-usage` response: one cycle's model-context budget. */
+export interface CycleTokenUsage {
+  cycle_id: string;
+  estimated_input_tokens: number;
+  model_window_tokens: number;
+  remaining_context_tokens: number;
+  context_over_limit: boolean;
+  context_truncated: boolean;
+  context_chars: number;
+  system_prompt_chars: number;
+  symbols: number;
+  bars_used: number;
+  account_data_status: string;
+}
+
+/**
+ * 404 (not found/not owned) and 409 (the cycle never built model context, e.g. it failed
+ * before context-building) are both expected, non-error outcomes for a caller that just
+ * wants "is there token usage to show" — callers should treat a rejection as "none available"
+ * rather than a blocking failure (#195).
+ */
+export function getCycleTokenUsage(id: string): Promise<CycleTokenUsage> {
+  return api.get<CycleTokenUsage>(`/agent/cycles/${id}/token-usage`);
 }

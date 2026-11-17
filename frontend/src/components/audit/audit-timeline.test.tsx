@@ -4,16 +4,44 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { ApiError } from "@/lib/api/errors";
 
-vi.mock("@/lib/agent/cycles-api", () => ({ listCycles: vi.fn(), getCycle: vi.fn() }));
+vi.mock("@/lib/agent/cycles-api", () => ({
+  listCycles: vi.fn(),
+  getCycle: vi.fn(),
+  getCycleTokenUsage: vi.fn(),
+}));
 vi.mock("@/lib/meta/meta-api", () => ({ getConstants: vi.fn() }));
 
-import { getCycle, listCycles, type AgentCycle } from "@/lib/agent/cycles-api";
+import {
+  getCycle,
+  getCycleTokenUsage,
+  listCycles,
+  type AgentCycle,
+  type CycleTokenUsage,
+} from "@/lib/agent/cycles-api";
 import { getConstants } from "@/lib/meta/meta-api";
 import { AuditTimeline } from "./audit-timeline";
 
 const mockList = vi.mocked(listCycles);
 const mockGet = vi.mocked(getCycle);
+const mockTokenUsage = vi.mocked(getCycleTokenUsage);
 const mockConstants = vi.mocked(getConstants);
+
+function tokenUsage(overrides: Partial<CycleTokenUsage> = {}): CycleTokenUsage {
+  return {
+    cycle_id: "c1",
+    estimated_input_tokens: 900,
+    model_window_tokens: 4096,
+    remaining_context_tokens: 3196,
+    context_over_limit: false,
+    context_truncated: false,
+    context_chars: 3200,
+    system_prompt_chars: 800,
+    symbols: 1,
+    bars_used: 100,
+    account_data_status: "LIVE",
+    ...overrides,
+  };
+}
 
 function baseCycle(overrides: Partial<AgentCycle> = {}): AgentCycle {
   return {
@@ -42,6 +70,10 @@ function baseCycle(overrides: Partial<AgentCycle> = {}): AgentCycle {
 beforeEach(() => {
   mockList.mockReset();
   mockGet.mockReset();
+  mockTokenUsage.mockReset();
+  // Default: no token usage available (e.g. a cycle that never built model context).
+  // Tests that care about the "Context usage" section override this explicitly.
+  mockTokenUsage.mockRejectedValue(new ApiError(409, "Conflict", {}, "http://x"));
   mockConstants.mockReset();
   mockConstants.mockResolvedValue({
     currency: "USD",
@@ -111,6 +143,61 @@ describe("AuditTimeline", () => {
     expect(screen.getByText("ORDER_SUBMITTED")).toBeTruthy();
     expect(screen.getByText("APPROVED")).toBeTruthy();
     expect(screen.getByText(/58\.9/)).toBeTruthy(); // RSI indicator
+  });
+
+  it("shows the context usage fetched alongside the cycle detail (#195)", async () => {
+    mockList.mockResolvedValue({ items: [baseCycle()], total: 1, limit: 20, offset: 0, next_offset: null });
+    mockGet.mockResolvedValue(baseCycle());
+    mockTokenUsage.mockResolvedValue(tokenUsage({ estimated_input_tokens: 900, model_window_tokens: 4096, remaining_context_tokens: 3196 }));
+
+    render(<AuditTimeline />);
+    fireEvent.click(await screen.findByRole("button", { name: /BUY AAPL/ }));
+
+    expect(await screen.findByText(/900 \/ 4,096 tokens/)).toBeTruthy();
+    expect(screen.getByText(/3,196 remaining/)).toBeTruthy();
+    const bar = screen.getByRole("progressbar", { name: /context window used/i });
+    expect(bar.getAttribute("aria-valuenow")).toBe("22"); // round(900/4096*100)
+    expect(screen.queryByText(/over the model's context window/i)).toBeNull();
+    expect(screen.queryByText(/context was truncated/i)).toBeNull();
+  });
+
+  it("flags an over-limit, truncated context", async () => {
+    mockList.mockResolvedValue({ items: [baseCycle()], total: 1, limit: 20, offset: 0, next_offset: null });
+    mockGet.mockResolvedValue(baseCycle());
+    mockTokenUsage.mockResolvedValue(
+      tokenUsage({
+        estimated_input_tokens: 4200,
+        model_window_tokens: 4096,
+        remaining_context_tokens: 0,
+        context_over_limit: true,
+        context_truncated: true,
+      }),
+    );
+
+    render(<AuditTimeline />);
+    fireEvent.click(await screen.findByRole("button", { name: /BUY AAPL/ }));
+
+    expect(
+      await screen.findByText(/over the model's context window; the context was truncated/i),
+    ).toBeTruthy();
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("100"); // clamped
+  });
+
+  it("renders the rest of the cycle detail when token usage fails to load (#195)", async () => {
+    mockList.mockResolvedValue({ items: [baseCycle()], total: 1, limit: 20, offset: 0, next_offset: null });
+    mockGet.mockResolvedValue(
+      baseCycle({
+        snapshot_json: { execution_status: "ORDER_SUBMITTED" },
+      }),
+    );
+    mockTokenUsage.mockRejectedValue(new ApiError(409, "Conflict", {}, "http://x"));
+
+    render(<AuditTimeline />);
+    fireEvent.click(await screen.findByRole("button", { name: /BUY AAPL/ }));
+
+    expect(await screen.findByText("ORDER_SUBMITTED")).toBeTruthy(); // rest of the detail still renders
+    expect(screen.queryByText(/context usage/i)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull(); // not a blocking error
   });
 
   it("falls back to the approval's policy results when the cycle field is empty", async () => {
