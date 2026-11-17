@@ -5,7 +5,7 @@ changes or cancels anything. Safe to run at any hour (off-hours the clock is clo
 and the latest bars are from the last session).
 """
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from integration_gates import require_alpaca
@@ -59,6 +59,9 @@ async def test_latest_bars_are_fetched_for_a_symbol():
     assert aapl, "IEX returned no AAPL bars in the last 30 days"
     assert all(bar.close > 0 for bar in aapl)
     stamps = [datetime.fromisoformat(bar.timestamp.replace("Z", "+00:00")) for bar in aapl]
-    # One consistent order (the collector's contract), and no duplicates.
-    assert stamps == sorted(stamps) or stamps == sorted(stamps, reverse=True)
+    # The collector returns oldest-first (the context builder reads bars[-1] as latest),
+    # without duplicates, and the newest bar is recent. If the request lost `sort=desc`
+    # (#151), IEX would return the OLDEST bars of the 30-day window and this would fail.
+    assert stamps == sorted(stamps)
     assert len(set(stamps)) == len(stamps)
+    assert datetime.now(UTC) - stamps[-1] < timedelta(days=5), stamps[-1]

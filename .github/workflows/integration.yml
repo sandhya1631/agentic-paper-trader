@@ -4,7 +4,8 @@ name: Integration Tests
 # from the PR checks in ci.yml, which stay fast with `-m "not integration"`.
 #
 # Opt-in per service via repository VARIABLES (Settings -> Secrets and variables ->
-# Actions -> Variables). With none set, every live test skips and this job is green:
+# Actions -> Variables), each set to exactly 1. With none set, the nightly run is
+# skipped and a manual run reports every live test as skipped (green):
 #   INTEGRATION_ALPACA=1  read-only Alpaca tests (uses the ALPACA_API_* secrets)
 #   INTEGRATION_OPENAI=1  OpenAI LLM case + full cycle with LLM_PROVIDER=openai
 #                         (needs an OPENAI_API_KEY secret; billed per call)
@@ -26,6 +27,11 @@ concurrency:
 jobs:
   integration:
     name: Integration tier (opt-in)
+    # Nightly runs only when a service is opted in; manual runs always run.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || vars.INTEGRATION_ALPACA == '1'
+      || vars.INTEGRATION_OPENAI == '1'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -67,9 +73,11 @@ jobs:
           CREDENTIAL_ENCRYPTION_KEY: MTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3BxcnN0dXY=
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
-          ALPACA_INTEGRATION: ${{ vars.INTEGRATION_ALPACA }}
+          # The test flags are derived from the same "== '1'" checks as LLM_PROVIDER, so
+          # they can never disagree (e.g. a variable set to "true").
+          ALPACA_INTEGRATION: ${{ vars.INTEGRATION_ALPACA == '1' && '1' || '' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_INTEGRATION: ${{ vars.INTEGRATION_OPENAI }}
+          OPENAI_INTEGRATION: ${{ vars.INTEGRATION_OPENAI == '1' && '1' || '' }}
           LLM_PROVIDER: ${{ vars.INTEGRATION_OPENAI == '1' && 'openai' || 'ollama' }}
         run: |
           cd backend

@@ -62,8 +62,8 @@ Tests" → Run workflow) and **nightly**. It is separate from the PR checks, whi
 fast with `-m "not integration"`.
 
 It is opt-in per service through repository **variables** (Settings → Secrets and
-variables → Actions → Variables). With none set, every live test skips and the job is
-green.
+variables → Actions → Variables), each set to exactly `1`. With none set, the nightly
+run is skipped and a manual run reports every live test as skipped (green).
 
 | Variable | Effect | Uses secrets |
 |---|---|---|

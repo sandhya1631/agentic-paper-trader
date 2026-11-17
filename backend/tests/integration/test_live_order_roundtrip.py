@@ -70,6 +70,20 @@ async def _seed_cycle(db) -> uuid.UUID:
     return cycle.id
 
 
+async def _cancel_at_alpaca(client: AlpacaClient, client_order_id: str) -> int | None:
+    """Cancel the order with this client_order_id at Alpaca; the DELETE status or None."""
+    try:
+        at_alpaca = await client.get_order_by_client_order_id(client_order_id)
+        if at_alpaca is None:
+            return None
+        response = await client._get_client().delete(
+            f"{client.base_url}/v2/orders/{at_alpaca.id}", headers=client.headers
+        )
+        return response.status_code
+    except Exception:  # cleanup must not hide the test's own failure
+        return None
+
+
 async def test_far_limit_order_round_trip_through_the_gateway(db_session):
     key, secret = require_alpaca_orders()
     cycle_id = await _seed_cycle(db_session)
@@ -93,8 +107,8 @@ async def test_far_limit_order_round_trip_through_the_gateway(db_session):
             time_in_force=TimeInForce.DAY,
         )
 
-        order = await submit_approved_order(approved, client, db_session)
         try:
+            order = await submit_approved_order(approved, client, db_session)
             assert order.broker_order_id, order.rejection_reason
             assert order.status in {BrokerOrderStatus.SUBMITTED, BrokerOrderStatus.ACCEPTED}
             assert order.filled_quantity == 0
@@ -102,13 +116,11 @@ async def test_far_limit_order_round_trip_through_the_gateway(db_session):
             again = await submit_approved_order(approved, client, db_session)
             assert again.id == order.id
         finally:
-            if order.broker_order_id:
-                http = client._get_client()
-                response = await http.delete(
-                    f"{client.base_url}/v2/orders/{order.broker_order_id}",
-                    headers=client.headers,
-                )
-                assert response.status_code in {200, 204, 422}, response.status_code
+            # Cancel whatever Alpaca holds for this client_order_id, even if the gateway
+            # recorded the POST as failed (e.g. a timeout after Alpaca accepted it).
+            # No assert here, so a cleanup problem never masks the real failure.
+            cancel_status = await _cancel_at_alpaca(client, str(cycle_id))
+        assert cancel_status in {200, 204, 422}, cancel_status
 
         for _ in range(10):  # the cancel is asynchronous at Alpaca
             order = await reconcile_order(db_session, client, order)

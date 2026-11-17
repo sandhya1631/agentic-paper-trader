@@ -75,3 +75,34 @@ def test_fails_when_the_database_is_down():
         "https://api.example", None, 5,
         transport=_transport({**HEALTHY, "/health/db": (500, {"detail": "error"})}, seen),
     )
+
+
+def test_fails_when_the_configured_model_is_not_available():
+    seen: list[httpx.Request] = []
+    missing_model = {
+        **HEALTHY,
+        "/llm/health": (200, {"provider": "ollama", "model": "llama3.1", "reachable": True,
+                              "model_available": False, "detail": "not pulled"}),
+    }
+    assert not smoke_check.run(
+        "https://api.example", None, 5, transport=_transport(missing_model, seen)
+    )
+
+
+def test_retries_health_while_render_answers_503_then_passes(monkeypatch):
+    monkeypatch.setattr(smoke_check.time, "sleep", lambda _seconds: None)
+    seen: list[httpx.Request] = []
+    health_answers = iter([(503, {}), (502, {}), (200, {"status": "ok", "env": "production"})])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/health":
+            status, body = next(health_answers)
+            return httpx.Response(status, json=body)
+        status, body = HEALTHY[request.url.path]
+        return httpx.Response(status, json=body)
+
+    assert smoke_check.run(
+        "https://api.example", "production", 5, transport=httpx.MockTransport(handler)
+    )
+    assert [r.url.path for r in seen].count("/health") == 3

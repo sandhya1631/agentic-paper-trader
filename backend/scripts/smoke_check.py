@@ -5,16 +5,17 @@ starts a cycle and never touches orders, so it is safe against production at any
 
     GET /health                -> {"status": "ok", "env": ...}   (env must match --expect-env)
     GET /health/db             -> {"status": "ok", ...}           (the database answers)
-    GET /llm/health?probe=true -> 200 with "reachable": true      (the configured LLM answers;
-                                                                   for OpenAI this lists
-                                                                   models: no tokens billed)
+    GET /llm/health?probe=true -> 200, "reachable" and "model_available" true
+                                  (the configured LLM answers and has the configured model;
+                                   for OpenAI this lists models: no tokens billed)
 
 Usage (from backend/, with the venv active; needs only httpx):
     python scripts/smoke_check.py --base-url https://<api-host> --expect-env production
     API_BASE_URL=http://localhost:8000 python scripts/smoke_check.py --expect-env development
 
-The first request retries for up to ~2 minutes, because Render's free tier sleeps and
-a cold start can take about a minute. Exits 0 if every check passes, 1 otherwise. The
+The first request retries (on a timeout, a refused connection or a 502/503/504 from
+Render's proxy) for up to about 5 minutes, because Render's free tier sleeps and a
+cold start can take about a minute. Exits 0 if every check passes, 1 otherwise. The
 responses contain no secrets; the script prints only statuses and these fields.
 
 The manual UI steps that follow it are in docs/deployment.md ("Smoke check").
@@ -29,20 +30,26 @@ import time
 
 import httpx
 
-COLD_START_ATTEMPTS = 8
+COLD_START_ATTEMPTS = 6
 COLD_START_DELAY_SECONDS = 15
+WAKING_STATUSES = {502, 503, 504}  # Render's proxy while the instance starts
 
 
 def _get(client: httpx.Client, path: str, *, retry: bool = False) -> httpx.Response | None:
     attempts = COLD_START_ATTEMPTS if retry else 1
+    response: httpx.Response | None = None
     for attempt in range(1, attempts + 1):
         try:
-            return client.get(path)
+            response = client.get(path)
         except httpx.HTTPError as exc:  # timeout or connection refused while waking up
             print(f"  {path}: {type(exc).__name__} (attempt {attempt}/{attempts})")
-            if attempt < attempts:
-                time.sleep(COLD_START_DELAY_SECONDS)
-    return None
+        else:
+            if not retry or response.status_code not in WAKING_STATUSES:
+                return response
+            print(f"  {path}: HTTP {response.status_code} (attempt {attempt}/{attempts})")
+        if attempt < attempts:
+            time.sleep(COLD_START_DELAY_SECONDS)
+    return response
 
 
 def _json(response: httpx.Response) -> dict:
@@ -90,7 +97,12 @@ def run(
 
         llm = _get(client, "/llm/health?probe=true")
         llm_body = _json(llm) if llm is not None else {}
-        passed = llm is not None and llm.status_code == 200 and llm_body.get("reachable") is True
+        passed = (
+            llm is not None
+            and llm.status_code == 200
+            and llm_body.get("reachable") is True
+            and llm_body.get("model_available") is True
+        )
         status = llm.status_code if llm is not None else "no response"
         print(
             f"[{'PASS' if passed else 'FAIL'}] GET /llm/health?probe=true -> {status} "
@@ -116,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="required value of /health's env field, e.g. production",
     )
-    parser.add_argument("--timeout", type=float, default=90.0, help="per-request seconds")
+    parser.add_argument("--timeout", type=float, default=30.0, help="per-request seconds")
     args = parser.parse_args(argv)
     if not args.base_url:
         parser.error("pass --base-url or set API_BASE_URL")

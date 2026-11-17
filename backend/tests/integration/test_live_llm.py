@@ -4,6 +4,9 @@ One case per provider, each behind its own flag (paid providers also need their 
 OLLAMA_INTEGRATION, OPENAI_INTEGRATION, ANTHROPIC_INTEGRATION. The client is built by
 the production factory, and the input is the real S-001 prompt plus a context built by
 the real context builder from synthetic bars, so no market or broker call is made.
+This checks the provider round-trip and schema only; the exact payload the
+orchestrator sends (knowledge, observability, context-window guard) is covered by
+test_live_cycle.py.
 """
 
 import json

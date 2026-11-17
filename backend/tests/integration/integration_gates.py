@@ -28,13 +28,17 @@ def require_flag(name: str, what: str) -> None:
         pytest.skip(f"set {name}=1 to run {what}")
 
 
-def require_alpaca() -> tuple[str, str]:
-    """Read-only Alpaca paper tests: ALPACA_INTEGRATION=1 plus the env ALPACA_* keys."""
-    require_flag("ALPACA_INTEGRATION", "the read-only Alpaca paper tests")
+def _alpaca_keys() -> tuple[str, str]:
     settings = get_settings()
     if not settings.alpaca_api_key or not settings.alpaca_api_secret:
         pytest.skip("ALPACA_API_KEY and ALPACA_API_SECRET (paper) are not configured")
     return settings.alpaca_api_key, settings.alpaca_api_secret
+
+
+def require_alpaca() -> tuple[str, str]:
+    """Read-only Alpaca paper tests: ALPACA_INTEGRATION=1 plus the env ALPACA_* keys."""
+    require_flag("ALPACA_INTEGRATION", "the read-only Alpaca paper tests")
+    return _alpaca_keys()
 
 
 def require_alpaca_orders() -> tuple[str, str]:
@@ -43,10 +47,7 @@ def require_alpaca_orders() -> tuple[str, str]:
         "ALPACA_INTEGRATION_ORDERS",
         "the paper order round-trip (it places and cancels a real paper order)",
     )
-    settings = get_settings()
-    if not settings.alpaca_api_key or not settings.alpaca_api_secret:
-        pytest.skip("ALPACA_API_KEY and ALPACA_API_SECRET (paper) are not configured")
-    return settings.alpaca_api_key, settings.alpaca_api_secret
+    return _alpaca_keys()
 
 
 # Each provider has its own flag; the paid ones also need their key.
@@ -58,6 +59,9 @@ LLM_FLAGS = {
 
 
 def require_llm(provider: str) -> None:
+    provider = provider.strip().lower()
+    if provider not in LLM_FLAGS:
+        pytest.skip(f"LLM_PROVIDER {provider!r} has no integration flag")
     require_flag(LLM_FLAGS[provider], f"the live {provider} tests")
     settings = get_settings()
     if provider == "openai" and not settings.openai_api_key:

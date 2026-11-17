@@ -106,19 +106,31 @@ later Connect overwrites.
   variable `PRODUCTION_API_BASE_URL`, which is **not set** (see section 2). GitHub can
   delay scheduled runs; if Render still sleeps, lower the cron interval to `*/5`.
 - **Restarts and orphaned cycles (#185).** A merge or an automatic restart kills any
-  cycle in progress. Since PR #204, the API closes those out at startup and in the
-  next tick's or manual run's gate:
+  cycle in progress. **Once PR #204 is merged** (open as of 2026-11-17), the API
+  closes those out at startup and in the next tick's or manual run's gate:
 
   | Interrupted in | Becomes |
   |---|---|
   | `PENDING`…`VALIDATING` | `FAILED` with `failure_code = INTERRUPTED` (nothing was submitted) |
   | `EXECUTING` | `RECONCILING`; the gate then looks the order up at Alpaca by its `client_order_id` and never resubmits it |
 
-  `PENDING_APPROVAL` is untouched; it expires on its own after 24 h. An approval
-  returns 409 "The agent is busy running a cycle..." while the agent's cycle or sweep
-  runs; retry when it finishes. Before #204 merges, a restart mid-cycle leaves the
-  agent blocked (409 on Trigger Now, ticks counted as overlapping). A **manual** cycle
-  can then be cancelled from the UI; a scheduled one needs SQL.
+  `PENDING_APPROVAL` is untouched; it expires on its own after 24 h. With #204 an
+  approval returns 409 "The agent is busy running a cycle..." while the agent's cycle
+  or sweep runs; retry when it finishes.
+
+  **Until #204 is deployed**, a restart mid-cycle leaves the agent blocked (409 on
+  Trigger Now, ticks counted as overlapping). A **manual** cycle can be cancelled from
+  the UI; a scheduled one needs SQL in the Supabase editor (check the row first):
+
+  ```sql
+  SELECT id, trigger, status, started_at FROM agent_cycles
+   WHERE status IN ('PENDING','COLLECTING','REASONING','VALIDATING') ORDER BY started_at;
+  UPDATE agent_cycles SET status = 'FAILED', failure_code = 'INTERRUPTED',
+         completed_at = now() WHERE id = '<cycle id>';
+  ```
+
+  Never do this for an `EXECUTING` cycle: an order may exist. Leave it to the
+  reconcile path after #204, or check Alpaca first.
 
 ## 5. Merge window during the trading run
 
@@ -140,14 +152,14 @@ Every merge to `main` redeploys Render and restarts the agent.
    python scripts/smoke_check.py --base-url https://agentic-paper-trader.onrender.com --expect-env production
    ```
 
-   It checks three things. It retries for about 2 minutes while Render wakes up, and
-   exits non-zero on any failure:
+   It checks three things. It retries `/health` for up to about 5 minutes while Render
+   wakes up, and exits non-zero on any failure:
 
    | Request | Expected |
    |---|---|
    | `GET /health` | `env` is `production` |
    | `GET /health/db` | `status: ok` |
-   | `GET /llm/health?probe=true` | 200 with `reachable: true`. For OpenAI this lists models, so no tokens are billed |
+   | `GET /llm/health?probe=true` | 200 with `reachable: true` and `model_available: true`. For OpenAI this lists models, so no tokens are billed |
 
    If a call fails, open the URL in a browser to read the response.
 2. **UI.** Sign in on https://agentic-paper-trader.vercel.app. The dashboard loads the
@@ -221,10 +233,10 @@ daily_cost      ≈ calls_per_day × (input_tokens × input_price + output_token
 |---|---|---|
 | The first request takes about a minute | Render cold start | Wait; check the keep-alive job ran |
 | "Failed to fetch" in the UI | CORS (`CORS_ALLOWED_ORIGINS`) or a wrong `NEXT_PUBLIC_API_BASE_URL` | Fix the setting; redeploy Vercel if it was the build-time URL |
-| Trigger Now returns 409 | A cycle is still active or parked for approval | Approve, reject or wait; after #204 an orphan is closed out on the next run |
+| Trigger Now returns 409 | A cycle is still active or parked for approval | Approve, reject or wait. With #204 deployed, an orphan is closed out on the next run; before that, see section 4 |
 | Every cycle HOLDs | No user Alpaca keys (`account_data: UNAVAILABLE`), or the market is closed | Settings → Connect; check the time |
 | No scheduled cycles during market hours | The instance slept, `SCHEDULER_EXECUTOR` isn't `inline`, the kill switch is on, or the schedule is stopped | Section 4; Settings |
-| Trigger Now returns 404 or 500 "Agent cycle failed" | LLM misconfigured or unreachable (#160 maps these to 503) | `GET /llm/health?probe=true` |
+| Trigger Now returns 404 or 500 "Agent cycle failed" (503 "LLM unavailable" once #160 is merged) | LLM misconfigured or unreachable | `GET /llm/health?probe=true` |
 
 Related: `docs/demo-runbook.md` (local demo), `docs/integration-tests.md` (live-service
 tests), `backend/BACKEND_DOCUMENTATION.md` (internals).
