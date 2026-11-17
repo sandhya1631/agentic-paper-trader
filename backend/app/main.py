@@ -1,8 +1,8 @@
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +24,7 @@ from app.db.schema import (
     ensure_user_scheduler_column,
 )
 from app.db.session import AsyncSessionLocal, engine, get_db
+from app.llm.base import LLMUnavailableError
 from app.llm.router import router as llm_router
 from app.market_data.router import router as market_data_router
 from app.meta.router import router as meta_router
@@ -145,6 +146,14 @@ app.include_router(llm_router)
 app.include_router(market_data_router)
 app.include_router(agent_router)
 app.include_router(meta_router)
+
+
+@app.exception_handler(LLMUnavailableError)
+async def llm_unavailable_handler(_request: Request, exc: LLMUnavailableError) -> JSONResponse:
+    """An unavailable LLM is a 503 on any route (#160), e.g. POST /agent/replay, where it
+    can come from building the client in a dependency. The message is sanitized."""
+    return JSONResponse(status_code=503, content={"detail": exc.detail})
+
 
 @app.get("/", include_in_schema=False)
 async def root():

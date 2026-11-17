@@ -19,7 +19,7 @@ from app.core.config import Settings, get_settings
 from app.core.constants import SUPPORTED_PROVIDERS
 from app.db.enums import CycleStatus, DecisionAction
 from app.db.models import AgentCycle
-from app.llm.base import LLMHealth
+from app.llm.base import LLMHealth, LLMUnavailableError
 from app.llm.decision_schema import DECISION_JSON_SCHEMA
 from app.llm.factory import configured_model, create_llm_client
 from app.llm.ollama_client import OllamaClient
@@ -114,7 +114,7 @@ def test_factory_returns_openai_client_when_configured():
 
 def test_unsupported_provider_still_errors():
     settings = Settings(_env_file=None, llm_provider="bogus", anthropic_api_key=None)
-    with pytest.raises(ValueError, match="Unsupported LLM_PROVIDER 'bogus'") as excinfo:
+    with pytest.raises(LLMUnavailableError, match="Unsupported LLM_PROVIDER 'bogus'") as excinfo:
         create_llm_client(settings)
     assert "anthropic" in str(excinfo.value)  # the message lists every supported provider
 
@@ -175,7 +175,7 @@ def test_anthropic_selected_without_sdk_errors_clearly(monkeypatch):
     _block_anthropic_sdk(monkeypatch)
     settings = Settings(_env_file=None, llm_provider="anthropic", anthropic_api_key="fake-key")
 
-    with pytest.raises(ValueError, match="requires the 'anthropic' package"):
+    with pytest.raises(LLMUnavailableError, match="requires the 'anthropic' package"):
         create_llm_client(settings)
 
 
@@ -241,7 +241,7 @@ def _status_error(cls, status: int, message: str):
 
 
 def test_openai_client_requires_api_key():
-    with pytest.raises(ValueError):
+    with pytest.raises(LLMUnavailableError):
         OpenAIClient(api_key=None, model="gpt-4o-mini")
 
 
@@ -388,7 +388,7 @@ async def test_openai_api_error_never_reaches_the_cycle_record():
     added = [call.args[0] for call in db.add.call_args_list]
     cycle = next(row for row in added if isinstance(row, AgentCycle))
     assert cycle.status == CycleStatus.FAILED
-    assert cycle.failure_code == "UNEXPECTED_ERROR"
+    assert cycle.failure_code == "LLM_UNAVAILABLE"  # #160: no longer UNEXPECTED_ERROR
     assert cycle.failure_message == "OpenAI API error: AuthenticationError (HTTP 401)"
     stored = " ".join(
         str(value) for value in (cycle.failure_message, cycle.llm_raw_response, cycle.snapshot_json)
@@ -427,7 +427,9 @@ async def test_openai_selected_without_key_errors_clearly(client: AsyncClient):
         _env_file=None, llm_provider="openai", openai_api_key=None, openai_model="gpt-4o-mini"
     )
 
-    with pytest.raises(ValueError, match="OPENAI_API_KEY is required when LLM_PROVIDER=openai"):
+    with pytest.raises(
+        LLMUnavailableError, match="OPENAI_API_KEY is required when LLM_PROVIDER=openai"
+    ):
         create_llm_client(no_key)
 
     with (

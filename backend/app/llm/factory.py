@@ -2,7 +2,7 @@ from functools import lru_cache
 
 from app.core.config import Settings, get_settings
 from app.core.constants import SUPPORTED_PROVIDERS
-from app.llm.base import LLMClient
+from app.llm.base import LLMClient, LLMUnavailableError
 from app.llm.ollama_client import OllamaClient
 from app.llm.openai_client import OpenAIClient
 
@@ -32,13 +32,13 @@ def create_llm_client(settings: Settings | None = None) -> LLMClient:
     if provider == "anthropic":
         try:
             from app.llm.anthropic_client import AnthropicClient
-        except ImportError as exc:
-            raise ValueError(
+        except ImportError:
+            raise LLMUnavailableError(
                 "LLM_PROVIDER=anthropic requires the 'anthropic' package (pip install -e '.[dev]')"
-            ) from exc
+            ) from None
         return AnthropicClient(api_key=settings.anthropic_api_key, model=settings.anthropic_model)
 
-    raise ValueError(
+    raise LLMUnavailableError(
         f"Unsupported LLM_PROVIDER '{settings.llm_provider}'. "
         f"Expected one of: {SUPPORTED_PROVIDERS}"
     )

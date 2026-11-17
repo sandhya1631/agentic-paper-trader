@@ -56,7 +56,7 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
-from app.llm.base import LLMClient
+from app.llm.base import LLMClient, LLMUnavailableError
 from app.llm.factory import get_llm_client
 from app.risk.kill_switch import (
     EnvironmentKillSwitchOverrideError,
@@ -485,6 +485,12 @@ async def trigger_manual_cycle(
             target_agent_id, db, trigger=CycleTrigger.MANUAL
         )
         return cycle
+    except LLMUnavailableError as exc:
+        # Misconfigured or unreachable LLM (#160): the cycle is recorded FAILED with
+        # LLM_UNAVAILABLE; tell the operator so instead of a 404 or a generic 500.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.detail
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
@@ -514,6 +520,8 @@ async def run_replay(
 
     The submitted bars are evaluated in memory. This endpoint never creates
     cycles, reads broker state, submits orders, or changes portfolio state.
+    An unavailable LLM (building the client or any generate call) answers 503 through
+    the app-wide LLMUnavailableError handler in main.py (#160).
     """
     try:
         samples = [

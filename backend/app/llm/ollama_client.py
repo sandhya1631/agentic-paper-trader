@@ -1,9 +1,12 @@
+import logging
 from typing import Any
 
 import httpx
 
-from app.llm.base import LLMClient, LLMHealth
+from app.llm.base import LLMClient, LLMHealth, LLMUnavailableError
 from app.schemas import DecisionProposal
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaClient(LLMClient):
@@ -51,10 +54,29 @@ class OllamaClient(LLMClient):
         payload["options"]["num_ctx"] = self._num_ctx
         if self._json_format:
             payload["format"] = DecisionProposal.model_json_schema()
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            response = await client.post(f"{self._base_url}/api/chat", json=payload)
-            response.raise_for_status()
-            data = response.json()
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                response = await client.post(f"{self._base_url}/api/chat", json=payload)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as exc:
+            # Never echo Ollama's error body or the server URL: report the type and status.
+            status_code = exc.response.status_code
+            logger.warning(
+                "Ollama request failed: HTTPStatusError status=%s model=%s",
+                status_code,
+                self._model,
+            )
+            raise LLMUnavailableError(
+                f"Ollama API error: HTTPStatusError (HTTP {status_code})"
+            ) from None
+        except (httpx.HTTPError, ValueError) as exc:
+            # A timeout's str() is empty and a connect error's names the URL, so name only
+            # the type (e.g. ReadTimeout, ConnectError); ValueError = a non-JSON body.
+            logger.warning(
+                "Ollama request failed: %s model=%s", type(exc).__name__, self._model
+            )
+            raise LLMUnavailableError(f"Ollama API error: {type(exc).__name__}") from None
 
         return data.get("message", {}).get("content", "")
 

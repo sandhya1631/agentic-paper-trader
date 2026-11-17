@@ -51,6 +51,7 @@ from app.core.constants import (
     ACTIVE_CYCLE_STATUSES,
     DEFAULT_STRATEGY_VERSION,
     DYNAMIC_STRATEGY_VERSION,
+    LLM_UNAVAILABLE,
     POLICY_VERSION,
 )
 from app.db.enums import (
@@ -62,7 +63,7 @@ from app.db.enums import (
     PolicyDecisionType,
 )
 from app.db.models import AgentConfig, AgentCycle, CycleApproval, utcnow
-from app.llm.base import LLMClient
+from app.llm.base import LLMClient, LLMUnavailableError
 from app.llm.factory import get_llm_client
 from app.market_data.alpaca_client import MarketDataCollector, create_market_data_collector
 from app.schemas import DecisionProposal
@@ -749,6 +750,19 @@ async def _run_agent_cycle(
         set_committed_value(cycle, "approval", pending_approval)
         return cycle
 
+    except LLMUnavailableError as exc:
+        # Client construction (missing key/SDK, unknown provider) or either generate call
+        # (first try or self-repair) failed (#160). The message is already sanitized: no
+        # key, URL or provider body. Recorded distinctly from UNEXPECTED_ERROR so the
+        # audit trail can tell an LLM outage from a bug; the route maps it to 503.
+        logger.warning("Agent cycle %s: LLM unavailable: %s", cycle.id, exc)
+        cycle.status = CycleStatus.FAILED
+        cycle.completed_at = utcnow()
+        cycle.failure_code = LLM_UNAVAILABLE
+        cycle.failure_message = str(exc)
+        await db.commit()
+        await db.refresh(cycle)
+        raise
     except Exception as exc:
         logger.error("Agent cycle failed unexpectedly: %s", exc, exc_info=True)
         cycle.status = CycleStatus.FAILED

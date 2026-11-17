@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, Response, status
 
 from app.core.config import get_settings
+from app.llm.base import LLMUnavailableError
 from app.llm.factory import configured_model, get_llm_client
 
 router = APIRouter(prefix="/llm", tags=["llm"])
@@ -29,7 +30,7 @@ async def llm_health(
 
     try:
         llm_client = get_llm_client()
-    except ValueError as exc:
+    except LLMUnavailableError as exc:
         # Misconfiguration (missing key/SDK, unknown provider): report unavailable
         # instead of a 500. These messages are static factory/client text, never secrets.
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
