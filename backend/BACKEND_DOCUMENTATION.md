@@ -128,7 +128,8 @@ Important settings:
 | `CREDENTIAL_ENCRYPTION_KEY` | Required Fernet key for user Alpaca credentials. |
 | `SCHEDULER_ENABLED` | Enables the global APScheduler job; defaults to false. |
 | `SCHEDULER_INTERVAL_MINUTES` | Global schedule interval; defaults to 15. |
-| `REDIS_URL` | Celery and scheduler Redis connection. |
+| `SCHEDULER_EXECUTOR` | `celery` (default): ticks run on a Celery worker via Redis. `inline`: ticks run inside the API process, with Redis optional (production on Render's free tier, #184). |
+| `REDIS_URL` | Celery and scheduler Redis connection. Required for `celery`; optional for `inline` (empty = no Redis, tick history kept in memory). |
 | `KILL_SWITCH_ENABLED` | Environment force-on kill switch; defaults to false. |
 | `MAX_ORDERS_PER_DAY` | Runtime value for policy P-012; defaults to 10 and must be at least 1. |
 | `DEFAULT_BAR_LIMIT` | Default number of market bars per symbol; defaults to 50. |
