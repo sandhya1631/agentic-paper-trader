@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.agent import orchestrator
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
@@ -301,6 +302,11 @@ async def update_kill_switch(
 
 
 _NO_AGENT_DETAIL = "No agent configured yet. Trigger a cycle to create your default agent."
+# 409 when an approval can't take the agent's cycle lock (#185); the UI matches "busy".
+APPROVAL_AGENT_BUSY_DETAIL = (
+    "The agent is busy running a cycle, so nothing was sent and the approval is still "
+    "pending. Retry in a minute."
+)
 
 
 def _agent_config_not_found(agent_id: uuid.UUID | None) -> HTTPException:
@@ -880,6 +886,38 @@ async def approve_cycle_trade(
     if not hmac.compare_digest(approval.proposal_hash, proposal_hash):
         raise HTTPException(status_code=409, detail="Cycle proposal no longer matches approval")
 
+    # Execute under the agent's cycle lock (#185), like every other writer of an
+    # in-flight status. Orphan recovery treats an EXECUTING cycle whose agent lock is
+    # free as abandoned, so an unlocked approval could have its live submission flipped
+    # to RECONCILING (and a new cycle started beside it). The lock also serializes an
+    # approval with the agent's own cycles and sweeps, so they never submit orders for
+    # the same account concurrently. If a cycle or sweep holds it, nothing has changed
+    # yet (the approval stays PENDING) and the operator retries.
+    try:
+        async with orchestrator.agent_cycle_lock(db, agent.id):
+            return await _execute_approved_trade(
+                db, approval, cycle, agent, body, current_user, now
+            )
+    except CycleOverlapError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=APPROVAL_AGENT_BUSY_DETAIL,
+        ) from exc
+
+
+async def _execute_approved_trade(
+    db: AsyncSession,
+    approval: CycleApproval,
+    cycle: AgentCycle,
+    agent: AgentConfig,
+    body: ApprovalAction,
+    current_user: User,
+    now: datetime,
+) -> Any:
+    """Mark the approval APPROVED, then run the binding evaluation and submit.
+
+    The caller holds the agent's cycle lock for the whole call.
+    """
     approval.status = ApprovalStatus.APPROVED
     approval.actor_id = current_user.id
     approval.acted_at = now

@@ -47,6 +47,19 @@ ACTIVE_CYCLE_STATUSES = (
     CycleStatus.EXECUTING,
     CycleStatus.RECONCILING,
 )
+# In-flight statuses that only a process holding the agent's cycle lock ever writes
+# (the orchestrator, or an approval's execution). A cycle left in one of them while
+# that lock is free was orphaned by a process that died, e.g. a redeploy (#185).
+# PENDING_APPROVAL (lazy expiry) and RECONCILING (broker reconcile) are excluded.
+INTERRUPTIBLE_CYCLE_STATUSES = (
+    CycleStatus.PENDING,
+    CycleStatus.COLLECTING,
+    CycleStatus.REASONING,
+    CycleStatus.VALIDATING,
+)
+ORPHANABLE_CYCLE_STATUSES = (*INTERRUPTIBLE_CYCLE_STATUSES, CycleStatus.EXECUTING)
+# failure_code of a cycle that recovery closed out because its process died (#185).
+CYCLE_INTERRUPTED = "INTERRUPTED"
 DEFAULT_STRATEGY_VERSION = "S-001"
 DYNAMIC_STRATEGY_VERSION = "DYNAMIC"
 # Bump whenever the S-001 prompt text changes, so each cycle's audit record names the

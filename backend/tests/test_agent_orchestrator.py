@@ -741,10 +741,13 @@ async def _make_agent(db_session: AsyncSession, email: str) -> AgentConfig:
 async def test_run_agent_cycle_rejects_when_active_cycle_exists(db_session: AsyncSession):
     agent = await _make_agent(db_session, "overlap-pending@example.com")
 
+    # PENDING_APPROVAL: an active status that needs no live process. A bare in-flight
+    # row (PENDING...EXECUTING) with the agent lock free is an orphan, and the gate
+    # now recovers it instead of blocking (#185, tests/test_cycle_recovery.py).
     existing = AgentCycle(
         agent_id=agent.id,
         trigger=CycleTrigger.MANUAL,
-        status=CycleStatus.PENDING,
+        status=CycleStatus.PENDING_APPROVAL,
     )
     db_session.add(existing)
     await db_session.commit()

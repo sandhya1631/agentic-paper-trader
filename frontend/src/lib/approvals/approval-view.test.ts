@@ -174,6 +174,18 @@ describe("describeApprovalError", () => {
     );
   });
 
+  it("explains an agent that is busy running a cycle (409), so the operator retries", () => {
+    const message = describeApprovalError(
+      apiError(
+        409,
+        "The agent is busy running a cycle, so nothing was sent and the approval is still pending. Retry in a minute.",
+      ),
+    );
+    expect(message).toContain("nothing was sent");
+    expect(message).toContain("still pending");
+    expect(message).toContain("try again");
+  });
+
   it("passes through other conflict reasons", () => {
     expect(describeApprovalError(apiError(409, "Cycle proposal no longer matches approval"))).toBe(
       "Conflict: Cycle proposal no longer matches approval",

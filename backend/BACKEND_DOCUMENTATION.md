@@ -148,10 +148,12 @@ constructed.
 
 1. Calls `Base.metadata.create_all`.
 2. Runs the compatibility column helpers.
-3. Creates APScheduler.
-4. Loads enabled `AgentSchedule` rows for enabled users and agents.
-5. Starts the scheduler.
-6. Shuts the scheduler down when the application stops.
+3. Recovers cycles orphaned by a previous process (`recover_orphaned_cycles`,
+   #185; see section 9.1). It logs errors and never blocks startup.
+4. Creates APScheduler.
+5. Loads enabled `AgentSchedule` rows for enabled users and agents.
+6. Starts the scheduler.
+7. Shuts the scheduler down when the application stops.
 
 Fixed domain values that should not be environment-tunable are centralized in
 [constants.py](app/core/constants.py). This includes the official Alpaca
@@ -674,7 +676,8 @@ network request, but the orchestrator reloads the cycle before validation and
 execution and will not create an approval or submit an order after cancellation.
 Scheduled cycles and cycles already `EXECUTING`, `RECONCILING`, or
 `PENDING_APPROVAL` must use their existing scheduler, reconciliation, or
-approval controls instead.
+approval controls instead. A cycle of either trigger that was cut off by a
+process restart is closed out automatically (section 9.1).
 
 ### 5.5 Curated strategy knowledge
 
@@ -735,6 +738,8 @@ main sequence.
   held on a dedicated connection for the whole run. If another cycle or sweep for
   this agent already holds it, raise `CycleOverlapError` immediately.
 - Load `AgentConfig`.
+- Close out this agent's orphaned in-flight cycles (section 9.1). The caller holds
+  the agent lock, so any `PENDING`...`EXECUTING` cycle belongs to a dead process.
 - Expire old pending approvals for this agent.
 - Search for a cycle in any active status.
 - If an active cycle is `RECONCILING`, try to reconcile its broker order first.
@@ -1006,6 +1011,57 @@ cycle attempt, `reconcile_uncertain_cycle()`:
 
 This protects against duplicate orders after a timeout or process crash.
 
+### 9.1 Recovery of orphaned cycles (#185)
+
+A process that dies mid-cycle (a Render redeploy, a free-tier restart, a crash)
+leaves its cycle in an in-flight status, which would block the agent forever.
+Every writer of an in-flight status (`PENDING`, `COLLECTING`, `REASONING`,
+`VALIDATING`, `EXECUTING`) holds the agent's cycle lock while the cycle is in it:
+the orchestrator under `run_agent_cycle`/`run_watchlist_cycles`, and an approval's
+execution (section 10). So an in-flight cycle whose agent lock is free is orphaned.
+
+`_recover_orphaned_agent_cycles()` in [orchestrator.py](app/agent/orchestrator.py)
+closes such cycles out:
+
+| Old status | New status | `failure_code` | Notes |
+|---|---|---|---|
+| `PENDING`, `COLLECTING`, `REASONING`, `VALIDATING` | `FAILED` | `INTERRUPTED` | Sets `completed_at`. Nothing was submitted from these states. |
+| `EXECUTING` | `RECONCILING` | `INTERRUPTED` | An order may exist (`client_order_id` = cycle id), so it is never resubmitted. Snapshot `execution_status` becomes `RECONCILIATION_REQUIRED`; the gate then reconciles it against Alpaca, which overwrites `failure_code` with the outcome. |
+
+`PENDING_APPROVAL` (lazy expiry), `RECONCILING` (broker reconcile) and terminal
+statuses, `CANCELLED` among them, are never touched. Each recovery is logged at
+WARNING with the cycle id, agent id, old status and new status.
+
+It runs in two places:
+
+1. **API startup** (`recover_orphaned_cycles`, before the scheduler starts): for
+   each agent with an in-flight cycle it takes the agent lock without waiting, on a
+   dedicated connection. If another live process holds it (an old instance during a
+   deploy, a Celery worker mid-sweep), that agent is skipped and logged.
+2. **The active-cycle gate** (step 1 of section 6), whose caller already holds the
+   lock. A stuck agent heals on its next tick or manual run, without a restart.
+
+Recovery reads the cycles `FOR UPDATE`, the same row lock as the cancel route, so
+the two can't both win: a cancel that commits first is skipped, and a cancel after
+recovery gets 409. Recovery is idempotent.
+
+Cycle `failure_code` values:
+
+| Code | Status | Meaning |
+|---|---|---|
+| `INTERRUPTED` | `FAILED` or `RECONCILING` | The process stopped mid-cycle; closed out by recovery. |
+| `MANUAL_CYCLE_CANCELLED` | `CANCELLED` | The owner cancelled a manual cycle. |
+| `LLM_OUTPUT_INVALID` | `FAILED` | The proposal failed validation twice. |
+| `UNEXPECTED_ERROR` | `FAILED` | Any other error inside the cycle (message recorded). |
+| `POLICY_DENIED` | `REJECTED` | A risk policy failed at execution. |
+| `BROKER_REJECTED` | `REJECTED` | Alpaca rejected the order. |
+| `KILL_SWITCH_ENABLED` | `REJECTED` | The gateway's kill-switch re-check blocked it. |
+| `APPROVAL_EXPIRED` | `REJECTED` | The approval passed its expiry. |
+| `ORDER_EXECUTION_UNCERTAIN` | `RECONCILING` | Submission failed in an unknown state. |
+| `ORDER_SUBMISSION_NOT_STARTED` | `FAILED` | Reconcile found no local broker order. |
+| `ORDER_NOT_FOUND` | `FAILED` | Reconcile found no order at Alpaca (not resubmitted). |
+| `BROKER_ORDER_NOT_EXECUTED` | `REJECTED` | Reconcile found it rejected or cancelled at Alpaca. |
+
 ---
 
 ## 10. Approval flow
@@ -1021,6 +1077,12 @@ When a required-approval cycle creates a BUY/SELL proposal:
    - Rejects an already-acted-on approval.
    - Expires it if its time has passed.
    - Recomputes and constant-time-compares the proposal hash.
+   - Takes the agent's cycle lock without waiting (#185). If a cycle or sweep for
+     the agent holds it, returns 409 ("The agent is busy running a cycle...") and
+     changes nothing: the approval stays `PENDING` and can be retried. Holding the
+     lock means orphan recovery never mistakes a live approval's `EXECUTING` cycle
+     for an abandoned one, and an approval never submits beside the agent's own
+     cycles. Trade-off: an approval waits for a running sweep to finish.
    - Records actor, timestamp, and comment.
    - Re-runs live policy evaluation and execution.
 6. Reject:
