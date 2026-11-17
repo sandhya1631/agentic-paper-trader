@@ -1,15 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/api/client", () => ({
-  api: { get: vi.fn() },
+  api: { get: vi.fn(), post: vi.fn() },
 }));
 
 import { api } from "@/lib/api/client";
-import { getCycle, getCycleTokenUsage, listCycles } from "./cycles-api";
+import { cancelCycle, getCycle, getCycleTokenUsage, isCancellableCycle, listCycles } from "./cycles-api";
 
 const mockedApi = vi.mocked(api);
 
-beforeEach(() => mockedApi.get.mockReset());
+beforeEach(() => {
+  mockedApi.get.mockReset();
+  mockedApi.post.mockReset();
+});
 
 describe("listCycles", () => {
   it("fetches with no query string when no filters are given", async () => {
@@ -75,5 +78,37 @@ describe("getCycleTokenUsage", () => {
 
     expect(mockedApi.get).toHaveBeenCalledWith("/agent/cycles/c1/token-usage");
     expect(result).toBe(usage);
+  });
+});
+
+describe("cancelCycle", () => {
+  it("posts to the cancel endpoint for the given id", async () => {
+    const cancelled = { id: "c1", status: "CANCELLED" };
+    mockedApi.post.mockResolvedValue(cancelled);
+
+    const result = await cancelCycle("c1");
+
+    expect(mockedApi.post).toHaveBeenCalledWith("/agent/cycles/c1/cancel");
+    expect(result).toBe(cancelled);
+  });
+});
+
+describe("isCancellableCycle", () => {
+  it.each(["PENDING", "COLLECTING", "REASONING", "VALIDATING"])(
+    "is true for a MANUAL cycle in %s",
+    (status) => {
+      expect(isCancellableCycle({ trigger: "MANUAL", status })).toBe(true);
+    },
+  );
+
+  it.each(["EXECUTING", "RECONCILING", "PENDING_APPROVAL", "COMPLETED", "FAILED", "CANCELLED"])(
+    "is false for a MANUAL cycle in %s",
+    (status) => {
+      expect(isCancellableCycle({ trigger: "MANUAL", status })).toBe(false);
+    },
+  );
+
+  it("is false for a SCHEDULED cycle even in a cancellable-looking status", () => {
+    expect(isCancellableCycle({ trigger: "SCHEDULED", status: "REASONING" })).toBe(false);
   });
 });

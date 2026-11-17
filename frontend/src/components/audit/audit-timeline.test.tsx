@@ -1,17 +1,25 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { ApiError } from "@/lib/api/errors";
 
-vi.mock("@/lib/agent/cycles-api", () => ({
-  listCycles: vi.fn(),
-  getCycle: vi.fn(),
-  getCycleTokenUsage: vi.fn(),
-}));
+// isCancellableCycle is a pure predicate (no API call) - keep the real implementation
+// and mock only the network-calling exports.
+vi.mock("@/lib/agent/cycles-api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/agent/cycles-api")>();
+  return {
+    ...actual,
+    listCycles: vi.fn(),
+    getCycle: vi.fn(),
+    getCycleTokenUsage: vi.fn(),
+    cancelCycle: vi.fn(),
+  };
+});
 vi.mock("@/lib/meta/meta-api", () => ({ getConstants: vi.fn() }));
 
 import {
+  cancelCycle,
   getCycle,
   getCycleTokenUsage,
   listCycles,
@@ -24,6 +32,7 @@ import { AuditTimeline } from "./audit-timeline";
 const mockList = vi.mocked(listCycles);
 const mockGet = vi.mocked(getCycle);
 const mockTokenUsage = vi.mocked(getCycleTokenUsage);
+const mockCancel = vi.mocked(cancelCycle);
 const mockConstants = vi.mocked(getConstants);
 
 function tokenUsage(overrides: Partial<CycleTokenUsage> = {}): CycleTokenUsage {
@@ -71,6 +80,7 @@ beforeEach(() => {
   mockList.mockReset();
   mockGet.mockReset();
   mockTokenUsage.mockReset();
+  mockCancel.mockReset();
   // Default: no token usage available (e.g. a cycle that never built model context).
   // Tests that care about the "Context usage" section override this explicitly.
   mockTokenUsage.mockRejectedValue(new ApiError(409, "Conflict", {}, "http://x"));
@@ -342,6 +352,119 @@ describe("AuditTimeline", () => {
     fireEvent.click(await screen.findByRole("button", { name: /FAILED/ }));
 
     expect(await screen.findByText(/LLM_OUTPUT_INVALID: bad json/)).toBeTruthy();
+  });
+
+  describe("cancelling a running cycle (#199)", () => {
+    it("shows Cancel only for a MANUAL cycle in a cancellable status", async () => {
+      mockList.mockResolvedValue({
+        items: [baseCycle({ id: "c5", status: "REASONING" })],
+        total: 1,
+        limit: 20,
+        offset: 0,
+        next_offset: null,
+      });
+
+      render(<AuditTimeline />);
+
+      expect(await screen.findByRole("button", { name: /^cancel$/i })).toBeTruthy();
+    });
+
+    it("hides Cancel for a SCHEDULED cycle, even in a cancellable-looking status", async () => {
+      mockList.mockResolvedValue({
+        items: [baseCycle({ id: "c6", status: "REASONING", trigger: "SCHEDULED" })],
+        total: 1,
+        limit: 20,
+        offset: 0,
+        next_offset: null,
+      });
+
+      render(<AuditTimeline />);
+      await screen.findByText("SCHEDULED");
+
+      expect(screen.queryByRole("button", { name: /^cancel$/i })).toBeNull();
+    });
+
+    it("hides Cancel once the cycle is in a terminal status", async () => {
+      mockList.mockResolvedValue({
+        items: [baseCycle({ id: "c7", status: "COMPLETED" })],
+        total: 1,
+        limit: 20,
+        offset: 0,
+        next_offset: null,
+      });
+
+      render(<AuditTimeline />);
+      const article = await screen.findByRole("article");
+      await within(article).findByText("COMPLETED");
+
+      expect(screen.queryByRole("button", { name: /^cancel$/i })).toBeNull();
+    });
+
+    it("cancels and updates the row to CANCELLED without a full reload", async () => {
+      mockList.mockResolvedValue({
+        items: [baseCycle({ id: "c8", status: "REASONING" })],
+        total: 1,
+        limit: 20,
+        offset: 0,
+        next_offset: null,
+      });
+      mockCancel.mockResolvedValue(
+        baseCycle({
+          id: "c8",
+          status: "CANCELLED",
+          failure_code: "MANUAL_CYCLE_CANCELLED",
+          proposal_json: null,
+        }),
+      );
+
+      render(<AuditTimeline />);
+      fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
+
+      expect(await screen.findByText("CANCELLED")).toBeTruthy();
+      expect(mockCancel).toHaveBeenCalledWith("c8");
+      expect(mockList).toHaveBeenCalledTimes(1); // no refetch of the list
+      expect(screen.queryByRole("button", { name: /^cancel$/i })).toBeNull(); // terminal now
+    });
+
+    it("shows a clear message on 409 and refreshes the row to its real status", async () => {
+      mockList.mockResolvedValue({
+        items: [baseCycle({ id: "c9", status: "REASONING" })],
+        total: 1,
+        limit: 20,
+        offset: 0,
+        next_offset: null,
+      });
+      mockCancel.mockRejectedValue(
+        new ApiError(409, "Conflict", { detail: "Cycle cannot be cancelled from status COMPLETED" }, "http://x"),
+      );
+      mockGet.mockResolvedValue(baseCycle({ id: "c9", status: "COMPLETED" }));
+
+      render(<AuditTimeline />);
+      fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
+
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toContain("Cycle cannot be cancelled from status COMPLETED");
+      const article = await screen.findByRole("article");
+      expect(await within(article).findByText("COMPLETED")).toBeTruthy(); // refreshed, not stale
+      expect(within(article).queryByText("REASONING")).toBeNull();
+    });
+
+    it("clicking Cancel does not expand the row", async () => {
+      mockList.mockResolvedValue({
+        items: [baseCycle({ id: "c10", status: "PENDING", proposal_json: null })],
+        total: 1,
+        limit: 20,
+        offset: 0,
+        next_offset: null,
+      });
+      mockCancel.mockResolvedValue(baseCycle({ id: "c10", status: "CANCELLED", proposal_json: null }));
+
+      render(<AuditTimeline />);
+      fireEvent.click(await screen.findByRole("button", { name: /^cancel$/i }));
+
+      await waitFor(() => expect(mockCancel).toHaveBeenCalledWith("c10"));
+      expect(mockGet).not.toHaveBeenCalled(); // toggle() (expand) never ran
+    });
   });
 
   it("populates the action/status/policy dropdowns from /meta/constants", async () => {
