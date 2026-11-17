@@ -1,0 +1,77 @@
+name: Integration Tests
+
+# The live-service tier (#100): Alpaca paper, a live LLM, a full agent cycle. Separate
+# from the PR checks in ci.yml, which stay fast with `-m "not integration"`.
+#
+# Opt-in per service via repository VARIABLES (Settings -> Secrets and variables ->
+# Actions -> Variables). With none set, every live test skips and this job is green:
+#   INTEGRATION_ALPACA=1  read-only Alpaca tests (uses the ALPACA_API_* secrets)
+#   INTEGRATION_OPENAI=1  OpenAI LLM case + full cycle with LLM_PROVIDER=openai
+#                         (needs an OPENAI_API_KEY secret; billed per call)
+# The paper-order round-trip (ALPACA_INTEGRATION_ORDERS) is never enabled here.
+# See docs/integration-tests.md.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 6 * * 2-6"  # 06:30 UTC Tue-Sat, after each US trading day
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-tests
+  cancel-in-progress: false
+
+jobs:
+  integration:
+    name: Integration tier (opt-in)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agentic_paper_trader
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "./backend[dev]"
+
+      - name: Run the integration tier
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/agentic_paper_trader
+          JWT_SECRET: ci-testing-jwt-secret-key-12345
+          # A throwaway Fernet key: the full-cycle test encrypts paper keys into the CI database.
+          CREDENTIAL_ENCRYPTION_KEY: MTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3BxcnN0dXY=
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          ALPACA_INTEGRATION: ${{ vars.INTEGRATION_ALPACA }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_INTEGRATION: ${{ vars.INTEGRATION_OPENAI }}
+          LLM_PROVIDER: ${{ vars.INTEGRATION_OPENAI == '1' && 'openai' || 'ollama' }}
+        run: |
+          cd backend
+          # -rs lists every skipped test with the flag it needs.
+          pytest tests -m integration -rs -v
