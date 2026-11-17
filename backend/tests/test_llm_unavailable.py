@@ -248,6 +248,10 @@ async def test_a_failing_self_repair_call_is_llm_unavailable(db_session):
         LLM_UNAVAILABLE,
         "Ollama API error: ReadTimeout",
     )
+    # The evidence it had is kept: the first (invalid) answer, the prompt, the context.
+    assert cycle.llm_raw_response == "not json"
+    assert cycle.prompt_text
+    assert cycle.snapshot_json["watchlist"] == ["AAPL"]
 
 
 @pytest.mark.asyncio
@@ -294,6 +298,11 @@ def _ollama_transport(monkeypatch, handler) -> None:
          "Ollama API error: HTTPStatusError (HTTP 500)"),
         (lambda r: httpx.Response(200, text=f"<html>{SECRET_BODY}</html>"),
          "Ollama API error: JSONDecodeError"),
+        (lambda r: httpx.Response(200, json=[SECRET_BODY]),
+         "Ollama API error: unexpected response shape"),
+        (lambda r: httpx.Response(404, json={"error": f"model not found {SECRET_BODY}"}),
+         "Ollama API error: HTTPStatusError (HTTP 404). Is the model pulled? "
+         "Run: ollama pull llama3.1"),
     ],
 )
 async def test_ollama_generate_failures_are_sanitized_llm_unavailable(
@@ -306,9 +315,79 @@ async def test_ollama_generate_failures_are_sanitized_llm_unavailable(
         await client.generate("ctx", system="sys")
 
     assert str(raised.value) == message
-    assert raised.value.__cause__ is None and raised.value.__suppress_context__
+    # No chained provider exception can surface the body or URL later.
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None or raised.value.__suppress_context__
     _assert_no_secret(str(raised.value))
     _assert_no_secret(caplog.text, url_allowed=True)
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_ollama_url_is_llm_unavailable_without_the_url():
+    client = OllamaClient(base_url="http://[bad-host-SECRET-160", model="llama3.1")
+
+    with pytest.raises(LLMUnavailableError) as raised:
+        await client.generate("ctx")
+
+    assert str(raised.value).startswith("Ollama API error: ")
+    assert "bad-host" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_during_a_hung_llm_call_is_kept(db_session):
+    """The user cancels while the call hangs; the outage must not overwrite CANCELLED."""
+    async with TestSessionLocal() as db:
+        user = User(email=f"cancel160-{uuid.uuid4().hex[:6]}@example.com", password_hash="x",
+                    role=UserRole.OPERATOR)
+        db.add(user)
+        await db.flush()
+        agent_id = await _seed_agent(db, user, ["AAPL"])
+
+    async def hang_then_fail(prompt_input, system=None):
+        async with TestSessionLocal() as other:  # POST /agent/cycles/{id}/cancel
+            cycle = (
+                await other.execute(
+                    select(AgentCycle).where(AgentCycle.agent_id == agent_id).with_for_update()
+                )
+            ).scalar_one()
+            cycle.status = CycleStatus.CANCELLED
+            cycle.failure_code = "MANUAL_CYCLE_CANCELLED"
+            await other.commit()
+        raise LLMUnavailableError("Ollama API error: ReadTimeout")
+
+    llm = MagicMock()
+    llm.generate = AsyncMock(side_effect=hang_then_fail)
+    collector = MagicMock()
+    collector.fetch_latest_bars = AsyncMock(return_value={"AAPL": []})
+    async with TestSessionLocal() as db:
+        returned = await run_agent_cycle(
+            agent_id, db, llm_client=llm, collector=collector, account_data=None
+        )
+
+    assert returned.status == CycleStatus.CANCELLED
+    cycle = await _only_cycle(agent_id)
+    assert (cycle.status, cycle.failure_code) == (
+        CycleStatus.CANCELLED,
+        "MANUAL_CYCLE_CANCELLED",
+    )
+
+
+@pytest.mark.asyncio
+async def test_other_value_errors_in_a_cycle_are_not_reported_as_not_found(
+    client: AsyncClient, monkeypatch
+):
+    auth, agent_id = await _operator_with_agent(client)
+    _offline_cycle(monkeypatch)
+
+    def broken_context(**_kwargs):
+        raise ValueError("bad value while building the context")
+
+    monkeypatch.setattr(orchestrator, "build_agent_context", broken_context)
+
+    response = await client.post(f"/agent/cycles/run?agent_id={agent_id}", headers=auth)
+
+    assert response.status_code == 500  # a bug, not "not found"
+    assert (await _only_cycle(agent_id)).failure_code == "UNEXPECTED_ERROR"
 
 
 def test_llm_unavailable_is_not_a_value_error():

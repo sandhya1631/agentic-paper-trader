@@ -32,10 +32,11 @@ def create_llm_client(settings: Settings | None = None) -> LLMClient:
     if provider == "anthropic":
         try:
             from app.llm.anthropic_client import AnthropicClient
-        except ImportError:
+        except ImportError as exc:
+            # The cause is kept for server-side tracebacks (no secret in an ImportError).
             raise LLMUnavailableError(
                 "LLM_PROVIDER=anthropic requires the 'anthropic' package (pip install -e '.[dev]')"
-            ) from None
+            ) from exc
         return AnthropicClient(api_key=settings.anthropic_api_key, model=settings.anthropic_model)
 
     raise LLMUnavailableError(

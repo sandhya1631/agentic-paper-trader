@@ -173,6 +173,10 @@ class CycleOverlapError(Exception):
     """Raised when the agent already has a non-terminal cycle in progress."""
 
 
+class AgentNotFoundError(ValueError):
+    """The agent id doesn't exist. The only error the cycle route maps to 404 (#160)."""
+
+
 async def _cycle_was_cancelled(db: AsyncSession, cycle: AgentCycle) -> bool:
     """Lock and reload a cycle; report whether a concurrent cancellation landed.
 
@@ -392,7 +396,7 @@ async def _run_agent_cycle(
     res = await db.execute(stmt)
     agent = res.scalar_one_or_none()
     if not agent:
-        raise ValueError(f"AgentConfig with id '{agent_id}' not found")
+        raise AgentNotFoundError(f"AgentConfig with id '{agent_id}' not found")
 
     # 2. Gate: reject if this agent already has an active cycle (no overlap).
     # A watchlist sweep runs this gate itself, once, before it reads the broker, and
@@ -421,6 +425,10 @@ async def _run_agent_cycle(
     await db.commit()
     await db.refresh(cycle)
 
+    # Filled in as the cycle progresses, so a failure can still save its evidence.
+    context: dict[str, Any] | None = None
+    system_prompt: str | None = None
+    raw_response: str | None = None
     try:
         cycle.status = CycleStatus.COLLECTING
         await db.commit()
@@ -756,10 +764,22 @@ async def _run_agent_cycle(
         # key, URL or provider body. Recorded distinctly from UNEXPECTED_ERROR so the
         # audit trail can tell an LLM outage from a bug; the route maps it to 503.
         logger.warning("Agent cycle %s: LLM unavailable: %s", cycle.id, exc)
+        if await _cycle_was_cancelled(db, cycle):
+            # The user cancelled while the call hung: keep their CANCELLED record.
+            set_committed_value(cycle, "approval", None)
+            return cycle
         cycle.status = CycleStatus.FAILED
         cycle.completed_at = utcnow()
         cycle.failure_code = LLM_UNAVAILABLE
         cycle.failure_message = str(exc)
+        # Keep what the cycle had already built, as the other failure paths do: the
+        # context it sent, the prompt, and a first (invalid) answer if the repair failed.
+        if context is not None:
+            cycle.snapshot_json = dict(context)
+        if system_prompt is not None:
+            cycle.prompt_text = system_prompt
+        if raw_response is not None:
+            cycle.llm_raw_response = raw_response
         await db.commit()
         await db.refresh(cycle)
         raise
@@ -816,7 +836,7 @@ async def _run_watchlist_cycles(
     agent_res = await db.execute(select(AgentConfig).where(AgentConfig.id == agent_id))
     agent = agent_res.scalar_one_or_none()
     if agent is None:
-        raise ValueError(f"AgentConfig with id '{agent_id}' not found")
+        raise AgentNotFoundError(f"AgentConfig with id '{agent_id}' not found")
 
     # Canonical, de-duplicated symbols (the same helper the per-symbol cycle uses), so
     # the scope guard compares one consistent form and one sweep never evaluates (or

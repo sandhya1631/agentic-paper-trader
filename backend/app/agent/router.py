@@ -21,7 +21,7 @@ from sqlalchemy.orm import selectinload
 
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
-from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
+from app.agent.orchestrator import AgentNotFoundError, CycleOverlapError, run_agent_cycle
 from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition
 from app.agent.replay import ReplaySample, evaluate_replay
 from app.agent.watchlist import normalize_watchlist
@@ -491,7 +491,9 @@ async def trigger_manual_cycle(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.detail
         ) from exc
-    except ValueError as exc:
+    except AgentNotFoundError as exc:
+        # Only a missing agent is a 404; any other error inside the cycle is not "not
+        # found" (#160) and falls through to the generic 500 below.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
         ) from exc

@@ -67,10 +67,16 @@ class OllamaClient(LLMClient):
                 status_code,
                 self._model,
             )
+            # Ollama answers 404 when the model isn't pulled; say so (config, not secret).
+            hint = (
+                f". Is the model pulled? Run: ollama pull {self._model}"
+                if status_code == 404
+                else ""
+            )
             raise LLMUnavailableError(
-                f"Ollama API error: HTTPStatusError (HTTP {status_code})"
+                f"Ollama API error: HTTPStatusError (HTTP {status_code}){hint}"
             ) from None
-        except (httpx.HTTPError, ValueError) as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             # A timeout's str() is empty and a connect error's names the URL, so name only
             # the type (e.g. ReadTimeout, ConnectError); ValueError = a non-JSON body.
             logger.warning(
@@ -78,7 +84,11 @@ class OllamaClient(LLMClient):
             )
             raise LLMUnavailableError(f"Ollama API error: {type(exc).__name__}") from None
 
-        return data.get("message", {}).get("content", "")
+        message = data.get("message") if isinstance(data, dict) else None
+        if not isinstance(message, dict):
+            logger.warning("Ollama response had no message object: model=%s", self._model)
+            raise LLMUnavailableError("Ollama API error: unexpected response shape")
+        return str(message.get("content") or "")
 
     async def health_check(self) -> LLMHealth:
         """Probe the local Ollama server via /api/tags; never raises on failure."""

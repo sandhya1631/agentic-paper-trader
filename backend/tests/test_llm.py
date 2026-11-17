@@ -16,7 +16,7 @@ from test_llm_output_failure import INVALID_1, VALID_HOLD, _run_inputs
 from app.agent.orchestrator import run_agent_cycle
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.core.config import Settings, get_settings
-from app.core.constants import SUPPORTED_PROVIDERS
+from app.core.constants import LLM_UNAVAILABLE, SUPPORTED_PROVIDERS
 from app.db.enums import CycleStatus, DecisionAction
 from app.db.models import AgentCycle
 from app.llm.base import LLMHealth, LLMUnavailableError
@@ -388,7 +388,7 @@ async def test_openai_api_error_never_reaches_the_cycle_record():
     added = [call.args[0] for call in db.add.call_args_list]
     cycle = next(row for row in added if isinstance(row, AgentCycle))
     assert cycle.status == CycleStatus.FAILED
-    assert cycle.failure_code == "LLM_UNAVAILABLE"  # #160: no longer UNEXPECTED_ERROR
+    assert cycle.failure_code == LLM_UNAVAILABLE  # #160: no longer UNEXPECTED_ERROR
     assert cycle.failure_message == "OpenAI API error: AuthenticationError (HTTP 401)"
     stored = " ".join(
         str(value) for value in (cycle.failure_message, cycle.llm_raw_response, cycle.snapshot_json)

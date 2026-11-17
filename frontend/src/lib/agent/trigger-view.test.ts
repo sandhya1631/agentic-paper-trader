@@ -23,8 +23,13 @@ describe("describeTriggerError", () => {
       .toContain("Ollama API error: ReadTimeout");
   });
 
-  it("falls back to a generic LLM message when a 503 has no detail", () => {
-    expect(describeTriggerError(apiError(503)).text).toContain("The LLM is unavailable");
+  it("does not claim a cycle was recorded for a 503 that isn't the LLM's (Render waking up)", () => {
+    const text = describeTriggerError(apiError(503)).text;
+    expect(text).toContain("server is unavailable");
+    expect(text).not.toContain("recorded as failed");
+    expect(describeTriggerError(apiError(503, "Service Unavailable")).text).not.toContain(
+      "recorded as failed",
+    );
   });
 
   it("keeps the busy message for 409", () => {
