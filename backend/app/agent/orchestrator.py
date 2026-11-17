@@ -29,9 +29,9 @@ from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import BigInteger, bindparam, select, text
+from sqlalchemy import BigInteger, bindparam, case, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
-from sqlalchemy.orm.attributes import set_committed_value
+from sqlalchemy.orm.attributes import flag_modified, set_committed_value
 
 from app.agent.approval import (
     evaluate_and_submit_cycle_trade,
@@ -174,18 +174,36 @@ class CycleOverlapError(Exception):
     """Raised when the agent already has a non-terminal cycle in progress."""
 
 
-async def _cycle_was_cancelled(db: AsyncSession, cycle: AgentCycle) -> bool:
-    """Lock and reload a cycle; report whether a concurrent cancellation landed.
+async def _cycle_closed_elsewhere(db: AsyncSession, cycle: AgentCycle) -> bool:
+    """Lock and reload a cycle; report whether another writer changed its status.
+
+    The in-memory status is the one this run last committed. Anything else means the
+    cycle was closed out by someone else, and this run must stop without acting: a
+    `POST /cycles/{id}/cancel` (CANCELLED), or orphan recovery (FAILED/INTERRUPTED,
+    #185) by a process that took the agent lock after this run lost it (e.g. its lock
+    connection dropped).
 
     Takes the row's `SELECT ... FOR UPDATE` lock before reading its status, so this
     check is atomic with the status commit that follows it in the caller: a concurrent
-    `POST /cycles/{id}/cancel` either already committed CANCELLED (and is observed here)
-    or blocks on the row lock until the caller's next commit releases it, after which it
-    re-reads the fresh status and cancels for real. Without the lock, a cancel landing
-    between this check and that commit would be silently overwritten (lost update).
+    cancel or recovery either already committed (and is observed here) or blocks on the
+    row lock until the caller's next commit releases it, after which it re-reads the
+    fresh status. Without the lock, a change landing between this check and that commit
+    would be silently overwritten (lost update).
     """
+    expected = cycle.status
     await db.refresh(cycle, with_for_update=True)
-    return cycle.status == CycleStatus.CANCELLED
+    return cycle.status != expected
+
+
+def _save_snapshot(cycle: AgentCycle, context: dict[str, Any]) -> None:
+    """Persist the context as the cycle's snapshot (#186).
+
+    ``snapshot_json`` is a plain JSON column, so SQLAlchemy can't see in-place changes:
+    reassigning a dict it already committed is a no-op. Assign a copy AND flag it, so
+    the write is saved even if a nested value was the only change.
+    """
+    cycle.snapshot_json = dict(context)
+    flag_modified(cycle, "snapshot_json")
 
 
 def _select_dynamic_strategy(
@@ -305,7 +323,9 @@ async def _recover_orphaned_agent_cycles(
       (``client_order_id`` = cycle id), so it is never resubmitted; the active-cycle
       gate reconciles it against the broker.
     - ``PENDING``/``COLLECTING``/``REASONING``/``VALIDATING`` -> ``FAILED`` with
-      ``failure_code = INTERRUPTED``; nothing was submitted from these states.
+      ``failure_code = INTERRUPTED``; nothing was submitted from these states. If the
+      run is in fact still alive without its lock, its next phase check
+      (``_cycle_closed_elsewhere``) sees the change and it stops without acting.
 
     ``PENDING_APPROVAL``, ``RECONCILING`` and terminal statuses (``CANCELLED`` among
     them) are never touched. Rows are read with ``FOR UPDATE``, so this can't race the
@@ -314,10 +334,7 @@ async def _recover_orphaned_agent_cycles(
     """
     result = await db.execute(
         select(AgentCycle)
-        .where(
-            AgentCycle.agent_id == agent_id,
-            AgentCycle.status.in_(ORPHANABLE_CYCLE_STATUSES),
-        )
+        .where(AgentCycle.agent_id == agent_id, AgentCycle.status.in_(ORPHANABLE_CYCLE_STATUSES))
         .with_for_update(of=AgentCycle)
         .execution_options(populate_existing=True)
     )
@@ -373,9 +390,7 @@ async def recover_orphaned_cycles(
     agent_ids = list(
         (
             await db.execute(
-                select(AgentCycle.agent_id)
-                .where(AgentCycle.status.in_(ORPHANABLE_CYCLE_STATUSES))
-                .distinct()
+                select(AgentCycle.agent_id).where(AgentCycle.status.in_(ORPHANABLE_CYCLE_STATUSES)).distinct()
             )
         )
         .scalars()
@@ -393,8 +408,11 @@ async def recover_orphaned_cycles(
                 agent_id,
             )
         except Exception:
-            await db.rollback()
             logger.exception("Cycle recovery failed for agent %s", agent_id)
+            try:
+                await db.rollback()
+            except Exception:  # a dead connection must not stop the other agents
+                logger.warning("Rollback after a failed recovery also failed", exc_info=True)
     return recovered
 
 
@@ -412,21 +430,30 @@ async def _enforce_no_active_cycle(db: AsyncSession, agent: AgentConfig) -> None
     so a busy agent's tick makes no market-data or account calls (#178).
     """
     await expire_pending_approvals(db, agent.id)
-    active_stmt = select(AgentCycle).where(
-        AgentCycle.agent_id == agent.id,
-        AgentCycle.status.in_(ACTIVE_CYCLE_STATUSES),
+    # In-flight cycles first, then RECONCILING, so a parked PENDING_APPROVAL row can
+    # never hide an orphan or an uncertain order from `.first()`.
+    active_stmt = (
+        select(AgentCycle)
+        .where(
+            AgentCycle.agent_id == agent.id,
+            AgentCycle.status.in_(ACTIVE_CYCLE_STATUSES),
+        )
+        .order_by(
+            case(
+                (AgentCycle.status.in_(ORPHANABLE_CYCLE_STATUSES), 0),
+                (AgentCycle.status == CycleStatus.RECONCILING, 1),
+                else_=2,
+            )
+        )
+        .execution_options(populate_existing=True)
     )
-    active_res = await db.execute(active_stmt)
-    active_cycle = active_res.scalars().first()
+    active_cycle = (await db.execute(active_stmt)).scalars().first()
     if active_cycle is not None and active_cycle.status in ORPHANABLE_CYCLE_STATUSES:
-        # The caller holds the agent lock, so an in-flight cycle is orphaned (#185):
+        # The caller holds the agent lock, so in-flight cycles are orphaned (#185):
         # close out all of them, then look again (an EXECUTING one is now RECONCILING).
         await _recover_orphaned_agent_cycles(db, agent.id)
-        active_res = await db.execute(
-            active_stmt.execution_options(populate_existing=True)
-        )
-        active_cycle = active_res.scalars().first()
-    if active_cycle is not None and active_cycle.status == CycleStatus.RECONCILING:
+        active_cycle = (await db.execute(active_stmt)).scalars().first()
+    while active_cycle is not None and active_cycle.status == CycleStatus.RECONCILING:
         try:
             resolved = await reconcile_uncertain_cycle(db, agent, active_cycle)
         except Exception:
@@ -435,8 +462,10 @@ async def _enforce_no_active_cycle(db: AsyncSession, agent: AgentConfig) -> None
                 active_cycle.id,
             )
             resolved = False
-        if resolved:
-            active_cycle = None
+        if not resolved:
+            break
+        # Look again: another cycle (e.g. a parked approval) may still be active.
+        active_cycle = (await db.execute(active_stmt)).scalars().first()
     if active_cycle is not None:
         raise CycleOverlapError(
             f"Agent '{agent.id}' already has an active cycle "
@@ -656,7 +685,7 @@ async def _run_agent_cycle(
             model_window_tokens,
         )
 
-        if await _cycle_was_cancelled(db, cycle):
+        if await _cycle_closed_elsewhere(db, cycle):
             set_committed_value(cycle, "approval", None)
             return cycle
 
@@ -668,14 +697,14 @@ async def _run_agent_cycle(
 
         raw_response = await llm_client.generate(prompt_input, system=system_prompt)
 
-        if await _cycle_was_cancelled(db, cycle):
+        if await _cycle_closed_elsewhere(db, cycle):
             set_committed_value(cycle, "approval", None)
             return cycle
 
         # 7. Validate Output with 1-Retry Self-Repair
         cycle.status = CycleStatus.VALIDATING
         await db.commit()
-        if await _cycle_was_cancelled(db, cycle):
+        if await _cycle_closed_elsewhere(db, cycle):
             set_committed_value(cycle, "approval", None)
             return cycle
         proposal: DecisionProposal
@@ -695,7 +724,7 @@ async def _run_agent_cycle(
             try:
                 repaired_response = await llm_client.generate(repair_prompt, system=system_prompt)
                 raw_response = repaired_response
-                if await _cycle_was_cancelled(db, cycle):
+                if await _cycle_closed_elsewhere(db, cycle):
                     set_committed_value(cycle, "approval", None)
                     return cycle
                 proposal = validate_decision_proposal(repaired_response)
@@ -709,7 +738,7 @@ async def _run_agent_cycle(
                 cycle.status = CycleStatus.FAILED
                 cycle.failure_code = "LLM_OUTPUT_INVALID"
                 cycle.failure_message = str(repair_err)
-                cycle.snapshot_json = dict(context)
+                _save_snapshot(cycle, context)
                 cycle.prompt_version = agent.strategy_version
                 cycle.prompt_revision = prompt_definition.revision
                 cycle.prompt_text = system_prompt
@@ -722,12 +751,12 @@ async def _run_agent_cycle(
                 set_committed_value(cycle, "approval", None)
                 return cycle
 
-        if await _cycle_was_cancelled(db, cycle):
+        if await _cycle_closed_elsewhere(db, cycle):
             set_committed_value(cycle, "approval", None)
             return cycle
 
         # 8. Persist Cycle Success & Snapshot State
-        cycle.snapshot_json = dict(context)
+        _save_snapshot(cycle, context)
         cycle.prompt_version = agent.strategy_version
         cycle.prompt_revision = prompt_definition.revision
         cycle.prompt_text = system_prompt
@@ -812,7 +841,7 @@ async def _run_agent_cycle(
             context["execution_status"] = "EXECUTING"
             # snapshot_json is a plain JSON column: every write below assigns a new dict,
             # because mutating the committed one in place is never detected (#186).
-            cycle.snapshot_json = dict(context)
+            _save_snapshot(cycle, context)
             await db.commit()
             try:
                 policy_decision, broker_order = await evaluate_and_submit_cycle_trade(
@@ -827,7 +856,7 @@ async def _run_agent_cycle(
                 cycle.completed_at = utcnow()
                 cycle.policy_decision = PolicyDecisionType.NOT_EVALUATED
                 context["execution_status"] = "KILL_SWITCH_ENABLED"
-                cycle.snapshot_json = dict(context)
+                _save_snapshot(cycle, context)
                 await db.commit()
                 await db.refresh(cycle)
                 set_committed_value(cycle, "approval", None)
@@ -840,7 +869,7 @@ async def _run_agent_cycle(
                 cycle.completed_at = utcnow()
                 cycle.policy_decision = PolicyDecisionType.NOT_EVALUATED
                 context["execution_status"] = "RECONCILIATION_REQUIRED"
-                cycle.snapshot_json = dict(context)
+                _save_snapshot(cycle, context)
                 await db.commit()
                 await db.refresh(cycle)
                 set_committed_value(cycle, "approval", None)
@@ -865,7 +894,7 @@ async def _run_agent_cycle(
                 context["execution_status"] = "ORDER_SUBMITTED"
             cycle.completed_at = utcnow()
 
-        cycle.snapshot_json = dict(context)
+        _save_snapshot(cycle, context)
         await db.commit()
         await db.refresh(cycle)
         if pending_approval is not None:
@@ -980,6 +1009,17 @@ async def _run_watchlist_cycles(
                 enforce_no_overlap=False,
             )
             cycles.append(cycle)
+            if cycle.failure_code == CYCLE_INTERRUPTED:
+                # Only another process's recovery sets INTERRUPTED: it took the agent
+                # lock, so this sweep lost it (e.g. its lock connection dropped) and must
+                # not run more symbols beside that process (#185).
+                logger.warning(
+                    "Watchlist sweep for agent %s stopped: cycle %s was recovered by "
+                    "another process, so this sweep no longer holds the agent lock",
+                    agent_id,
+                    cycle.id,
+                )
+                break
         except Exception as exc:
             # One symbol's transient failure (e.g. LLM timeout) must not drop the
             # rest of the watchlist for this tick.

@@ -36,6 +36,8 @@ from app.core.constants import (
     DEFAULT_STRATEGY_VERSION,
     DEFAULT_WATCHLIST,
     DYNAMIC_STRATEGY_VERSION,
+    INTERRUPTIBLE_CYCLE_STATUSES,
+    ORPHANABLE_CYCLE_STATUSES,
 )
 from app.db.enums import (
     ApprovalStatus,
@@ -305,7 +307,7 @@ _NO_AGENT_DETAIL = "No agent configured yet. Trigger a cycle to create your defa
 # 409 when an approval can't take the agent's cycle lock (#185); the UI matches "busy".
 APPROVAL_AGENT_BUSY_DETAIL = (
     "The agent is busy running a cycle, so nothing was sent and the approval is still "
-    "pending. Retry in a minute."
+    "pending. Retry when the current cycle or watchlist sweep finishes."
 )
 
 
@@ -696,12 +698,7 @@ async def cancel_manual_cycle(
             status_code=status.HTTP_409_CONFLICT,
             detail="Only manually triggered cycles can be cancelled.",
         )
-    if cycle.status not in {
-        CycleStatus.PENDING,
-        CycleStatus.COLLECTING,
-        CycleStatus.REASONING,
-        CycleStatus.VALIDATING,
-    }:
+    if cycle.status not in INTERRUPTIBLE_CYCLE_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Cycle cannot be cancelled from status {cycle.status}.",
@@ -1246,13 +1243,7 @@ async def get_scheduler_status(
     for cycle in cycles:
         orders = orders_by_cycle[cycle.id]
         if not orders:
-            if cycle.status in {
-                CycleStatus.PENDING,
-                CycleStatus.COLLECTING,
-                CycleStatus.REASONING,
-                CycleStatus.VALIDATING,
-                CycleStatus.EXECUTING,
-            }:
+            if cycle.status in ORPHANABLE_CYCLE_STATUSES:
                 execution_status = "RUNNING"
             elif (
                 cycle.approval is not None

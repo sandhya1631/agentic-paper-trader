@@ -1043,7 +1043,18 @@ It runs in two places:
 
 Recovery reads the cycles `FOR UPDATE`, the same row lock as the cancel route, so
 the two can't both win: a cancel that commits first is skipped, and a cancel after
-recovery gets 409. Recovery is idempotent.
+recovery gets 409. Recovery is idempotent. The gate orders in-flight cycles first,
+so a parked `PENDING_APPROVAL` row never hides an orphan.
+
+**A run that lost its lock connection.** `agent_cycle_lock` tolerates its dedicated
+connection dropping mid-run (the run carries on, logged), and then another process
+can take the lock and recover the run's cycle. Two guards stop the old run from acting
+beside the new one: every phase check (`_cycle_closed_elsewhere`) aborts the run if
+anyone else changed the cycle's status (cancel or recovery), and a watchlist sweep
+stops when one of its cycles comes back `INTERRUPTED`. Residual risk: if the
+connection drops during the seconds-long `EXECUTING` step and another process's gate
+runs in that window, the cycle is reconciled while the old run still submits; the
+gateway's `client_order_id` dedup and P-010 (one open order per symbol) still apply.
 
 Cycle `failure_code` values:
 
@@ -1058,7 +1069,7 @@ Cycle `failure_code` values:
 | `KILL_SWITCH_ENABLED` | `REJECTED` | The gateway's kill-switch re-check blocked it. |
 | `APPROVAL_EXPIRED` | `REJECTED` | The approval passed its expiry. |
 | `ORDER_EXECUTION_UNCERTAIN` | `RECONCILING` | Submission failed in an unknown state. |
-| `ORDER_SUBMISSION_NOT_STARTED` | `FAILED` | Reconcile found no local broker order. |
+| `ORDER_SUBMISSION_NOT_STARTED` | `FAILED` | Reconcile found no local broker order (also the snapshot's `execution_status`). |
 | `ORDER_NOT_FOUND` | `FAILED` | Reconcile found no order at Alpaca (not resubmitted). |
 | `BROKER_ORDER_NOT_EXECUTED` | `REJECTED` | Reconcile found it rejected or cancelled at Alpaca. |
 
@@ -1079,10 +1090,11 @@ When a required-approval cycle creates a BUY/SELL proposal:
    - Recomputes and constant-time-compares the proposal hash.
    - Takes the agent's cycle lock without waiting (#185). If a cycle or sweep for
      the agent holds it, returns 409 ("The agent is busy running a cycle...") and
-     changes nothing: the approval stays `PENDING` and can be retried. Holding the
-     lock means orphan recovery never mistakes a live approval's `EXECUTING` cycle
-     for an abandoned one, and an approval never submits beside the agent's own
-     cycles. Trade-off: an approval waits for a running sweep to finish.
+     changes nothing: the approval stays `PENDING` and can be retried when the cycle
+     or sweep finishes. Holding the lock means orphan recovery never mistakes a live
+     approval's `EXECUTING` cycle for an abandoned one, and an approval never submits
+     beside the agent's own cycles. Trade-off: an approval waits for a running sweep
+     to finish (on CPU-only Ollama a long watchlist sweep can take tens of minutes).
    - Records actor, timestamp, and comment.
    - Re-runs live policy evaluation and execution.
 6. Reject:

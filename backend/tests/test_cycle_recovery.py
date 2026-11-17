@@ -535,3 +535,140 @@ async def test_cancel_after_recovery_is_refused(client: AsyncClient):
 
     assert response.status_code == 409
     assert (await _stored(cycle_id)).failure_code == CYCLE_INTERRUPTED
+
+
+# --- Review follow-ups: a run that lost its lock, ordering, reconcile, robustness ------
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_lost_its_lock_stops_once_recovery_closes_its_cycle(db_session):
+    """If a run's lock connection drops mid-LLM-call, another process can take the lock
+    and recover the run's cycle. The run must then stop at its next phase check: no
+    proposal, no approval, nothing submitted."""
+    agent_id = await _seed_agent()  # REQUIRED: a BUY would park an approval
+    calls = 0
+
+    async def generate(prompt_input, system=None):
+        nonlocal calls
+        calls += 1
+        # Another process, holding the lock this run lost, recovers its cycle.
+        async with TestSessionLocal() as other:
+            await orchestrator._recover_orphaned_agent_cycles(other, agent_id)
+        return json.dumps(BUY)
+
+    llm = MagicMock()
+    llm.generate = AsyncMock(side_effect=generate)
+    async with TestSessionLocal() as db:
+        cycle = await run_agent_cycle(
+            agent_id, db, llm_client=llm, collector=_collector(), account_data=None
+        )
+
+    assert calls == 1
+    assert (cycle.status, cycle.failure_code) == (CycleStatus.FAILED, CYCLE_INTERRUPTED)
+    stored = await _stored(cycle.id)
+    assert (stored.status, stored.proposal_json) == (CycleStatus.FAILED, None)
+    async with TestSessionLocal() as db:
+        approvals = (await db.execute(select(CycleApproval))).scalars().all()
+    assert approvals == []
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_stops_when_another_process_recovers_its_cycle(db_session):
+    agent_id = await _seed_agent(approval_mode=ApprovalMode.OBSERVE_ONLY)
+    async with TestSessionLocal() as db:
+        agent = await db.get(AgentConfig, agent_id)
+        agent.watchlist = ["AAPL", "NVDA", "SPY"]
+        await db.commit()
+    calls = 0
+
+    async def generate(prompt_input, system=None):
+        nonlocal calls
+        calls += 1
+        async with TestSessionLocal() as other:
+            await orchestrator._recover_orphaned_agent_cycles(other, agent_id)
+        return json.dumps(HOLD)
+
+    llm = MagicMock()
+    llm.generate = AsyncMock(side_effect=generate)
+    collector = MagicMock()
+    collector.fetch_latest_bars = AsyncMock(return_value={})
+    async with TestSessionLocal() as db:
+        cycles = await orchestrator.run_watchlist_cycles(
+            agent_id, db, llm_client=llm, collector=collector
+        )
+
+    # The first symbol's cycle was taken over, so the sweep ran no more symbols.
+    assert calls == 1
+    assert [(c.status, c.failure_code) for c in cycles] == [
+        (CycleStatus.FAILED, CYCLE_INTERRUPTED)
+    ]
+    async with TestSessionLocal() as db:
+        rows = (
+            await db.execute(select(AgentCycle).where(AgentCycle.agent_id == agent_id))
+        ).scalars().all()
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_gate_recovers_an_orphan_even_behind_a_parked_approval(db_session):
+    agent_id = await _seed_agent()
+    parked_id = await _seed_cycle(agent_id, CycleStatus.PENDING_APPROVAL)
+    orphan_id = await _seed_cycle(agent_id, CycleStatus.REASONING)
+
+    async with TestSessionLocal() as db:
+        with pytest.raises(CycleOverlapError, match=str(parked_id)):
+            await run_agent_cycle(agent_id, db, llm_client=_hold_llm(), collector=_collector())
+
+    orphan = await _stored(orphan_id)
+    assert (orphan.status, orphan.failure_code) == (CycleStatus.FAILED, CYCLE_INTERRUPTED)
+    assert (await _stored(parked_id)).status == CycleStatus.PENDING_APPROVAL
+
+
+@pytest.mark.asyncio
+async def test_executing_orphan_without_a_broker_order_records_its_outcome(db_session):
+    """Died after the EXECUTING commit, before the gateway persisted an order."""
+    agent_id = await _seed_agent(approval_mode=ApprovalMode.AUTO)
+    orphan_id = await _seed_cycle(
+        agent_id, CycleStatus.EXECUTING, snapshot={"execution_status": "EXECUTING"}
+    )
+
+    async with TestSessionLocal() as db:
+        new_cycle = await run_agent_cycle(
+            agent_id, db, llm_client=_hold_llm(), collector=_collector(), account_data=None
+        )
+
+    assert new_cycle.status == CycleStatus.HOLD
+    orphan = await _stored(orphan_id)
+    assert (orphan.status, orphan.failure_code) == (
+        CycleStatus.FAILED,
+        "ORDER_SUBMISSION_NOT_STARTED",
+    )
+    assert orphan.snapshot_json["execution_status"] == "ORDER_SUBMISSION_NOT_STARTED"
+    assert orphan.completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_continues_past_an_agent_whose_recovery_fails(
+    db_session, monkeypatch
+):
+    broken_agent = await _seed_agent()
+    healthy_agent = await _seed_agent()
+    await _seed_cycle(broken_agent, CycleStatus.REASONING)
+    healthy_orphan = await _seed_cycle(healthy_agent, CycleStatus.COLLECTING)
+    real_recover = orchestrator._recover_orphaned_agent_cycles
+
+    async def recover(db, agent_id):
+        if agent_id == broken_agent:
+            raise RuntimeError("connection dropped")
+        return await real_recover(db, agent_id)
+
+    monkeypatch.setattr(orchestrator, "_recover_orphaned_agent_cycles", recover)
+    async with TestSessionLocal() as db:
+
+        async def broken_rollback():
+            raise RuntimeError("rollback on a dead connection")
+
+        monkeypatch.setattr(db, "rollback", broken_rollback)
+        recovered = await recover_orphaned_cycles(db)
+
+    assert recovered == [(healthy_orphan, CycleStatus.COLLECTING, CycleStatus.FAILED)]

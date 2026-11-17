@@ -154,8 +154,8 @@ export function describeApprovalError(error: unknown): string {
           return "This approval was already handled.";
         }
         // The agent's own cycle or sweep holds its lock (#185); nothing changed.
-        if (/busy/i.test(text)) {
-          return "The agent is running a cycle right now, so nothing was sent. The approval is still pending: try again in a minute.";
+        if (/agent is busy running a cycle/i.test(text)) {
+          return "The agent is running a cycle or watchlist sweep right now, so nothing was sent. The approval is still pending: try again when it finishes.";
         }
         return text ? `Conflict: ${text}` : "This approval can no longer be changed.";
       case 423:
