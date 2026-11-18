@@ -4,7 +4,7 @@ from openai import APIError, AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from openai.types.shared_params import ResponseFormatJSONSchema
 
-from app.llm.base import LLMClient, LLMHealth
+from app.llm.base import LLMClient, LLMHealth, LLMUnavailableError
 from app.llm.decision_schema import DECISION_JSON_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ class OpenAIClient(LLMClient):
         # Checked before any SDK object exists; the key is always passed explicitly so
         # the SDK never falls back to reading OPENAI_API_KEY from the environment.
         if not api_key:
-            raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+            raise LLMUnavailableError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
         self._api_key = api_key
         self._model = model
 
@@ -59,8 +59,8 @@ class OpenAIClient(LLMClient):
         never raised on: a refusal (its text), an empty answer or malformed text is
         returned as text (possibly "") so validate_decision_proposal can trigger the
         orchestrator's self-repair retry. An API failure (auth, rate limit, network,
-        timeout) raises a RuntimeError naming only the error type and, when the provider
-        answered, its HTTP status.
+        timeout) raises LLMUnavailableError naming only the error type and, when the
+        provider answered, its HTTP status.
         """
         messages: list[ChatCompletionMessageParam] = []
         if system:
@@ -94,7 +94,9 @@ class OpenAIClient(LLMClient):
                 self._model,
             )
             status_part = f" (HTTP {status_code})" if status_code is not None else ""
-            raise RuntimeError(f"OpenAI API error: {type(exc).__name__}{status_part}") from None
+            raise LLMUnavailableError(
+                f"OpenAI API error: {type(exc).__name__}{status_part}"
+            ) from None
 
         if not response.choices:
             logger.warning("OpenAI response had no choices: model=%s", self._model)

@@ -2,6 +2,24 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 
+class LLMUnavailableError(RuntimeError):
+    """The LLM can't serve this request (#160).
+
+    Raised for misconfiguration when a client is built (a missing key or SDK, an unknown
+    provider) and for provider failures from ``generate()`` (auth, rate limit, network,
+    timeout, a non-2xx answer). The message is sanitized: it names the provider, the
+    error type and at most an HTTP status, never a key, URL or provider response body.
+
+    Deliberately not a ValueError: the cycle route maps ValueError to 404 (unknown
+    agent), and an unavailable LLM must surface as 503 instead.
+    """
+
+    @property
+    def detail(self) -> str:
+        """The HTTP 503 detail shown to the user (already sanitized)."""
+        return f"LLM unavailable: {self}"
+
+
 @dataclass
 class LLMHealth:
     """Result of an active connectivity probe against an LLM backend.

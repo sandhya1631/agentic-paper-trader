@@ -1,12 +1,14 @@
+import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.router import router as accounts_router
+from app.agent.orchestrator import recover_orphaned_cycles
 from app.agent.router import router as agent_router
 from app.agent.scheduler import add_agent_schedule_job, create_scheduler
 from app.auth.router import router as auth_router
@@ -25,11 +27,13 @@ from app.db.schema import (
     ensure_user_scheduler_column,
 )
 from app.db.session import AsyncSessionLocal, engine, get_db
+from app.llm.base import LLMUnavailableError
 from app.llm.router import router as llm_router
 from app.market_data.router import router as market_data_router
 from app.meta.router import router as meta_router
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 tags_metadata = [
@@ -72,6 +76,14 @@ async def lifespan(app: FastAPI):
         await ensure_kill_switch_event_scope_columns(conn)
         await ensure_policy_token_scrubbed(conn)
         await ensure_agent_config_llm_options(conn)
+    # Close out cycles a previous process left in flight (a redeploy or crash mid-cycle,
+    # #185) before any tick can run. Agents whose lock another live process holds are
+    # skipped; their active-cycle gate recovers them later. Never blocks startup.
+    try:
+        async with AsyncSessionLocal() as db:
+            await recover_orphaned_cycles(db)
+    except Exception:
+        logger.exception("Startup cycle recovery failed; the active-cycle gate will retry")
     scheduler = create_scheduler(
         settings,
         include_global_job=settings.scheduler_enabled,
@@ -147,6 +159,14 @@ app.include_router(llm_router)
 app.include_router(market_data_router)
 app.include_router(agent_router)
 app.include_router(meta_router)
+
+
+@app.exception_handler(LLMUnavailableError)
+async def llm_unavailable_handler(_request: Request, exc: LLMUnavailableError) -> JSONResponse:
+    """An unavailable LLM is a 503 on any route (#160), e.g. POST /agent/replay, where it
+    can come from building the client in a dependency. The message is sanitized."""
+    return JSONResponse(status_code=503, content={"detail": exc.detail})
+
 
 @app.get("/", include_in_schema=False)
 async def root():

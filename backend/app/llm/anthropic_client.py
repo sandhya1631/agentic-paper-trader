@@ -3,7 +3,7 @@ from typing import Any
 
 from anthropic import APIError, AsyncAnthropic, NotFoundError
 
-from app.llm.base import LLMClient, LLMHealth
+from app.llm.base import LLMClient, LLMHealth, LLMUnavailableError
 from app.llm.decision_schema import DECISION_JSON_SCHEMA
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ class AnthropicClient(LLMClient):
         # Checked before any SDK object exists; the key is always passed explicitly so
         # the SDK never falls back to reading ANTHROPIC_API_KEY from the environment.
         if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic")
+            raise LLMUnavailableError("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic")
         self._api_key = api_key
         self._model = model
 
@@ -55,7 +55,7 @@ class AnthropicClient(LLMClient):
         structured output. Content is never raised on: a bad or empty answer is
         returned as-is (possibly "") so validate_decision_proposal can trigger the
         orchestrator's self-repair retry. An API failure (auth, rate limit, network)
-        raises a RuntimeError naming only the error type and HTTP status.
+        raises LLMUnavailableError naming only the error type and HTTP status.
         """
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -89,7 +89,7 @@ class AnthropicClient(LLMClient):
                 self._model,
             )
             status_part = f" (HTTP {status_code})" if status_code is not None else ""
-            raise RuntimeError(
+            raise LLMUnavailableError(
                 f"Anthropic API error: {type(exc).__name__}{status_part}"
             ) from None
 

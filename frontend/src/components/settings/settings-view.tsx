@@ -13,6 +13,7 @@ import {
 } from "@/lib/agent/controls-api";
 import type { AgentCycle } from "@/lib/agent/cycles-api";
 import { listCycles } from "@/lib/agent/cycles-api";
+import { describeTriggerError } from "@/lib/agent/trigger-view";
 import {
   connectAccount,
   disconnectAccount,
@@ -346,11 +347,7 @@ function TriggerNowCard({ canRun }: { canRun: boolean }) {
       const cycle = await triggerCycle();
       setResult(cycle);
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) {
-        setMessage({ tone: "neutral", text: "A cycle is already running — try again shortly." });
-      } else {
-        setMessage({ tone: "negative", text: getErrorMessage(error, "Could not trigger a cycle.") });
-      }
+      setMessage(describeTriggerError(error));
     } finally {
       setBusy(false);
     }
