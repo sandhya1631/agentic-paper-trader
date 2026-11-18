@@ -467,6 +467,24 @@ describe("AgentConfigCard: Ollama timeout and keep-alive (#203)", () => {
     expect(mockUpdate).not.toHaveBeenCalled();
   });
 
+  it("still saves the watchlist/mode when the API predates these fields (frontend-first deploy)", async () => {
+    const older: Partial<AgentConfig> = { ...config() };
+    delete older.llm_timeout_seconds;
+    delete older.llm_keep_alive_minutes;
+    delete older.llm_timeout_default_seconds;
+    delete older.llm_keep_alive_default_minutes;
+    mockGetConfig.mockResolvedValue(older as AgentConfig);
+    mockUpdate.mockResolvedValue(older as AgentConfig);
+    render(<AgentConfigCard canEdit />);
+    await screen.findByText("AAPL");
+
+    expect(screen.queryByLabelText(/llm request timeout/i)).toBeNull();
+    fireEvent.change(screen.getByLabelText(/approval mode/i), { target: { value: "OBSERVE_ONLY" } });
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledWith({ approval_mode: "OBSERVE_ONLY" }));
+  });
+
   it("does not offer Save for input that equals the saved value (e.g. 0180)", async () => {
     render(<AgentConfigCard canEdit />);
     await screen.findByLabelText(/llm request timeout/i);

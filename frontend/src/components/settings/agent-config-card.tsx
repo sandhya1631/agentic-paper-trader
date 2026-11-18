@@ -132,8 +132,15 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
 
   const symbolError = symbolInput.trim() ? validateSymbol(symbolInput, draftWatchlist, maxSize) : null;
   const watchlistError = validateWatchlist(draftWatchlist, maxSize);
-  const timeoutError = validateLlmTimeout(draftTimeout, timeoutRange);
-  const keepAliveError = validateKeepAlive(draftKeepAlive, keepAliveRange);
+  // Validate the #203 fields only when the API returned them (a frontend deployed before
+  // its backend gets a config without them) and they apply to the provider, so they can
+  // never block saving the watchlist or approval mode.
+  const ollamaFieldsApply = ollamaOptionsApply(provider);
+  const llmFieldsPresent =
+    config?.llm_timeout_seconds !== undefined && config?.llm_keep_alive_minutes !== undefined;
+  const checkLlmFields = llmFieldsPresent && ollamaFieldsApply;
+  const timeoutError = checkLlmFields ? validateLlmTimeout(draftTimeout, timeoutRange) : null;
+  const keepAliveError = checkLlmFields ? validateKeepAlive(draftKeepAlive, keepAliveRange) : null;
   const patch: AgentConfigUpdate = config
     ? buildConfigPatch(config, {
         watchlist: draftWatchlist,
@@ -147,7 +154,6 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
   const dirty = Object.keys(patch).length > 0 || timeoutError !== null || keepAliveError !== null;
   const canSave =
     canEdit && !saving && dirty && !watchlistError && !timeoutError && !keepAliveError;
-  const ollamaFieldsApply = ollamaOptionsApply(provider);
   const keepAlivePreview = parseWholeNumber(draftKeepAlive);
   const locked = !canEdit || saving;
 
@@ -394,7 +400,7 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
             )}
           </div>
 
-          {config && (
+          {config && llmFieldsPresent && (
             <fieldset className="space-y-3" disabled={locked || !ollamaFieldsApply}>
               <legend className="text-xs font-medium text-muted">Local model (Ollama)</legend>
               {!ollamaFieldsApply && (
