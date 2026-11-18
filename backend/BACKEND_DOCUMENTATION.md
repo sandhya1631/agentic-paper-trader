@@ -584,8 +584,9 @@ any earlier unused one for that user.
 AI provider keys (#191) follow the same pattern through `/accounts/llm`
 (`app/accounts/llm_keys.py`):
 
-1. `POST /accounts/llm {provider, api_key}` (any signed-in user) builds a client
-   for the key and runs the provider's free model check (`health_check`, the same
+1. `POST /accounts/llm {provider, api_key}` (any signed-in user; `provider` is one of
+   `LLM_KEY_PROVIDERS`, `openai` or `anthropic`, which `GET /meta/constants` serves as
+   `llm_key_providers` for the Settings card) builds a client for the key and runs the provider's free model check (`health_check`, the same
    call as `GET /llm/health?probe=true`). A rejected key is a 422 naming only the
    provider, the error type and the HTTP status; nothing is stored. The route's
    request-validation 422s also omit the submitted body (`main.py`).

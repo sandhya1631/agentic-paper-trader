@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { LlmKeyStatus } from "./llm-key-api";
-import { describeLlmKeySource, providerLabel } from "./llm-key-view";
+import { describeLlmKeySource, llmKeyProviderOptions, providerLabel } from "./llm-key-view";
 
 function status(overrides: Partial<LlmKeyStatus>): LlmKeyStatus {
   return {
@@ -51,5 +51,25 @@ describe("providerLabel", () => {
     expect(providerLabel("anthropic")).toBe("Claude");
     expect(providerLabel("ollama")).toBe("Ollama");
     expect(providerLabel("other")).toBe("other");
+  });
+});
+
+describe("llmKeyProviderOptions", () => {
+  it("keeps the backend's /meta/constants order", () => {
+    expect(llmKeyProviderOptions(["openai", "anthropic"])).toEqual(["openai", "anthropic"]);
+    expect(llmKeyProviderOptions(["anthropic", "openai"])).toEqual(["anthropic", "openai"]);
+  });
+
+  it("drops blanks and duplicates", () => {
+    expect(llmKeyProviderOptions(["openai", "", "openai", "anthropic"])).toEqual([
+      "openai",
+      "anthropic",
+    ]);
+  });
+
+  it("is empty when the constants are missing (an older backend or a failed load)", () => {
+    expect(llmKeyProviderOptions(undefined)).toEqual([]);
+    expect(llmKeyProviderOptions(null)).toEqual([]);
+    expect(llmKeyProviderOptions([])).toEqual([]);
   });
 });

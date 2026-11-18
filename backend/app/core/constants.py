@@ -87,6 +87,10 @@ LLM_KEY_DISCONNECTED = "LLM_KEY_DISCONNECTED"
 
 # --- LLM client factory ---
 SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")
+# Providers a user may connect their own API key for (#191): the hosted ones. Ollama is
+# self-hosted, so it has no user key. POST /accounts/llm accepts exactly these, and
+# /meta/constants exposes them for the Settings key card's provider select.
+LLM_KEY_PROVIDERS = ("openai", "anthropic")
 # Whose key a cycle or replay used, recorded in the cycle snapshot (#191).
 LLM_KEY_SOURCE_USER = "USER"
 LLM_KEY_SOURCE_SERVER = "SERVER"

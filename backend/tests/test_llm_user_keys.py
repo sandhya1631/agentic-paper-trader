@@ -11,6 +11,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import get_args
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import openai
@@ -20,16 +21,20 @@ from httpx import AsyncClient
 from sqlalchemy import select
 
 from app.accounts import llm_keys
+from app.accounts import router as accounts_router
 from app.accounts.credential_vault import decrypt_credential
+from app.accounts.schemas import LLMKeyCreate
 from app.agent import orchestrator
 from app.agent.orchestrator import run_agent_cycle, run_watchlist_cycles
 from app.core.config import get_settings
 from app.core.constants import (
     LLM_KEY_CONNECTED,
     LLM_KEY_DISCONNECTED,
+    LLM_KEY_PROVIDERS,
     LLM_KEY_SOURCE_SERVER,
     LLM_KEY_SOURCE_USER,
     LLM_UNAVAILABLE,
+    SUPPORTED_PROVIDERS,
 )
 from app.db.enums import ApprovalMode, CycleStatus, CycleTrigger, UserRole
 from app.db.models import (
@@ -196,6 +201,20 @@ async def _audit_text() -> str:
     async with TestSessionLocal() as db:
         events = (await db.execute(select(AuditEvent))).scalars().all()
         return json.dumps([[e.event_type, e.entity_type, e.details] for e in events])
+
+
+# --- Providers -----------------------------------------------------------------------
+
+
+def test_the_key_providers_are_one_list_everywhere():
+    """POST /accounts/llm accepts exactly LLM_KEY_PROVIDERS (also served by
+    /meta/constants to the Settings card), each a supported provider with a label for
+    the 422 detail. Ollama is self-hosted: no user key."""
+    provider_field = LLMKeyCreate.model_fields["provider"].annotation
+    assert get_args(provider_field) == LLM_KEY_PROVIDERS
+    assert set(LLM_KEY_PROVIDERS) <= set(SUPPORTED_PROVIDERS)
+    assert "ollama" not in LLM_KEY_PROVIDERS
+    assert set(accounts_router._PROVIDER_LABELS) == set(LLM_KEY_PROVIDERS)
 
 
 # --- Vault ---------------------------------------------------------------------------

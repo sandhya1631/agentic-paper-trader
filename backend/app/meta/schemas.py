@@ -24,3 +24,5 @@ class ConstantsRead(APIModel):
     # Inclusive [min, max] for the agent's Ollama timeout and keep-alive (#203).
     llm_timeout_seconds_range: list[int]
     llm_keep_alive_minutes_range: list[int]
+    # Providers a user may connect their own API key for (#191), in display order.
+    llm_key_providers: list[str]

@@ -4,8 +4,9 @@
  */
 import { api } from "@/lib/api/client";
 
-/** Providers a user can connect a key for (the backend's `LLMKeyCreate.provider`). */
-export type LlmKeyProvider = "openai" | "anthropic";
+/** A provider a user can connect a key for: one of GET /meta/constants `llm_key_providers`
+ * (the backend validates it), so the frontend never hard-codes the list. */
+export type LlmKeyProvider = string;
 
 export interface LlmKey {
   provider: LlmKeyProvider;

@@ -9,6 +9,7 @@ vi.mock("@/lib/accounts/llm-key-api", () => ({
   connectLlmKey: vi.fn(),
   disconnectLlmKey: vi.fn(),
 }));
+vi.mock("@/lib/meta/meta-api", () => ({ getConstants: vi.fn() }));
 
 import {
   connectLlmKey,
@@ -16,11 +17,18 @@ import {
   getLlmKeyStatus,
   type LlmKeyStatus,
 } from "@/lib/accounts/llm-key-api";
+import { getConstants, type Constants } from "@/lib/meta/meta-api";
 import { LlmKeyCard } from "./llm-key-card";
 
 const mockGetStatus = vi.mocked(getLlmKeyStatus);
 const mockConnect = vi.mocked(connectLlmKey);
 const mockDisconnect = vi.mocked(disconnectLlmKey);
+const mockConstants = vi.mocked(getConstants);
+
+/** /meta/constants with only the field this card reads (#191). */
+function constantsWith(llm_key_providers?: string[]): Constants {
+  return { llm_key_providers } as Constants;
+}
 
 const SERVER: LlmKeyStatus = {
   connected: false,
@@ -48,6 +56,8 @@ beforeEach(() => {
   mockGetStatus.mockReset();
   mockConnect.mockReset();
   mockDisconnect.mockReset();
+  mockConstants.mockReset();
+  mockConstants.mockResolvedValue(constantsWith(["openai", "anthropic"]));
 });
 afterEach(() => cleanup());
 
@@ -78,7 +88,8 @@ describe("LlmKeyCard", () => {
     });
     render(<LlmKeyCard />);
 
-    fireEvent.change(await screen.findByLabelText(/^provider$/i), {
+    await screen.findByRole("option", { name: "Claude" });
+    fireEvent.change(screen.getByLabelText(/^provider$/i), {
       target: { value: "anthropic" },
     });
     fireEvent.change(keyField(), { target: { value: `  ${KEY}  ` } });
@@ -127,6 +138,44 @@ describe("LlmKeyCard", () => {
     expect(
       await screen.findByText("Cycles use: the server's key (OpenAI, gpt-4o-mini)"),
     ).toBeTruthy();
+  });
+
+  it("offers the providers from /meta/constants, in the backend's order", async () => {
+    mockGetStatus.mockResolvedValue(SERVER);
+    mockConstants.mockResolvedValue(constantsWith(["anthropic", "openai"]));
+    mockConnect.mockResolvedValue({
+      provider: "anthropic",
+      is_connected: true,
+      last_verified_at: USER.last_verified_at,
+    });
+    render(<LlmKeyCard />);
+
+    await screen.findByRole("option", { name: "Claude" });
+    const options = screen.getAllByRole("option") as HTMLOptionElement[];
+    expect(options.map((o) => [o.value, o.textContent])).toEqual([
+      ["anthropic", "Claude"],
+      ["openai", "OpenAI"],
+    ]);
+    // Untouched, the select holds the backend's first provider, and that is what's sent.
+    fireEvent.change(keyField(), { target: { value: KEY } });
+    fireEvent.click(screen.getByRole("button", { name: /connect key/i }));
+    await waitFor(() =>
+      expect(mockConnect).toHaveBeenCalledWith({ provider: "anthropic", api_key: KEY }),
+    );
+  });
+
+  it("can't connect when the backend sends no providers", async () => {
+    mockGetStatus.mockResolvedValue(SERVER);
+    mockConstants.mockResolvedValue(constantsWith(undefined));
+    render(<LlmKeyCard />);
+
+    expect(
+      await screen.findByText("Could not load the AI providers. Reload the page to connect a key."),
+    ).toBeTruthy();
+    fireEvent.change(keyField(), { target: { value: KEY } });
+    const connect = screen.getByRole("button", { name: /connect key/i }) as HTMLButtonElement;
+    expect(connect.disabled).toBe(true);
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
   });
 
   it("says cycles can't run when there is no key and no server fallback", async () => {

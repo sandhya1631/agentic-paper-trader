@@ -5,7 +5,7 @@ vi.mock("@/lib/api/client", () => ({
 }));
 
 import { api } from "@/lib/api/client";
-import { getConstants } from "./meta-api";
+import { getConstants, type Constants } from "./meta-api";
 
 const mockedApi = vi.mocked(api);
 
@@ -13,7 +13,7 @@ beforeEach(() => mockedApi.get.mockReset());
 
 describe("getConstants", () => {
   it("fetches /meta/constants", async () => {
-    const constants = {
+    const constants: Constants = {
       currency: "USD",
       cycle_trigger: ["MANUAL", "SCHEDULED"],
       cycle_status: ["COMPLETED", "FAILED"],
@@ -23,6 +23,7 @@ describe("getConstants", () => {
       approval_status: ["PENDING", "APPROVED", "REJECTED"],
       max_watchlist_size: 20,
       default_watchlist: ["AAPL", "NVDA", "SPY"],
+      llm_key_providers: ["openai", "anthropic"],
     };
     mockedApi.get.mockResolvedValue(constants);
 
@@ -30,5 +31,7 @@ describe("getConstants", () => {
 
     expect(mockedApi.get).toHaveBeenCalledWith("/meta/constants");
     expect(result).toBe(constants);
+    // The AI key card's provider choices (#191) come from here, not a frontend list.
+    expect(result.llm_key_providers).toEqual(["openai", "anthropic"]);
   });
 });

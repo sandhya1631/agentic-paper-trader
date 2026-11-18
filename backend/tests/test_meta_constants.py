@@ -5,7 +5,7 @@ import pytest
 from httpx import AsyncClient
 
 from app.core import constants
-from app.core.constants import DEFAULT_WATCHLIST, MAX_WATCHLIST_SIZE
+from app.core.constants import DEFAULT_WATCHLIST, LLM_KEY_PROVIDERS, MAX_WATCHLIST_SIZE
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -40,6 +40,13 @@ async def test_get_constants_matches_backend_enums(client: AsyncClient):
     assert body["max_watchlist_size"] == MAX_WATCHLIST_SIZE
     # The fallback watchlist the Market page uses before the user has an agent (#165).
     assert body["default_watchlist"] == DEFAULT_WATCHLIST
+    # The providers the Settings AI key card offers (#191), in order; never Ollama.
+    assert body["llm_key_providers"] == ["openai", "anthropic"] == list(LLM_KEY_PROVIDERS)
+
+
+def test_llm_key_providers_come_from_the_one_constant():
+    """The /meta/constants providers are core.constants.LLM_KEY_PROVIDERS, imported (#191)."""
+    assert meta_router.LLM_KEY_PROVIDERS is constants.LLM_KEY_PROVIDERS
 
 
 def test_default_watchlist_comes_from_the_one_constant():
