@@ -2,6 +2,8 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select, text
@@ -166,6 +168,20 @@ async def llm_unavailable_handler(_request: Request, exc: LLMUnavailableError) -
     """An unavailable LLM is a 503 on any route (#160), e.g. POST /agent/replay, where it
     can come from building the client in a dependency. The message is sanitized."""
     return JSONResponse(status_code=503, content={"detail": exc.detail})
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """FastAPI's default 422 echoes the submitted input; for POST /accounts/llm that
+    can be the user's API key (e.g. a missing `provider` echoes the whole body), so keep
+    only each error's location, message and type there (#191). Other routes: default."""
+    if request.url.path == "/accounts/llm":
+        errors = [
+            {"type": err.get("type"), "loc": err.get("loc"), "msg": err.get("msg")}
+            for err in exc.errors()
+        ]
+        return JSONResponse(status_code=422, content={"detail": errors})
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.get("/", include_in_schema=False)

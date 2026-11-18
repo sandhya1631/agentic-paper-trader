@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.core.constants import (
     CURRENCY,
     DEFAULT_WATCHLIST,
+    LLM_KEY_PROVIDERS,
     MAX_WATCHLIST_SIZE,
     OLLAMA_KEEP_ALIVE_MINUTES_RANGE,
     OLLAMA_TIMEOUT_SECONDS_RANGE,
@@ -40,4 +41,5 @@ async def get_constants() -> ConstantsRead:
         default_watchlist=list(DEFAULT_WATCHLIST),
         llm_timeout_seconds_range=list(OLLAMA_TIMEOUT_SECONDS_RANGE),
         llm_keep_alive_minutes_range=list(OLLAMA_KEEP_ALIVE_MINUTES_RANGE),
+        llm_key_providers=list(LLM_KEY_PROVIDERS),
     )

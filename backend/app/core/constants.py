@@ -81,9 +81,19 @@ POLICY_VERSION = "POLICY-1.0"
 MANUAL_ORDER_SUBMITTED = "MANUAL_ORDER_SUBMITTED"
 MANUAL_ORDER_BLOCKED = "MANUAL_ORDER_BLOCKED"  # the kill switch refused it (423)
 MANUAL_ORDER_FAILED = "MANUAL_ORDER_FAILED"  # the broker call raised (502)
+# A user connected or revoked their own AI provider key (#191); details name the provider.
+LLM_KEY_CONNECTED = "LLM_KEY_CONNECTED"
+LLM_KEY_DISCONNECTED = "LLM_KEY_DISCONNECTED"
 
 # --- LLM client factory ---
 SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")
+# Providers a user may connect their own API key for (#191): the hosted ones. Ollama is
+# self-hosted, so it has no user key. POST /accounts/llm accepts exactly these, and
+# /meta/constants exposes them for the Settings key card's provider select.
+LLM_KEY_PROVIDERS = ("openai", "anthropic")
+# Whose key a cycle or replay used, recorded in the cycle snapshot (#191).
+LLM_KEY_SOURCE_USER = "USER"
+LLM_KEY_SOURCE_SERVER = "SERVER"
 # Ollama request timeout and model keep-alive (#203): the server defaults are Settings
 # (OLLAMA_TIMEOUT_SECONDS, OLLAMA_KEEP_ALIVE_MINUTES); an agent may override them within
 # these inclusive bounds. Keep-alive -1 keeps the model loaded; 0 unloads it after each

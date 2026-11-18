@@ -74,6 +74,9 @@ class Settings(BaseSettings):
 
     # LLM Client Factory — switch providers via .env, no code changes.
     llm_provider: str = "ollama"  # "openai" | "ollama" | "anthropic"
+    # #191: a user with no AI key of their own uses the server's LLM configuration. When
+    # false, their cycles and replays fail with LLM_UNAVAILABLE until they connect a key.
+    llm_server_key_fallback: bool = True
     openai_model: str = "gpt-4o-mini"
     anthropic_model: str = "claude-opus-5-5"
     ollama_base_url: str = "http://localhost:11434"

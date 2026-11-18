@@ -119,6 +119,7 @@ Important settings:
 | `ALPACA_API_KEY`, `ALPACA_API_SECRET` | Server-level credentials used by market-data and scheduler clock checks. |
 | `ALPACA_PAPER_BASE_URL` | Must be `https://paper-api.alpaca.markets` with optional `/v2`. |
 | `LLM_PROVIDER` | `ollama`, `openai` or `anthropic`; defaults to `ollama`. |
+| `LLM_SERVER_KEY_FALLBACK` | Defaults to true: a user with no AI key of their own (#191) uses the server's LLM configuration. False: their cycles and replays fail with `LLM_UNAVAILABLE` (503) until they connect a key. |
 | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | Local LLM connection; defaults to `http://localhost:11434` and `llama3.1`. |
 | `OLLAMA_TEMPERATURE` | Ollama generation temperature; defaults to `0.1` for low-variance decisions. |
 | `OLLAMA_NUM_CTX` | Ollama context-window size; defaults to 4096 tokens. |
@@ -206,6 +207,14 @@ The database contains Fernet ciphertext, not the API key or secret. The
 `is_paper = true` is enforced by a database check constraint. A unique
 `(user_id, provider)` constraint prevents duplicate connected rows.
 
+### 4.2.1 `llm_credentials` (#191)
+
+A user's own OpenAI or Claude key: `id`, `user_id` (unique: one row per user),
+`provider` (`openai` | `anthropic`), `encrypted_api_key` (Fernet, same
+`CREDENTIAL_ENCRYPTION_KEY`), `is_connected`, `last_verified_at`, `created_at`,
+`updated_at`. Reconnecting replaces the provider and key; revoking clears the
+ciphertext and keeps the row. `create_all` adds the table (no `ensure_*` patch).
+
 ### 4.3 `policy_sets`
 
 Stores policy-set metadata:
@@ -233,8 +242,9 @@ Stores how an agent is configured:
 - `daily_loss_limit`
 - `approval_mode` (`OBSERVE_ONLY`, `REQUIRED`, or `AUTO`)
 - `enabled`
-- `model_provider`
-- `model_name`
+- `model_provider`, `model_name`: unused (#191). Nothing reads them and provisioning
+  writes placeholders; each cycle's `snapshot_json.observability` records the provider,
+  model and key source it actually used.
 - `llm_timeout_seconds`, `llm_keep_alive_minutes` (#203): nullable per-agent overrides
   of the Ollama request timeout and model keep-alive. NULL = follow the server
   defaults `OLLAMA_TIMEOUT_SECONDS` / `OLLAMA_KEEP_ALIVE_MINUTES`, so changing the env
@@ -412,6 +422,7 @@ Event-type names live in `app/core/constants.py` (except
 | `MANUAL_ORDER_SUBMITTED` | `POST /api/v1/broker/orders` when Alpaca accepts the order (201) | `manual_order` / null | order fields (below), `outcome: "SUBMITTED"`, `broker_order_id`, `broker_status` |
 | `MANUAL_ORDER_BLOCKED` | `POST /api/v1/broker/orders` refused by the kill switch (423) | `manual_order` / null | order fields, `outcome: "BLOCKED"`, `reason` |
 | `MANUAL_ORDER_FAILED` | `POST /api/v1/broker/orders` when the Alpaca call raises (502) | `manual_order` / null | order fields, `outcome: "FAILED"`, `broker_error` (the Alpaca key and secret are redacted if echoed) |
+| `LLM_KEY_CONNECTED` / `LLM_KEY_DISCONNECTED` | `POST` / `DELETE /accounts/llm` (#191) | `llm_credential` / the row id | `{"provider": ...}`, never key material |
 
 The manual-order fields are `symbol`, `side`, `quantity`, `order_type`,
 `time_in_force`, `limit_price` (null for market orders) and `client_order_id`.
@@ -570,6 +581,30 @@ any earlier unused one for that user.
    an `AlpacaClient`.
 6. Credentials are not sent to the frontend, the LLM, or logs by design.
 
+AI provider keys (#191) follow the same pattern through `/accounts/llm`
+(`app/accounts/llm_keys.py`):
+
+1. `POST /accounts/llm {provider, api_key}` (any signed-in user; `provider` is one of
+   `LLM_KEY_PROVIDERS`, `openai` or `anthropic`, which `GET /meta/constants` serves as
+   `llm_key_providers` for the Settings card) builds a client for the key and runs the provider's free model check (`health_check`, the same
+   call as `GET /llm/health?probe=true`). A rejected key is a 422 naming only the
+   provider, the error type and the HTTP status; nothing is stored. The route's
+   request-validation 422s also omit the submitted body (`main.py`).
+2. A verified key is encrypted into `llm_credentials`, with a
+   `LLM_KEY_CONNECTED` audit row. `GET /accounts/llm` always answers 200 with
+   `{connected, provider, last_verified_at, effective_source, effective_provider,
+   effective_model}`; `DELETE` revokes (`LLM_KEY_DISCONNECTED`).
+3. Each cycle resolves its client from the agent **owner's** key
+   (`resolve_agent_llm`), with the server's model for that provider
+   (`OPENAI_MODEL` / `ANTHROPIC_MODEL`, which must support schema-forced JSON);
+   replay uses the caller's key. The client is built per cycle and never cached.
+   With no key the server's cached client is used, unless
+   `LLM_SERVER_KEY_FALLBACK=false`, which fails the cycle with `LLM_UNAVAILABLE`
+   before any LLM call (a manual cycle also skips its market-data and broker
+   reads; a sweep has already done them once). A key revoked or replaced during
+   a sweep applies from the next symbol. A rejected user key also ends
+   `LLM_UNAVAILABLE` and never falls back to the server key.
+
 ### 5.3 Market-data flow
 
 1. `MarketDataCollector` asks Alpaca for up to `DEFAULT_BAR_LIMIT` bars
@@ -629,7 +664,9 @@ model-facing payload under the provider window while preserving decision-critica
 fields like the target symbol, the latest bars, and the account status. The
 persisted snapshot also contains an `observability` object with context and
 system-prompt character counts, approximate input tokens, remaining context,
-forward model-window capacity, symbol count, bars used, and account-data status.
+forward model-window capacity, symbol count, bars used, and account-data status,
+plus the `llm_provider`, `llm_model` and `llm_key_source` (`USER` or `SERVER`, #191)
+the cycle ran on; the model window follows that provider, not `LLM_PROVIDER`.
 These fields are audit measurements and are not included in the model input.
 Use `GET /agent/cycles/{cycle_id}/token-usage` to retrieve these measurements
 without downloading the full cycle response. The endpoint is authenticated and
@@ -801,8 +838,10 @@ requiring live account evidence should HOLD rather than infer balances.
 
 ### Step 4: Ask the LLM
 
-Set status to `REASONING`, load the provider-neutral client, and send the
-context plus versioned system prompt. Ollama requests use the configured
+Set status to `REASONING` and send the context plus versioned system prompt to
+the provider-neutral client. That client was resolved when the cycle started
+collecting (#191): the agent owner's own OpenAI/Claude key if connected, else the
+server's configuration (see 5.2). Ollama requests use the configured
 temperature and context window and request JSON mode by default.
 
 If the LLM can't serve the request, the client raises `LLMUnavailableError` (#160):
@@ -1328,6 +1367,8 @@ can reach Redis.
 - `POST /accounts/alpaca`
 - `GET /accounts/alpaca`
 - `DELETE /accounts/alpaca`
+- `POST /accounts/llm`, `GET /accounts/llm`, `DELETE /accounts/llm` (the user's own
+  OpenAI/Claude key, #191)
 
 ### Market data and LLM
 

@@ -20,6 +20,7 @@ from httpx import AsyncClient
 from sqlalchemy import select, text
 
 from app.agent import orchestrator
+from app.agent import router as agent_router
 from app.agent.orchestrator import run_agent_cycle, run_watchlist_cycles
 from app.core.config import Settings
 from app.core.constants import LLM_UNAVAILABLE
@@ -30,7 +31,6 @@ from app.llm import ollama_client as ollama_module
 from app.llm.base import LLMUnavailableError
 from app.llm.factory import create_llm_client, get_llm_client
 from app.llm.ollama_client import OllamaClient
-from app.main import app
 
 PASSWORD = "S3cure-Password!"
 CANARY_KEY = "sk-canary-LLM160-0123456789abcdefX4LM"
@@ -421,17 +421,15 @@ async def test_replay_with_a_misconfigured_llm_returns_503(client: AsyncClient, 
 
 
 @pytest.mark.asyncio
-async def test_replay_with_a_failing_provider_returns_503(client: AsyncClient):
+async def test_replay_with_a_failing_provider_returns_503(client: AsyncClient, monkeypatch):
     auth, _agent_id = await _operator_with_agent(client)
     llm = MagicMock()
     llm.generate = AsyncMock(
         side_effect=LLMUnavailableError("OpenAI API error: RateLimitError (HTTP 429)")
     )
-    app.dependency_overrides[get_llm_client] = lambda: llm
-    try:
-        response = await client.post("/agent/replay", headers=auth, json=_replay_body())
-    finally:
-        app.dependency_overrides.pop(get_llm_client, None)
+    # The caller has no key of their own, so replay uses the server's client (#191).
+    monkeypatch.setattr(agent_router, "get_llm_client", lambda: llm)
+    response = await client.post("/agent/replay", headers=auth, json=_replay_body())
 
     assert response.status_code == 503
     assert response.json()["detail"] == (

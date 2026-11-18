@@ -12,7 +12,8 @@ Orchestrates automated and manual agent cycles:
   3. Collects OHLCV market bars for the watchlist and calculates indicators.
   4. Builds sanitized context via `build_agent_context`.
   5. Retrieves the versioned system prompt (`S-001`).
-  6. Queries the configured LLM client (Ollama / OpenAI via `get_llm_client`).
+  6. Queries the LLM: the agent owner's own OpenAI/Claude key if connected, else the
+     server's configuration (`get_llm_client`; #191, `app/accounts/llm_keys.py`).
   7. Validates the decision output via `validate_decision_proposal`.
   8. On JSON/schema validation error, attempts 1 self-repair prompt retry.
   9. If self-repair also fails, the cycle ends as FAILED (LLM_OUTPUT_INVALID); nothing is guessed.
@@ -33,6 +34,7 @@ from sqlalchemy import BigInteger, bindparam, case, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm.attributes import flag_modified, set_committed_value
 
+from app.accounts.llm_keys import EffectiveLLM, resolve_agent_llm
 from app.agent.approval import (
     evaluate_and_submit_cycle_trade,
     expire_pending_approvals,
@@ -181,7 +183,8 @@ class CycleOverlapError(Exception):
 
 
 def _agent_llm_client(agent: AgentConfig) -> LLMClient:
-    """The LLM client for one of this agent's cycles (#203).
+    """The server's LLM client for one of this agent's cycles (#203), used when the
+    owner has no AI key of their own (#191, the `server_client` of `resolve_agent_llm`).
 
     For Ollama, a fresh client derived from the cached server-wide one, carrying the
     agent's effective request timeout and model keep-alive; both the first call and the
@@ -609,6 +612,18 @@ async def _run_agent_cycle(
         cycle.status = CycleStatus.COLLECTING
         await db.commit()
 
+        # The agent owner's own AI key, else the server's LLM (#191). Resolved first, so
+        # with no key and LLM_SERVER_KEY_FALLBACK off the cycle fails (LLM_UNAVAILABLE)
+        # before any LLM call (and, for a manual cycle, before any market-data or broker
+        # read; a sweep has already read both once). Built per cycle, never shared. The
+        # server fallback still carries this agent's Ollama timeout / keep-alive (#203).
+        llm_used: EffectiveLLM | None = None
+        if llm_client is None:
+            owner_llm = await resolve_agent_llm(
+                db, agent, server_client=lambda: _agent_llm_client(agent)
+            )
+            llm_client, llm_used = owner_llm.client, owner_llm.effective
+
         # 4. Collect Market Data (reuse caller-provided bars for a watchlist sweep)
         symbols = normalize_watchlist(agent.watchlist)
         if bars_per_symbol is None:
@@ -658,9 +673,9 @@ async def _run_agent_cycle(
             context["decision_target"] = target_symbol
 
         settings = get_settings()
-        model_window_tokens = (
-            settings.ollama_num_ctx if settings.llm_provider.lower() == "ollama" else 128000
-        )
+        # The provider this cycle actually uses (a user's key overrides LLM_PROVIDER).
+        llm_provider = llm_used.provider if llm_used else settings.llm_provider.lower()
+        model_window_tokens = settings.ollama_num_ctx if llm_provider == "ollama" else 128000
         selected_strategy = agent.strategy_version
         selection_reason = "User selected this fixed strategy."
         if agent.strategy_version == DYNAMIC_STRATEGY_VERSION:
@@ -711,6 +726,11 @@ async def _run_agent_cycle(
                 context.get("context_window_guard", {}).get("truncated")
             ),
         }
+        if llm_used is not None:
+            # What this cycle ran on (#191): provider, model and whose key, never the key.
+            context["observability"]["llm_provider"] = llm_used.provider
+            context["observability"]["llm_model"] = llm_used.model
+            context["observability"]["llm_key_source"] = llm_used.key_source
         logger.info(
             "Prepared agent context for cycle %s: %s chars, ~%s tokens, %s bars, model window=%s",
             cycle.id,
@@ -727,8 +747,6 @@ async def _run_agent_cycle(
         # 6. Execute LLM Call
         cycle.status = CycleStatus.REASONING
         await db.commit()
-        if llm_client is None:
-            llm_client = _agent_llm_client(agent)
         if isinstance(llm_client, OllamaClient):
             # Record the request options this cycle used (#203): they vary per agent and
             # can change between cycles. Not part of the model's input (already built).

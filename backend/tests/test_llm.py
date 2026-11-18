@@ -587,8 +587,9 @@ async def test_openai_health_check_unreachable_does_not_raise():
 
     assert health.reachable is False
     assert health.model_available is False
-    # Type name only: this detail is shown in the UI's header LLM pill.
-    assert health.detail == "OpenAI API unreachable: AuthenticationError"
+    # Type name and HTTP status only: this detail is shown in the UI's header LLM pill
+    # and when a user's own key is rejected (#191).
+    assert health.detail == "OpenAI API unreachable: AuthenticationError (HTTP 401)"
     assert not any(fragment in health.detail for fragment in CANARY_FRAGMENTS)
 
 

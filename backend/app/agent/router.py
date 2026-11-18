@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.accounts.llm_keys import resolve_user_llm
 from app.agent import orchestrator
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
@@ -64,7 +65,7 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
-from app.llm.base import LLMClient, LLMUnavailableError
+from app.llm.base import LLMUnavailableError
 from app.llm.factory import get_llm_client
 from app.risk.kill_switch import (
     EnvironmentKillSwitchOverrideError,
@@ -565,16 +566,20 @@ async def trigger_manual_cycle(
 )
 async def run_replay(
     body: ReplayRequest,
-    _current_user: User = Depends(get_current_user),
-    llm_client: LLMClient = Depends(get_llm_client),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ) -> ReplayMetricsRead:
-    """Run offline strategy evaluation using the configured LLM provider.
+    """Run offline strategy evaluation on the caller's own AI key, else the server's LLM.
 
     The submitted bars are evaluated in memory. This endpoint never creates
     cycles, reads broker state, submits orders, or changes portfolio state.
-    An unavailable LLM (building the client or any generate call) answers 503 through
-    the app-wide LLMUnavailableError handler in main.py (#160).
+    An unavailable LLM (no key with the server fallback off, building the client or any
+    generate call) answers 503 through the app-wide LLMUnavailableError handler in
+    main.py (#160, #191).
     """
+    llm_client = (
+        await resolve_user_llm(db, current_user.id, server_client=get_llm_client)
+    ).client
     try:
         samples = [
             ReplaySample(

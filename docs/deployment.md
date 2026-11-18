@@ -37,14 +37,16 @@ check, pause or roll back the agent during the Sprint 4 trading run (#187).
 | `DATABASE_URL` | Supabase Postgres, async driver (`postgresql+asyncpg://...`) | Connection mode: see "Supabase" below |
 | `JWT_SECRET` | Signs login tokens (HS256) | Changing it signs everyone out |
 | `JWT_EXPIRATION_MINUTES` | Login lifetime; default 30 | To confirm whether it is overridden |
-| `CREDENTIAL_ENCRYPTION_KEY` | Fernet key that encrypts every user's stored Alpaca keys | **Never change it.** A new key orphans all stored keys; every user would have to reconnect |
+| `CREDENTIAL_ENCRYPTION_KEY` | Fernet key that encrypts every user's stored Alpaca keys and their own AI provider keys (#191) | **Never change it.** A new key orphans all stored keys; every user would have to reconnect |
 | `CORS_ALLOWED_ORIGINS` | JSON list of browser origins allowed to call the API | Must include the Vercel origin (it did when checked on 2026-11-10) |
 | `FRONTEND_BASE_URL` | Base of the password-reset link written to the log | To confirm |
 | `ALPACA_API_KEY`, `ALPACA_API_SECRET` | Server Alpaca **paper** keys: market data (bars) and the scheduler's market clock. Orders and policies use each user's own keys (section 3) | Missing → every cycle sees `NO_DATA` and ticks fail `market_clock_check_failed` |
 | `ALPACA_PAPER_BASE_URL` | Must be the paper endpoint; the app refuses anything else (`core/paper_guard.py`) | Default is correct; leave it unset or paper |
 | `LLM_PROVIDER` | `openai`, `anthropic` or `ollama` | `openai` (seen in `/llm/health` on 2026-11-10) |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI key and model. The model must support strict `json_schema` output and `temperature` | `gpt-4o-mini` (seen on 2026-11-10) |
-| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Only if `LLM_PROVIDER=anthropic` | Not used in production |
+| `LLM_SERVER_KEY_FALLBACK` | Whether a user with no AI provider key of their own runs on the server's LLM (`LLM_PROVIDER` and its key); default `true`. When `false`, such a user's cycles and replays fail with `LLM_UNAVAILABLE` until they connect their own key (section 3; #191) | New with #191; leave it unset to keep the default (decided: no user key means the server key) |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Only if `LLM_PROVIDER=anthropic`. `ANTHROPIC_MODEL` is also the model for users' own Claude keys | Not used in production |
+| `OLLAMA_TIMEOUT_SECONDS`, `OLLAMA_KEEP_ALIVE_MINUTES` | Server defaults for each agent's Ollama request timeout and model keep-alive (#203); an operator can override both per agent in Settings → Agent configuration | Not used in production (only with `LLM_PROVIDER=ollama`) |
 | `KILL_SWITCH_ENABLED` | `true` forces the kill switch ON regardless of the UI (section 7) | Normally unset or `false` |
 | `MAX_ORDERS_PER_DAY` | P-012 cap per US/Eastern day; default 10 | To confirm whether it is overridden |
 | `SCHEDULER_EXECUTOR` | `inline` runs scheduled ticks inside the API process (#184); `celery` (default) needs a separate Celery worker | **Must be `inline`** in production (decision: no paid Render worker). To confirm it is set |
@@ -99,6 +101,14 @@ shown again. Without a user's own keys, the LLM sees `account_data: UNAVAILABLE`
 every cycle HOLDs, and previews or orders can't run. Connect the keys **before** the
 first Trigger Now: a manual run without keys creates a placeholder account that only a
 later Connect overwrites.
+
+**AI provider keys (optional, #191).** A user can connect their own OpenAI or Claude key
+in **Settings → AI provider key**. It is checked with the provider, encrypted with
+`CREDENTIAL_ENCRYPTION_KEY` and never shown again. Their agent's cycles and their replays
+then bill that key, with the server's model for that provider (`OPENAI_MODEL` /
+`ANTHROPIC_MODEL`). Without one they use the server's key while
+`LLM_SERVER_KEY_FALLBACK` is on (the default). The card says which key cycles use; each
+cycle's snapshot records it as `llm_key_source` (`USER` or `SERVER`), never the key.
 
 ## 4. Scheduled trading in production
 
@@ -236,7 +246,7 @@ daily_cost      ≈ calls_per_day × (input_tokens × input_price + output_token
 | Trigger Now returns 409 | A cycle is still active or parked for approval | Approve, reject or wait. A cycle orphaned by a restart is closed out on the next run (section 4) |
 | Every cycle HOLDs | No user Alpaca keys (`account_data: UNAVAILABLE`), or the market is closed | Settings → Connect; check the time |
 | No scheduled cycles during market hours | The instance slept (keep-alive runs missing), `SCHEDULER_EXECUTOR` isn't `inline`, the kill switch is on, or the schedule is stopped | Section 4 (check the keep-alive runs in Actions); Settings |
-| Trigger Now returns 503 with the provider's error, e.g. "OpenAI API error: RateLimitError (HTTP 429)" | LLM misconfigured, unreachable or timed out; the cycle ends `FAILED` with `failure_code = LLM_UNAVAILABLE` (#160) | `GET /llm/health?probe=true` |
+| Trigger Now returns 503 with the provider's error, e.g. "OpenAI API error: RateLimitError (HTTP 429)" | LLM misconfigured, unreachable or timed out; the cycle ends `FAILED` with `failure_code = LLM_UNAVAILABLE` (#160) | `GET /llm/health?probe=true` checks only the server's key. If the user connected their own key (Settings → AI provider key), check, reconnect or disconnect that one |
 
 Related: `docs/demo-runbook.md` (local demo), `docs/integration-tests.md` (live-service
 tests), `backend/BACKEND_DOCUMENTATION.md` (internals).

@@ -21,6 +21,8 @@ export interface Constants {
   llm_timeout_seconds_range?: number[];
   /** Inclusive [min, max] for an agent's model keep-alive, in minutes (-1 = keep loaded). */
   llm_keep_alive_minutes_range?: number[];
+  /** Providers a user may connect their own API key for, in display order (#191). */
+  llm_key_providers?: string[];
 }
 
 export function getConstants(): Promise<Constants> {

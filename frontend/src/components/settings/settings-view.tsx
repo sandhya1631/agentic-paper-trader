@@ -32,6 +32,7 @@ import { formatDateTime } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { SchedulerActivity } from "@/components/observability/scheduler-activity";
 import { AgentConfigCard } from "@/components/settings/agent-config-card";
+import { LlmKeyCard } from "@/components/settings/llm-key-card";
 import { ReplayCard } from "@/components/settings/replay-card";
 
 export function SettingsView() {
@@ -53,6 +54,7 @@ export function SettingsView() {
         <p className="text-sm text-muted">Agent controls and account configuration.</p>
       </section>
       <AccountCard />
+      <LlmKeyCard />
       {/* Mirror the backend operator gate (off until the role loads); its 403 is authoritative. */}
       <AgentConfigCard canEdit={canOperate} />
       <ReplayCard canRun={canOperate} />
