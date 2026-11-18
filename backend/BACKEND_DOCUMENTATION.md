@@ -253,7 +253,8 @@ returns the **effective** timeout and keep-alive (the override, else the server
 default) plus the server defaults (`llm_timeout_default_seconds`,
 `llm_keep_alive_default_minutes`); the bounds are in `GET /meta/constants`. A
 changed value is audited as `AGENT_CONFIG_UPDATED` from the effective old value;
-`null` is rejected, so an override is changed by setting a new value. Every
+`null` is rejected; setting a value equal to the server default stores NULL again, so
+the agent follows later changes to the default. Every
 Ollama call of that agent's cycles (first try and self-repair, manual and
 scheduled, Celery or inline) uses them through `orchestrator._agent_llm_client`;
 replay has no agent and uses the server defaults.

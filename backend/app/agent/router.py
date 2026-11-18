@@ -416,16 +416,17 @@ async def update_agent_config(
         }
         agent.approval_mode = body.approval_mode
     # #203: the Ollama timeout / keep-alive. A value equal to the server default is stored
-    # as NULL ("follow the default"), so a later env change reaches this agent again. Only
-    # an EFFECTIVE change is applied and audited (old -> new), like the other fields.
+    # as NULL ("follow the default"), so a later env change reaches this agent again; that
+    # also clears an override that happens to equal a new default. Only an EFFECTIVE change
+    # is audited (old -> new), like the other fields.
     settings = get_settings()
     if body.llm_timeout_seconds is not None:
         old_timeout = effective_llm_timeout_seconds(agent, settings)
         if body.llm_timeout_seconds != old_timeout:
             changes["llm_timeout_seconds"] = {"from": old_timeout, "to": body.llm_timeout_seconds}
-            agent.llm_timeout_seconds = stored_override(
-                body.llm_timeout_seconds, settings.ollama_timeout_seconds
-            )
+        agent.llm_timeout_seconds = stored_override(
+            body.llm_timeout_seconds, settings.ollama_timeout_seconds
+        )
     if body.llm_keep_alive_minutes is not None:
         old_keep_alive = effective_llm_keep_alive_minutes(agent, settings)
         if body.llm_keep_alive_minutes != old_keep_alive:
@@ -433,9 +434,9 @@ async def update_agent_config(
                 "from": old_keep_alive,
                 "to": body.llm_keep_alive_minutes,
             }
-            agent.llm_keep_alive_minutes = stored_override(
-                body.llm_keep_alive_minutes, settings.ollama_keep_alive_minutes
-            )
+        agent.llm_keep_alive_minutes = stored_override(
+            body.llm_keep_alive_minutes, settings.ollama_keep_alive_minutes
+        )
 
     if changes:
         agent.version += 1
@@ -447,6 +448,7 @@ async def update_agent_config(
             actor_id=current_user.id,
             details={"changes": changes},
         )
+    if changes or db.is_modified(agent):
         await db.commit()
         await db.refresh(agent)
     return _agent_config_detail(agent)

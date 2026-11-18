@@ -1,3 +1,4 @@
+import copy
 from typing import Any
 
 import httpx
@@ -46,15 +47,10 @@ class OllamaClient(LLMClient):
         """A new client with the same connection and model but these per-agent request
         options (#203). The cached server-wide client is never mutated, so one agent's
         values can't leak into another agent's cycles."""
-        return OllamaClient(
-            self._base_url,
-            self._model,
-            temperature=self._temperature,
-            num_ctx=self._num_ctx,
-            json_format=self._json_format,
-            timeout_seconds=timeout_seconds,
-            keep_alive_minutes=keep_alive_minutes,
-        )
+        client = copy.copy(self)
+        client._timeout_seconds = timeout_seconds
+        client._keep_alive_minutes = keep_alive_minutes
+        return client
 
     async def generate(
         self,
@@ -87,7 +83,9 @@ class OllamaClient(LLMClient):
             payload["keep_alive"] = (
                 -1 if self._keep_alive_minutes < 0 else f"{self._keep_alive_minutes}m"
             )
-        async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+        # The configured timeout bounds waiting for the answer; connecting gets 10 s.
+        timeout = httpx.Timeout(self._timeout_seconds, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(f"{self._base_url}/api/chat", json=payload)
             response.raise_for_status()
             data = response.json()

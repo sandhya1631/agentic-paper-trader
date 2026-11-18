@@ -216,6 +216,27 @@ async def test_setting_the_default_again_follows_later_default_changes(
 
 
 @pytest.mark.asyncio
+async def test_an_override_equal_to_a_new_default_can_be_cleared(
+    client: AsyncClient, monkeypatch
+):
+    email = f"ka-clear-{uuid.uuid4().hex[:6]}@example.com"
+    token = await _operator(client, email)
+    agent_id = await _seed_agent_for(email)
+    await client.patch("/agent/config", headers=_auth(token), json={"llm_timeout_seconds": 300})
+    # An admin raises the server default to the agent's value: effective stays 300.
+    raised = Settings(_env_file=None, ollama_timeout_seconds=300)
+    monkeypatch.setattr("app.agent.router.get_settings", lambda: raised)
+
+    response = await client.patch(
+        "/agent/config", headers=_auth(token), json={"llm_timeout_seconds": 300}
+    )
+
+    assert response.status_code == 200
+    async with TestSessionLocal() as db:
+        assert (await db.get(AgentConfig, agent_id)).llm_timeout_seconds is None
+
+
+@pytest.mark.asyncio
 async def test_an_unchanged_value_beside_another_change_is_not_stored(client: AsyncClient):
     email = f"ka-same-{uuid.uuid4().hex[:6]}@example.com"
     token = await _operator(client, email)
@@ -277,6 +298,25 @@ async def test_payload_carries_keep_alive_and_the_request_uses_the_timeout(
 
     assert recorder.payloads[0]["keep_alive"] == sent
     assert recorder.timeouts == [42]
+
+
+@pytest.mark.asyncio
+async def test_the_timeout_bounds_the_answer_and_connecting_gets_10_seconds(monkeypatch):
+    seen: list[httpx.Timeout] = []
+    real_client = httpx.AsyncClient
+
+    def make_client(*args, **kwargs):
+        seen.append(kwargs["timeout"])
+        kwargs["transport"] = httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"message": {"content": "{}"}})
+        )
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(ollama_module.httpx, "AsyncClient", make_client)
+
+    await OllamaClient("http://localhost:11434", "llama3.1", timeout_seconds=600).generate("x")
+
+    assert (seen[0].read, seen[0].connect) == (600, 10.0)
 
 
 @pytest.mark.asyncio
