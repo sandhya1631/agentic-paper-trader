@@ -50,8 +50,17 @@ class OwnerLLMClient:
 
 
 async def get_llm_credential(db: AsyncSession, user_id: uuid.UUID) -> LLMCredential | None:
-    """The user's row (key still encrypted), connected or revoked, or None."""
-    result = await db.execute(select(LLMCredential).where(LLMCredential.user_id == user_id))
+    """The user's row (key still encrypted), connected or revoked, or None.
+
+    populate_existing re-reads the committed row even if the session still holds it (a
+    sweep reuses one session), so a key revoked or replaced mid-sweep always applies
+    from the next symbol's cycle.
+    """
+    result = await db.execute(
+        select(LLMCredential)
+        .where(LLMCredential.user_id == user_id)
+        .execution_options(populate_existing=True)
+    )
     return result.scalar_one_or_none()
 
 

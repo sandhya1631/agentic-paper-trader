@@ -4,7 +4,7 @@
  */
 import { api } from "@/lib/api/client";
 
-/** Providers a user can connect a key for (the backend's USER_KEY_PROVIDERS). */
+/** Providers a user can connect a key for (the backend's `LLMKeyCreate.provider`). */
 export type LlmKeyProvider = "openai" | "anthropic";
 
 export interface LlmKey {

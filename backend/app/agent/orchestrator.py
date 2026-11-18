@@ -588,7 +588,8 @@ async def _run_agent_cycle(
 
         # The agent owner's own AI key, else the server's LLM (#191). Resolved first, so
         # with no key and LLM_SERVER_KEY_FALLBACK off the cycle fails (LLM_UNAVAILABLE)
-        # before any market-data, broker or LLM call. Built per cycle, never shared.
+        # before any LLM call (and, for a manual cycle, before any market-data or broker
+        # read; a sweep has already read both once). Built per cycle, never shared.
         llm_used: EffectiveLLM | None = None
         if llm_client is None:
             owner_llm = await resolve_agent_llm(db, agent, server_client=get_llm_client)

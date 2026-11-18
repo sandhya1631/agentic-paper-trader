@@ -28,7 +28,7 @@ class LLMKeyCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["openai", "anthropic"]
+    provider: Literal["openai", "anthropic"]  # Ollama is self-hosted: no user key
     api_key: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 

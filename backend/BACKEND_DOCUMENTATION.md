@@ -582,7 +582,9 @@ AI provider keys (#191) follow the same pattern through `/accounts/llm`
    replay uses the caller's key. The client is built per cycle and never cached.
    With no key the server's cached client is used, unless
    `LLM_SERVER_KEY_FALLBACK=false`, which fails the cycle with `LLM_UNAVAILABLE`
-   before any market-data, broker or LLM call. A rejected user key also ends
+   before any LLM call (a manual cycle also skips its market-data and broker
+   reads; a sweep has already done them once). A key revoked or replaced during
+   a sweep applies from the next symbol. A rejected user key also ends
    `LLM_UNAVAILABLE` and never falls back to the server key.
 
 ### 5.3 Market-data flow

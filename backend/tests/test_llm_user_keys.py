@@ -557,6 +557,39 @@ async def test_scheduled_sweeps_build_each_cycles_client_from_its_own_owner(
     }
 
 
+@pytest.mark.asyncio
+async def test_a_key_revoked_during_a_sweep_applies_from_the_next_symbol(
+    db_session, monkeypatch
+):
+    """The sweep reuses one session; the credential must be re-read, not the cached row."""
+    clients = _Clients()
+    _install(monkeypatch, clients)
+    owner = await _user()
+    agent_id = await _agent(owner, watchlist=("AAPL", "MSFT"))
+    await _store_key(owner, "openai", KEY_A)
+
+    async def revoke_then_hold(prompt, *, system=None, temperature=None) -> str:
+        async with TestSessionLocal() as other:  # the user clicks Disconnect mid-sweep
+            await llm_keys.revoke_llm_credential(other, owner)
+            await other.commit()
+        return json.dumps(HOLD)
+
+    real_build = clients.build_user
+
+    def build_revoking(provider, api_key, settings):
+        client = real_build(provider, api_key, settings)
+        client.generate = revoke_then_hold
+        return client
+
+    monkeypatch.setattr(llm_keys, "create_user_llm_client", build_revoking)
+    async with TestSessionLocal() as db:
+        await run_watchlist_cycles(agent_id, db, trigger=CycleTrigger.SCHEDULED)
+
+    sources = [c.snapshot_json["observability"]["llm_key_source"] for c in await _cycles(agent_id)]
+    assert sources == [LLM_KEY_SOURCE_USER, LLM_KEY_SOURCE_SERVER]
+    assert len(clients.user_clients) == 1 and clients.server_builds == 1
+
+
 # --- Replay: the caller's key -------------------------------------------------------
 
 
