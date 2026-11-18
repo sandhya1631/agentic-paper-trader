@@ -126,7 +126,8 @@ later Connect overwrites.
   SELECT id, trigger, status, started_at FROM agent_cycles
    WHERE status IN ('PENDING','COLLECTING','REASONING','VALIDATING') ORDER BY started_at;
   UPDATE agent_cycles SET status = 'FAILED', failure_code = 'INTERRUPTED',
-         completed_at = now() WHERE id = '<cycle id>';
+         completed_at = now()
+   WHERE id = '<cycle id>' AND status IN ('PENDING','COLLECTING','REASONING','VALIDATING');
   ```
 
   Never do this for an `EXECUTING` cycle: an order may exist. Leave it to the
@@ -138,8 +139,9 @@ Every merge to `main` redeploys Render and restarts the agent.
 
 - Merge changes to the **trading path** (agent, approval, risk, broker, scheduler, LLM
   code) only **outside 9:30–16:00 ET** on trading days.
-- Docs-only, CI-only and frontend-only changes may merge any time. Vercel redeploys
-  without touching Render.
+- Docs-only, CI-only and frontend-only changes don't touch the trading path, but they
+  still redeploy Render (it deploys every merge to `main`), so they also restart the
+  agent. Prefer the same window unless the change is urgent.
 - Before merging during a run: no approval should be mid-execution, and an AUTO sweep
   should not be running (check the dashboard's scheduler activity).
 - After every merge, run the smoke check (section 6).

@@ -12,10 +12,15 @@ Alpaca, then checks reconcile_order adopts the broker's CANCELED status.
 The ApprovedOrder is built here directly with a placeholder policy token: this test
 exercises the gateway and broker, not the policy engine (which would deny off-hours,
 P-003). In app code, an ApprovedOrder is only ever built by the approval path.
+
+Run it on a paper account the trading run doesn't use, or after the close: the order
+counts toward P-012's daily cap and, while open, P-010 blocks that symbol. If cleanup
+fails, a warning names the client_order_id to cancel in the Alpaca dashboard.
 """
 
 import asyncio
 import uuid
+import warnings
 from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal
 
@@ -79,9 +84,16 @@ async def _cancel_at_alpaca(client: AlpacaClient, client_order_id: str) -> int |
         response = await client._get_client().delete(
             f"{client.base_url}/v2/orders/{at_alpaca.id}", headers=client.headers
         )
-        return response.status_code
+        status = response.status_code
     except Exception:  # cleanup must not hide the test's own failure
-        return None
+        status = None
+    if status not in {200, 204, 422}:
+        warnings.warn(
+            f"Paper order client_order_id={client_order_id} may still be open: "
+            "cancel it in the Alpaca dashboard",
+            stacklevel=1,
+        )
+    return status
 
 
 async def test_far_limit_order_round_trip_through_the_gateway(db_session):
