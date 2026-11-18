@@ -122,6 +122,9 @@ LLM_PROVIDER=ollama   # or "openai" / "anthropic"
   `http://localhost:11434`) with the model pulled (`OLLAMA_MODEL`, default `llama3.1`). Local
   generation defaults to low variance (`OLLAMA_TEMPERATURE=0.1`), a 4096-token context
   (`OLLAMA_NUM_CTX=4096`), and Ollama JSON output mode (`OLLAMA_JSON_FORMAT=true`).
+  Each request waits up to `OLLAMA_TIMEOUT_SECONDS` (default 180) and asks Ollama to keep
+  the model loaded for `OLLAMA_KEEP_ALIVE_MINUTES` (default 10; Ollama's own default is 5).
+  An operator can override both per agent in Settings → Agent configuration (#203).
 - Agents may opt into the shorter local-model prompt `S-002`; existing agents remain on
   `S-001` until their strategy version is explicitly changed. Strategy prompts are immutable
   versions and are saved with each cycle for auditability.

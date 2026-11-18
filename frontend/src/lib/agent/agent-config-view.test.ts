@@ -6,6 +6,11 @@ import {
   NO_AGENT_MESSAGE,
   approvalModeOptions,
   buildConfigPatch,
+  describeKeepAlive,
+  ollamaOptionsApply,
+  parseWholeNumber,
+  validateKeepAlive,
+  validateLlmTimeout,
   describeAgentConfigError,
   describeApprovalMode,
   formatFraction,
@@ -269,5 +274,65 @@ describe("summarizePreview", () => {
     const preview = summarizePreview("MSFT", rejected(apiError(502)), fulfilled<BarsResponse>({ MSFT: [bar] }));
     expect(preview.latestClose).toBe("409.25");
     expect(preview.note).toMatch(/indicators are unavailable/i);
+  });
+});
+
+describe("Ollama timeout / keep-alive helpers (#203)", () => {
+  const saved = {
+    watchlist: ["AAPL"],
+    approval_mode: "REQUIRED",
+    llm_timeout_seconds: 180,
+    llm_keep_alive_minutes: 10,
+  };
+
+  it("parses whole numbers only", () => {
+    expect(parseWholeNumber(" 120 ")).toBe(120);
+    expect(parseWholeNumber("-1")).toBe(-1);
+    for (const bad of ["", "1.5", "abc", "1e3", undefined]) {
+      expect(parseWholeNumber(bad)).toBeNull();
+    }
+  });
+
+  it("validates the timeout against the server's bounds", () => {
+    expect(validateLlmTimeout("180", [30, 900])).toBeNull();
+    expect(validateLlmTimeout("30", [30, 900])).toBeNull();
+    expect(validateLlmTimeout("29", [30, 900])).toBe("Enter whole seconds from 30 to 900.");
+    expect(validateLlmTimeout("901", [30, 900])).not.toBeNull();
+    expect(validateLlmTimeout("", [30, 900])).not.toBeNull();
+    // Without the bounds (constants failed to load) only the format is checked.
+    expect(validateLlmTimeout("5")).toBeNull();
+  });
+
+  it("validates keep-alive, allowing -1 (keep loaded) and 0 (unload each call)", () => {
+    expect(validateKeepAlive("-1", [-1, 240])).toBeNull();
+    expect(validateKeepAlive("0", [-1, 240])).toBeNull();
+    expect(validateKeepAlive("-2", [-1, 240])).toMatch(/from -1 to 240/);
+    expect(validateKeepAlive("241", [-1, 240])).not.toBeNull();
+  });
+
+  it("describes what a keep-alive value does", () => {
+    expect(describeKeepAlive(-1)).toMatch(/until ollama restarts/i);
+    expect(describeKeepAlive(0)).toMatch(/after every call/i);
+    expect(describeKeepAlive(10)).toBe("Keeps the model loaded for 10 min after each call.");
+  });
+
+  it("puts only changed, valid values in the PATCH", () => {
+    const base = { watchlist: ["AAPL"], approval_mode: "REQUIRED" };
+    expect(
+      buildConfigPatch(saved, { ...base, llm_timeout_seconds: "180", llm_keep_alive_minutes: "10" }),
+    ).toEqual({});
+    expect(
+      buildConfigPatch(saved, { ...base, llm_timeout_seconds: "300", llm_keep_alive_minutes: "-1" }),
+    ).toEqual({ llm_timeout_seconds: 300, llm_keep_alive_minutes: -1 });
+    expect(
+      buildConfigPatch(saved, { ...base, llm_timeout_seconds: "abc", llm_keep_alive_minutes: "10" }),
+    ).toEqual({});
+  });
+
+  it("shows the Ollama-only fields for Ollama or an unknown provider", () => {
+    expect(ollamaOptionsApply("ollama")).toBe(true);
+    expect(ollamaOptionsApply(null)).toBe(true);
+    expect(ollamaOptionsApply("openai")).toBe(false);
+    expect(ollamaOptionsApply("anthropic")).toBe(false);
   });
 });

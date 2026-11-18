@@ -17,6 +17,10 @@ export interface Constants {
   max_watchlist_size: number;
   /** The watchlist a new agent starts with (the Market page's fallback with no agent yet). */
   default_watchlist: string[];
+  /** Inclusive [min, max] for an agent's Ollama request timeout, in seconds (#203). */
+  llm_timeout_seconds_range?: number[];
+  /** Inclusive [min, max] for an agent's model keep-alive, in minutes (-1 = keep loaded). */
+  llm_keep_alive_minutes_range?: number[];
 }
 
 export function getConstants(): Promise<Constants> {

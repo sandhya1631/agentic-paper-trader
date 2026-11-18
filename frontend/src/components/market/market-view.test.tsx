@@ -42,6 +42,10 @@ function agentConfig(watchlist: string[]): AgentConfig {
     approval_mode: "REQUIRED",
     enabled: true,
     watchlist,
+    llm_timeout_seconds: 180,
+    llm_keep_alive_minutes: 10,
+    llm_timeout_default_seconds: 180,
+    llm_keep_alive_default_minutes: 10,
   };
 }
 

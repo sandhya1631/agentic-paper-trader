@@ -6,7 +6,7 @@ vi.mock("@/lib/api/client", () => ({
 
 import { api } from "@/lib/api/client";
 import { ApiError } from "@/lib/api/errors";
-import { getLlmHealth } from "./observability-api";
+import { getLlmConfig, getLlmHealth } from "./observability-api";
 
 const mockedApi = vi.mocked(api);
 
@@ -30,5 +30,14 @@ describe("getLlmHealth", () => {
 
     await expect(getLlmHealth()).resolves.toEqual(down);
     await expect(getLlmHealth()).rejects.toBe(serverError);
+  });
+});
+
+describe("getLlmConfig (#203)", () => {
+  it("reads the configured provider without probing it (no billed call)", async () => {
+    mockedApi.get.mockResolvedValue({ provider: "openai", model: "gpt-4o-mini" });
+
+    await expect(getLlmConfig()).resolves.toEqual({ provider: "openai", model: "gpt-4o-mini" });
+    expect(mockedApi.get).toHaveBeenCalledWith("/llm/health");
   });
 });

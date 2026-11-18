@@ -47,6 +47,11 @@ CONFIG_FIELDS = {
     "approval_mode",
     "enabled",
     "watchlist",
+    # #203: effective Ollama timeout / keep-alive and the server defaults.
+    "llm_timeout_seconds",
+    "llm_keep_alive_minutes",
+    "llm_timeout_default_seconds",
+    "llm_keep_alive_default_minutes",
 }
 REASONING = "RSI-14 is 30.0 (oversold). Citing RSI=30.0, SMA20=1.00."
 

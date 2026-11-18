@@ -84,6 +84,15 @@ MANUAL_ORDER_FAILED = "MANUAL_ORDER_FAILED"  # the broker call raised (502)
 
 # --- LLM client factory ---
 SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")
+# Ollama request timeout and model keep-alive (#203): the server defaults are Settings
+# (OLLAMA_TIMEOUT_SECONDS, OLLAMA_KEEP_ALIVE_MINUTES); an agent may override them within
+# these inclusive bounds. Keep-alive -1 keeps the model loaded; 0 unloads it after each
+# call. Exposed via /meta/constants so the Settings form validates the same range.
+OLLAMA_TIMEOUT_SECONDS_RANGE = (30, 900)
+OLLAMA_KEEP_ALIVE_MINUTES_RANGE = (-1, 240)
+# Code defaults of those Settings (the env can override them).
+OLLAMA_TIMEOUT_SECONDS_DEFAULT = 180
+OLLAMA_KEEP_ALIVE_MINUTES_DEFAULT = 10
 # failure_code of a cycle whose LLM was misconfigured or unreachable (#160).
 LLM_UNAVAILABLE = "LLM_UNAVAILABLE"
 

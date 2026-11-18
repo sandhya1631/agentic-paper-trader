@@ -48,6 +48,14 @@ export interface LlmHealth {
 }
 
 /**
+ * The configured LLM provider and model, WITHOUT probing it (no call to the provider, so
+ * nothing is billed). Settings uses it to show Ollama-only options only for Ollama (#203).
+ */
+export function getLlmConfig(): Promise<LlmHealth> {
+  return api.get<LlmHealth>("/llm/health");
+}
+
+/**
  * Probe the LLM. A 503 carrying `reachable: false` (LLM down or misconfigured) resolves
  * to that payload so callers can show the backend's reason; other failures reject.
  */

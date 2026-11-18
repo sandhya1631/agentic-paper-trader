@@ -4,7 +4,13 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.core.constants import ALPACA_PAPER_BASE_URL
+from app.core.constants import (
+    ALPACA_PAPER_BASE_URL,
+    OLLAMA_KEEP_ALIVE_MINUTES_DEFAULT,
+    OLLAMA_KEEP_ALIVE_MINUTES_RANGE,
+    OLLAMA_TIMEOUT_SECONDS_DEFAULT,
+    OLLAMA_TIMEOUT_SECONDS_RANGE,
+)
 from app.core.paper_guard import ensure_alpaca_paper_url
 
 
@@ -75,6 +81,19 @@ class Settings(BaseSettings):
     ollama_temperature: float = Field(default=0.1, ge=0, le=2)
     ollama_num_ctx: int = Field(default=4096, ge=512)
     ollama_json_format: bool = True
+    # #203: server defaults for every agent that hasn't overridden them in Settings.
+    # Ollama's own keep-alive default is 5 min, which unloads the model between sweeps
+    # on a slow CPU host; 10 min keeps it loaded across a 10-minute schedule.
+    ollama_timeout_seconds: int = Field(
+        default=OLLAMA_TIMEOUT_SECONDS_DEFAULT,
+        ge=OLLAMA_TIMEOUT_SECONDS_RANGE[0],
+        le=OLLAMA_TIMEOUT_SECONDS_RANGE[1],
+    )
+    ollama_keep_alive_minutes: int = Field(
+        default=OLLAMA_KEEP_ALIVE_MINUTES_DEFAULT,
+        ge=OLLAMA_KEEP_ALIVE_MINUTES_RANGE[0],
+        le=OLLAMA_KEEP_ALIVE_MINUTES_RANGE[1],
+    )
 
     # Encrypted Alpaca Credential Vault — Fernet key. No default: a working key
     # baked into source would make "encryption at rest" meaningless for any

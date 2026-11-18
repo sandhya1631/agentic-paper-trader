@@ -130,3 +130,14 @@ async def ensure_policy_token_scrubbed(conn: AsyncConnection) -> None:
                 )
             )
         )
+
+
+async def ensure_agent_config_llm_options(conn: AsyncConnection) -> None:
+    """Add the per-agent Ollama timeout / keep-alive overrides (#203) to old databases.
+
+    Nullable, no default: NULL means "use the server default", so existing agents keep
+    following OLLAMA_TIMEOUT_SECONDS / OLLAMA_KEEP_ALIVE_MINUTES."""
+    for column in ("llm_timeout_seconds", "llm_keep_alive_minutes"):
+        await conn.execute(
+            text(f"ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS {column} INTEGER")
+        )

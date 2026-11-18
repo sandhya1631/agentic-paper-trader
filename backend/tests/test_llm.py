@@ -147,6 +147,8 @@ def test_no_anthropic_credentials_does_not_affect_default_provider(
         ollama_temperature=0.1,
         ollama_num_ctx=4096,
         ollama_json_format=True,
+        ollama_timeout_seconds=180,
+        ollama_keep_alive_minutes=10,
     )
 
     client = create_llm_client(settings)

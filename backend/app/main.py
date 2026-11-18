@@ -18,6 +18,7 @@ from app.db import models  # noqa: F401  (registers ORM models on Base.metadata)
 from app.db.base import Base
 from app.db.models import AgentConfig, AgentSchedule, TradingAccount, User
 from app.db.schema import (
+    ensure_agent_config_llm_options,
     ensure_agent_cycle_policy_columns,
     ensure_agent_cycle_prompt_columns,
     ensure_cycle_cancelled_status,
@@ -74,6 +75,7 @@ async def lifespan(app: FastAPI):
         await ensure_user_scheduler_column(conn)
         await ensure_kill_switch_event_scope_columns(conn)
         await ensure_policy_token_scrubbed(conn)
+        await ensure_agent_config_llm_options(conn)
     # Close out cycles a previous process left in flight (a redeploy or crash mid-cycle,
     # #185) before any tick can run. Agents whose lock another live process holds are
     # skipped; their active-cycle gate recovers them later. Never blocks startup.
