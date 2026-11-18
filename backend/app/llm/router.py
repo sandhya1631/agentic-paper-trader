@@ -39,7 +39,7 @@ async def llm_health(
             "model": model,
             "reachable": False,
             "model_available": False,
-            "detail": f"LLM client unavailable: {exc}",
+            "detail": exc.detail,
         }
 
     health = await llm_client.health_check()

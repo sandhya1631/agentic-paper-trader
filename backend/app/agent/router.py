@@ -488,6 +488,8 @@ async def trigger_manual_cycle(
     except LLMUnavailableError as exc:
         # Misconfigured or unreachable LLM (#160): the cycle is recorded FAILED with
         # LLM_UNAVAILABLE; tell the operator so instead of a 404 or a generic 500.
+        # Caught here on purpose, not left to main.py's app-wide handler: the
+        # `except Exception` below would otherwise turn it into a 500.
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.detail
         ) from exc

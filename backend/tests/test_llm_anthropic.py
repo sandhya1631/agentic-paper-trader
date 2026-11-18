@@ -162,9 +162,9 @@ async def test_anthropic_api_errors_are_sanitized(caplog):
         client = AnthropicClient(api_key=FAKE_KEY, model=MODEL)
 
         with caplog.at_level(logging.WARNING, logger="app.llm.anthropic_client"):
-            with pytest.raises(RuntimeError) as auth_raised:
+            with pytest.raises(LLMUnavailableError) as auth_raised:
                 await client.generate("p")
-            with pytest.raises(RuntimeError) as connection_raised:
+            with pytest.raises(LLMUnavailableError) as connection_raised:
                 await client.generate("p")
 
     assert str(auth_raised.value) == "Anthropic API error: AuthenticationError (HTTP 401)"
@@ -262,7 +262,7 @@ async def test_anthropic_selected_without_key_errors_clearly(client: AsyncClient
         "reachable": False,
         "model_available": False,
         "detail": (
-            "LLM client unavailable: "
+            "LLM unavailable: "
             "ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic"
         ),
     }

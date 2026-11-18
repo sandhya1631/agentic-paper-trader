@@ -347,7 +347,7 @@ async def test_openai_api_errors_are_sanitized(caplog):
         raised = []
         with caplog.at_level(logging.WARNING, logger="app.llm.openai_client"):
             for _ in range(3):
-                with pytest.raises(RuntimeError) as excinfo:
+                with pytest.raises(LLMUnavailableError) as excinfo:
                     await client.generate("p")
                 raised.append(excinfo.value)
 
@@ -382,7 +382,7 @@ async def test_openai_api_error_never_reaches_the_cycle_record():
         sdk.chat.completions.create = AsyncMock(side_effect=auth_error)
         llm_client = OpenAIClient(api_key=CANARY_KEY, model="gpt-4o-mini")
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(LLMUnavailableError):
             await run_agent_cycle(agent.id, db, llm_client=llm_client, collector=collector)
 
     added = [call.args[0] for call in db.add.call_args_list]
@@ -446,7 +446,7 @@ async def test_openai_selected_without_key_errors_clearly(client: AsyncClient):
         "model": "gpt-4o-mini",
         "reachable": False,
         "model_available": False,
-        "detail": "LLM client unavailable: OPENAI_API_KEY is required when LLM_PROVIDER=openai",
+        "detail": "LLM unavailable: OPENAI_API_KEY is required when LLM_PROVIDER=openai",
     }
     sdk_cls.assert_not_called()  # no SDK client is ever built without a key
 
