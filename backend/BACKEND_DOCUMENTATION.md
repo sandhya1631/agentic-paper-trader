@@ -1041,9 +1041,11 @@ It runs in two places:
 2. **The active-cycle gate** (step 1 of section 6), whose caller already holds the
    lock. A stuck agent heals on its next tick or manual run, without a restart.
 
-Recovery reads the cycles `FOR UPDATE`, the same row lock as the cancel route, so
-the two can't both win: a cancel that commits first is skipped, and a cancel after
-recovery gets 409. Recovery is idempotent. The gate orders in-flight cycles first,
+Recovery reads the cycles `FOR UPDATE SKIP LOCKED`: a row another transaction holds
+(a live run between a phase check and its commit, or a cancel in progress) is treated
+as live and skipped, and a cancel after recovery gets 409. If a run fails after its
+cycle was closed elsewhere (cancelled, or recovered because the run lost its lock),
+its error handler keeps that record instead of overwriting it. Recovery is idempotent. The gate orders in-flight cycles first,
 so a parked `PENDING_APPROVAL` row never hides an orphan.
 
 **A run that lost its lock connection.** `agent_cycle_lock` tolerates its dedicated

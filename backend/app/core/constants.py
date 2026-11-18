@@ -49,7 +49,8 @@ ACTIVE_CYCLE_STATUSES = (
 )
 # In-flight statuses that only a process holding the agent's cycle lock ever writes
 # (the orchestrator, or an approval's execution). A cycle left in one of them while
-# that lock is free was orphaned by a process that died, e.g. a redeploy (#185).
+# that lock is free was orphaned by a process that died, e.g. a redeploy (#185), or
+# its run lost the lock's connection; that run stops at its next phase check.
 # PENDING_APPROVAL (lazy expiry) and RECONCILING (broker reconcile) are excluded.
 INTERRUPTIBLE_CYCLE_STATUSES = (
     CycleStatus.PENDING,

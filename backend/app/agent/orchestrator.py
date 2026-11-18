@@ -328,14 +328,15 @@ async def _recover_orphaned_agent_cycles(
       (``_cycle_closed_elsewhere``) sees the change and it stops without acting.
 
     ``PENDING_APPROVAL``, ``RECONCILING`` and terminal statuses (``CANCELLED`` among
-    them) are never touched. Rows are read with ``FOR UPDATE``, so this can't race the
-    cancel route's row lock: if a cancel commits first, Postgres re-checks the status
-    filter and the row is skipped. Returns ``(cycle_id, old_status, new_status)``.
+    them) are never touched. Rows are read with ``FOR UPDATE SKIP LOCKED``: a row another
+    transaction holds (a live run between a phase check and its commit, or a cancel in
+    progress) belongs to a live process and is skipped, never waited for and then
+    flipped. Returns ``(cycle_id, old_status, new_status)``.
     """
     result = await db.execute(
         select(AgentCycle)
         .where(AgentCycle.agent_id == agent_id, AgentCycle.status.in_(ORPHANABLE_CYCLE_STATUSES))
-        .with_for_update(of=AgentCycle)
+        .with_for_update(of=AgentCycle, skip_locked=True)
         .execution_options(populate_existing=True)
     )
     orphans = list(result.scalars().all())
@@ -904,6 +905,21 @@ async def _run_agent_cycle(
 
     except Exception as exc:
         logger.error("Agent cycle failed unexpectedly: %s", exc, exc_info=True)
+        # A cancel, or recovery by a process that took the lock this run lost, may have
+        # closed the cycle already (#185): keep that record instead of overwriting it, and
+        # return it (a sweep then sees INTERRUPTED and stops).
+        current = (
+            await db.execute(
+                select(AgentCycle.status, AgentCycle.failure_code)
+                .where(AgentCycle.id == cycle.id)
+                .with_for_update()
+            )
+        ).one()
+        if current.status == CycleStatus.CANCELLED or current.failure_code == CYCLE_INTERRUPTED:
+            await db.refresh(cycle)
+            await db.commit()
+            set_committed_value(cycle, "approval", None)
+            return cycle
         cycle.status = CycleStatus.FAILED
         cycle.completed_at = utcnow()
         cycle.failure_code = "UNEXPECTED_ERROR"

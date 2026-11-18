@@ -495,7 +495,9 @@ async def test_recovery_and_sweeps_never_touch_an_executing_approval(
 
 
 @pytest.mark.asyncio
-async def test_recovery_waits_for_an_in_flight_cancel_and_leaves_it_cancelled(db_session):
+async def test_recovery_skips_a_row_an_in_flight_cancel_holds_and_leaves_it_cancelled(
+    db_session,
+):
     agent_id = await _seed_agent()
     cycle_id = await _seed_cycle(agent_id, CycleStatus.REASONING)
 
@@ -510,12 +512,10 @@ async def test_recovery_waits_for_an_in_flight_cancel_and_leaves_it_cancelled(db
         cycle.failure_code = "MANUAL_CYCLE_CANCELLED"
         await canceller.flush()
 
-        recovery = asyncio.create_task(_recover())
-        await asyncio.sleep(0.3)
-        assert not recovery.done()  # blocked on the cancel's row lock
+        # The locked row belongs to a live transaction: recovery skips it, never waits.
+        assert await asyncio.wait_for(_recover(), timeout=10) == []
         await canceller.commit()
 
-    assert await asyncio.wait_for(recovery, timeout=10) == []
     cycle = await _stored(cycle_id)
     assert (cycle.status, cycle.failure_code) == (
         CycleStatus.CANCELLED,
@@ -607,6 +607,43 @@ async def test_a_sweep_stops_when_another_process_recovers_its_cycle(db_session)
             await db.execute(select(AgentCycle).where(AgentCycle.agent_id == agent_id))
         ).scalars().all()
     assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failing_run_keeps_the_record_recovery_wrote_and_its_sweep_stops(db_session):
+    """Recovery closed the cycle (this run lost its lock), then the run's LLM call failed
+    with an ordinary error: the INTERRUPTED record stays and no further symbol runs."""
+    agent_id = await _seed_agent(approval_mode=ApprovalMode.OBSERVE_ONLY)
+    async with TestSessionLocal() as db:
+        agent = await db.get(AgentConfig, agent_id)
+        agent.watchlist = ["AAPL", "NVDA", "SPY"]
+        await db.commit()
+
+    async def recover_then_fail(prompt_input, system=None):
+        async with TestSessionLocal() as other:
+            await orchestrator._recover_orphaned_agent_cycles(other, agent_id)
+        raise RuntimeError("provider answered HTTP 500")
+
+    llm = MagicMock()
+    llm.generate = AsyncMock(side_effect=recover_then_fail)
+    collector = MagicMock()
+    collector.fetch_latest_bars = AsyncMock(return_value={})
+    async with TestSessionLocal() as db:
+        cycles = await orchestrator.run_watchlist_cycles(
+            agent_id, db, llm_client=llm, collector=collector
+        )
+
+    assert llm.generate.await_count == 1
+    assert [(c.status, c.failure_code) for c in cycles] == [
+        (CycleStatus.FAILED, CYCLE_INTERRUPTED)
+    ]
+    async with TestSessionLocal() as db:
+        rows = (
+            await db.execute(select(AgentCycle).where(AgentCycle.agent_id == agent_id))
+        ).scalars().all()
+    assert [(r.status, r.failure_code) for r in rows] == [
+        (CycleStatus.FAILED, CYCLE_INTERRUPTED)
+    ]
 
 
 @pytest.mark.asyncio

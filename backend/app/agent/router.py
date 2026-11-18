@@ -304,7 +304,8 @@ async def update_kill_switch(
 
 
 _NO_AGENT_DETAIL = "No agent configured yet. Trigger a cycle to create your default agent."
-# 409 when an approval can't take the agent's cycle lock (#185); the UI matches "busy".
+# 409 when an approval can't take the agent's cycle lock (#185); the UI matches
+# "agent is busy running a cycle".
 APPROVAL_AGENT_BUSY_DETAIL = (
     "The agent is busy running a cycle, so nothing was sent and the approval is still "
     "pending. Retry when the current cycle or watchlist sweep finishes."
@@ -681,7 +682,7 @@ async def cancel_manual_cycle(
             TradingAccount.user_id == current_user.id,
         )
         # Locks only the AgentCycle row, matching the orchestrator's own
-        # `_cycle_was_cancelled` row lock: whichever of the two commits first
+        # `_cycle_closed_elsewhere` row lock: whichever of the two commits first
         # wins, and the other blocks and then re-reads the fresh status - no
         # lost update of a cancellation racing an in-flight cycle phase.
         .with_for_update(of=AgentCycle)
