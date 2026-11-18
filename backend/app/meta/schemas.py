@@ -21,3 +21,6 @@ class ConstantsRead(APIModel):
     # The watchlist a new agent starts with; the Market page shows it until the user has
     # an agent of their own (#165).
     default_watchlist: list[str]
+    # Inclusive [min, max] for the agent's Ollama timeout and keep-alive (#203).
+    llm_timeout_seconds_range: list[int]
+    llm_keep_alive_minutes_range: list[int]

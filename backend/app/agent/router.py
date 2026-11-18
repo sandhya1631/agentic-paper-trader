@@ -21,6 +21,10 @@ from sqlalchemy.orm import selectinload
 
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
+from app.agent.llm_options import (
+    effective_llm_keep_alive_minutes,
+    effective_llm_timeout_seconds,
+)
 from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
 from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition
 from app.agent.replay import ReplaySample, evaluate_replay
@@ -344,8 +348,18 @@ def _agent_config_detail(agent: AgentConfig) -> AgentConfigDetailRead:
     upper-case, de-duplicated) keeps the Settings card from loading with unsaved
     changes; the stored row itself is left as it is.
     """
-    detail = AgentConfigDetailRead.model_validate(agent)
-    return detail.model_copy(update={"watchlist": normalize_watchlist(agent.watchlist)})
+    settings = get_settings()
+    detail = AgentConfigDetailRead.model_validate(
+        {
+            **AgentConfigRead.model_validate(agent).model_dump(),
+            "watchlist": normalize_watchlist(agent.watchlist),
+            "llm_timeout_seconds": effective_llm_timeout_seconds(agent, settings),
+            "llm_keep_alive_minutes": effective_llm_keep_alive_minutes(agent, settings),
+            "llm_timeout_default_seconds": settings.ollama_timeout_seconds,
+            "llm_keep_alive_default_minutes": settings.ollama_keep_alive_minutes,
+        }
+    )
+    return detail
 
 
 @router.get(
@@ -399,6 +413,22 @@ async def update_agent_config(
             "to": body.approval_mode.value,
         }
         agent.approval_mode = body.approval_mode
+    # #203: overrides of the Ollama timeout / keep-alive. Audited against the EFFECTIVE
+    # old value (the server default when the agent had none), like the other fields.
+    settings = get_settings()
+    if body.llm_timeout_seconds is not None:
+        old_timeout = effective_llm_timeout_seconds(agent, settings)
+        if body.llm_timeout_seconds != old_timeout:
+            changes["llm_timeout_seconds"] = {"from": old_timeout, "to": body.llm_timeout_seconds}
+        agent.llm_timeout_seconds = body.llm_timeout_seconds
+    if body.llm_keep_alive_minutes is not None:
+        old_keep_alive = effective_llm_keep_alive_minutes(agent, settings)
+        if body.llm_keep_alive_minutes != old_keep_alive:
+            changes["llm_keep_alive_minutes"] = {
+                "from": old_keep_alive,
+                "to": body.llm_keep_alive_minutes,
+            }
+        agent.llm_keep_alive_minutes = body.llm_keep_alive_minutes
 
     if changes:
         agent.version += 1

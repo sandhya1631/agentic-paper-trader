@@ -1,6 +1,12 @@
 from fastapi import APIRouter
 
-from app.core.constants import CURRENCY, DEFAULT_WATCHLIST, MAX_WATCHLIST_SIZE
+from app.core.constants import (
+    CURRENCY,
+    DEFAULT_WATCHLIST,
+    MAX_WATCHLIST_SIZE,
+    OLLAMA_KEEP_ALIVE_MINUTES_RANGE,
+    OLLAMA_TIMEOUT_SECONDS_RANGE,
+)
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -32,4 +38,6 @@ async def get_constants() -> ConstantsRead:
         approval_status=[v.value for v in ApprovalStatus],
         max_watchlist_size=MAX_WATCHLIST_SIZE,
         default_watchlist=list(DEFAULT_WATCHLIST),
+        llm_timeout_seconds_range=list(OLLAMA_TIMEOUT_SECONDS_RANGE),
+        llm_keep_alive_minutes_range=list(OLLAMA_KEEP_ALIVE_MINUTES_RANGE),
     )

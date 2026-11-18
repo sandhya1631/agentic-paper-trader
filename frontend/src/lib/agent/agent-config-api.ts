@@ -20,12 +20,21 @@ export interface AgentConfig {
   approval_mode: string;
   enabled: boolean;
   watchlist: string[];
+  /** #203: effective Ollama request timeout (the agent's override, else the server default). */
+  llm_timeout_seconds: number;
+  /** #203: effective model keep-alive in minutes (-1 = keep loaded, 0 = unload after each call). */
+  llm_keep_alive_minutes: number;
+  /** Server defaults (OLLAMA_TIMEOUT_SECONDS / OLLAMA_KEEP_ALIVE_MINUTES), shown as hints. */
+  llm_timeout_default_seconds: number;
+  llm_keep_alive_default_minutes: number;
 }
 
 /** Only the editable fields; send just the ones that changed (the server rejects `{}`). */
 export interface AgentConfigUpdate {
   watchlist?: string[];
   approval_mode?: string;
+  llm_timeout_seconds?: number;
+  llm_keep_alive_minutes?: number;
 }
 
 /** `GET /agent/strategies` entry (#189): a registered prompt, or the DYNAMIC pseudo-strategy. */

@@ -167,6 +167,11 @@ class AgentConfig(Base, UUIDPrimaryKey, Timestamped):
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     model_provider: Mapped[str] = mapped_column(String(40))
     model_name: Mapped[str] = mapped_column(String(100))
+    # #203: per-agent Ollama request timeout and model keep-alive. NULL = use the server
+    # default (Settings.ollama_timeout_seconds / ollama_keep_alive_minutes), so a later
+    # change to the env default reaches every agent that never overrode it.
+    llm_timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    llm_keep_alive_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     account: Mapped[TradingAccount] = relationship(back_populates="agents")
     policy_set: Mapped[PolicySet] = relationship(back_populates="agents")

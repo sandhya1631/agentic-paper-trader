@@ -19,12 +19,33 @@ class OllamaClient(LLMClient):
         temperature: float = 0.1,
         num_ctx: int = 4096,
         json_format: bool = True,
+        timeout_seconds: float = 180.0,
+        keep_alive_minutes: int | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._temperature = temperature
         self._num_ctx = num_ctx
         self._json_format = json_format
+        self._timeout_seconds = timeout_seconds
+        # None sends no keep_alive (Ollama's own default, 5 min); -1 keeps it loaded.
+        self._keep_alive_minutes = keep_alive_minutes
+
+    def with_request_options(
+        self, *, timeout_seconds: float, keep_alive_minutes: int | None
+    ) -> "OllamaClient":
+        """A new client with the same connection and model but these per-agent request
+        options (#203). The cached server-wide client is never mutated, so one agent's
+        values can't leak into another agent's cycles."""
+        return OllamaClient(
+            self._base_url,
+            self._model,
+            temperature=self._temperature,
+            num_ctx=self._num_ctx,
+            json_format=self._json_format,
+            timeout_seconds=timeout_seconds,
+            keep_alive_minutes=keep_alive_minutes,
+        )
 
     async def generate(
         self,
@@ -51,7 +72,13 @@ class OllamaClient(LLMClient):
         payload["options"]["num_ctx"] = self._num_ctx
         if self._json_format:
             payload["format"] = DecisionProposal.model_json_schema()
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        if self._keep_alive_minutes is not None:
+            # How long Ollama keeps the model loaded after this call (#203). Without it,
+            # Ollama's 5-minute default unloads the model between sweeps on a slow host.
+            payload["keep_alive"] = (
+                -1 if self._keep_alive_minutes < 0 else f"{self._keep_alive_minutes}m"
+            )
+        async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
             response = await client.post(f"{self._base_url}/api/chat", json=payload)
             response.raise_for_status()
             data = response.json()

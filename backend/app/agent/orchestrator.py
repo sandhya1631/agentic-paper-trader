@@ -42,6 +42,10 @@ from app.agent.approval import (
 from app.agent.context import build_agent_context
 from app.agent.knowledge import retrieve_knowledge
 from app.agent.live_context import UNSET, LiveAccountData, Unset, fetch_live_account_data
+from app.agent.llm_options import (
+    effective_llm_keep_alive_minutes,
+    effective_llm_timeout_seconds,
+)
 from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.agent.watchlist import normalize_watchlist
@@ -64,6 +68,7 @@ from app.db.enums import (
 from app.db.models import AgentConfig, AgentCycle, CycleApproval, utcnow
 from app.llm.base import LLMClient
 from app.llm.factory import get_llm_client
+from app.llm.ollama_client import OllamaClient
 from app.market_data.alpaca_client import MarketDataCollector, create_market_data_collector
 from app.schemas import DecisionProposal
 
@@ -170,6 +175,26 @@ def _enforce_context_window(
 
 class CycleOverlapError(Exception):
     """Raised when the agent already has a non-terminal cycle in progress."""
+
+
+def _agent_llm_client(agent: AgentConfig) -> LLMClient:
+    """The LLM client for one of this agent's cycles (#203).
+
+    For Ollama, a fresh client derived from the cached server-wide one, carrying the
+    agent's effective request timeout and model keep-alive; both the first call and the
+    self-repair call of the cycle use it. Other providers get the cached client as is:
+    the OpenAI and Claude SDKs have their own request timeouts and retries, and
+    keep-alive doesn't apply to them. Built per cycle (a sweep re-reads the agent for
+    every symbol), so a Settings change applies to the next cycle.
+    """
+    client = get_llm_client()
+    if isinstance(client, OllamaClient):
+        settings = get_settings()
+        return client.with_request_options(
+            timeout_seconds=effective_llm_timeout_seconds(agent, settings),
+            keep_alive_minutes=effective_llm_keep_alive_minutes(agent, settings),
+        )
+    return client
 
 
 async def _cycle_was_cancelled(db: AsyncSession, cycle: AgentCycle) -> bool:
@@ -543,7 +568,7 @@ async def _run_agent_cycle(
         cycle.status = CycleStatus.REASONING
         await db.commit()
         if llm_client is None:
-            llm_client = get_llm_client()
+            llm_client = _agent_llm_client(agent)
 
         raw_response = await llm_client.generate(prompt_input, system=system_prompt)
 

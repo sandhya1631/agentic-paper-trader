@@ -12,6 +12,7 @@ vi.mock("@/lib/agent/agent-config-api", () => ({
   updateAgentStrategy: vi.fn(),
 }));
 vi.mock("@/lib/meta/meta-api", () => ({ getConstants: vi.fn() }));
+vi.mock("@/lib/agent/observability-api", () => ({ getLlmConfig: vi.fn() }));
 vi.mock("@/lib/market-data/market-data-api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/market-data/market-data-api")>();
   return { ...actual, getBars: vi.fn(), getSnapshot: vi.fn() };
@@ -26,6 +27,7 @@ import {
   type Strategy,
 } from "@/lib/agent/agent-config-api";
 import { getConstants, type Constants } from "@/lib/meta/meta-api";
+import { getLlmConfig } from "@/lib/agent/observability-api";
 import { getBars, getSnapshot, type MarketSnapshot } from "@/lib/market-data/market-data-api";
 import { AgentConfigCard } from "./agent-config-card";
 
@@ -36,6 +38,7 @@ const mockBars = vi.mocked(getBars);
 const mockSnapshot = vi.mocked(getSnapshot);
 const mockListStrategies = vi.mocked(listStrategies);
 const mockUpdateStrategy = vi.mocked(updateAgentStrategy);
+const mockLlmConfig = vi.mocked(getLlmConfig);
 
 function config(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
@@ -50,6 +53,10 @@ function config(overrides: Partial<AgentConfig> = {}): AgentConfig {
     approval_mode: "REQUIRED",
     enabled: true,
     watchlist: ["AAPL", "NVDA", "SPY"],
+    llm_timeout_seconds: 180,
+    llm_keep_alive_minutes: 10,
+    llm_timeout_default_seconds: 180,
+    llm_keep_alive_default_minutes: 10,
     ...overrides,
   };
 }
@@ -64,6 +71,8 @@ const CONSTANTS: Constants = {
   approval_status: ["PENDING", "APPROVED", "REJECTED"],
   max_watchlist_size: 20,
   default_watchlist: ["AAPL", "NVDA", "SPY"],
+  llm_timeout_seconds_range: [30, 900],
+  llm_keep_alive_minutes_range: [-1, 240],
 };
 
 function snapshot(overrides: Partial<MarketSnapshot> = {}): MarketSnapshot {
@@ -106,6 +115,8 @@ beforeEach(() => {
   mockSnapshot.mockResolvedValue(snapshot());
   mockBars.mockResolvedValue({});
   mockListStrategies.mockResolvedValue(STRATEGIES);
+  mockLlmConfig.mockReset();
+  mockLlmConfig.mockResolvedValue({ provider: "ollama", model: "llama3.1" });
 });
 afterEach(() => cleanup());
 
@@ -402,5 +413,73 @@ describe("AgentConfigCard", () => {
       expect((screen.getByLabelText(/^strategy$/i) as HTMLSelectElement).disabled).toBe(true);
       expect(screen.queryByRole("button", { name: /^save strategy$/i })).toBeNull();
     });
+  });
+});
+
+describe("AgentConfigCard: Ollama timeout and keep-alive (#203)", () => {
+  function timeoutInput() {
+    return screen.getByLabelText(/llm request timeout/i) as HTMLInputElement;
+  }
+  function keepAliveInput() {
+    return screen.getByLabelText(/model keep-alive/i) as HTMLInputElement;
+  }
+  function saveButton() {
+    return screen.getByRole("button", { name: /^save$/i }) as HTMLButtonElement;
+  }
+
+  it("shows both fields with their effective values and the server defaults", async () => {
+    mockGetConfig.mockResolvedValue(config({ llm_timeout_seconds: 240, llm_keep_alive_minutes: 30 }));
+    render(<AgentConfigCard canEdit />);
+
+    expect((await screen.findByLabelText(/llm request timeout/i) as HTMLInputElement).value).toBe("240");
+    expect(keepAliveInput().value).toBe("30");
+    expect(screen.getByText(/default 180 s/i)).toBeTruthy();
+    expect(screen.getByText(/default 10 min/i)).toBeTruthy();
+    expect(screen.getByText(/keeps the model loaded for 30 min/i)).toBeTruthy();
+  });
+
+  it("sends only the changed values in the PATCH", async () => {
+    mockUpdate.mockResolvedValue(config({ llm_timeout_seconds: 300, llm_keep_alive_minutes: -1 }));
+    render(<AgentConfigCard canEdit />);
+    await screen.findByLabelText(/llm request timeout/i);
+
+    fireEvent.change(timeoutInput(), { target: { value: "300" } });
+    fireEvent.change(keepAliveInput(), { target: { value: "-1" } });
+    fireEvent.click(saveButton());
+
+    await waitFor(() =>
+      expect(mockUpdate).toHaveBeenCalledWith({ llm_timeout_seconds: 300, llm_keep_alive_minutes: -1 }),
+    );
+  });
+
+  it("blocks Save and explains an out-of-range value", async () => {
+    render(<AgentConfigCard canEdit />);
+    await screen.findByLabelText(/llm request timeout/i);
+
+    fireEvent.change(timeoutInput(), { target: { value: "5" } });
+    expect(screen.getByText("Enter whole seconds from 30 to 900.")).toBeTruthy();
+    expect(saveButton().disabled).toBe(true);
+
+    fireEvent.change(timeoutInput(), { target: { value: "180" } });
+    fireEvent.change(keepAliveInput(), { target: { value: "500" } });
+    expect(screen.getByText(/enter whole minutes from -1 to 240/i)).toBeTruthy();
+    expect(saveButton().disabled).toBe(true);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("is read-only for a VIEWER", async () => {
+    render(<AgentConfigCard canEdit={false} />);
+
+    expect((await screen.findByLabelText(/llm request timeout/i) as HTMLInputElement).disabled).toBe(true);
+    expect(keepAliveInput().disabled).toBe(true);
+  });
+
+  it("hides keep-alive and explains why when the provider isn't Ollama", async () => {
+    mockLlmConfig.mockResolvedValue({ provider: "openai", model: "gpt-4o-mini" });
+    render(<AgentConfigCard canEdit />);
+
+    expect(await screen.findByText(/apply only to a local ollama model/i)).toBeTruthy();
+    expect(screen.queryByLabelText(/model keep-alive/i)).toBeNull();
+    expect(timeoutInput().disabled).toBe(true);
   });
 });

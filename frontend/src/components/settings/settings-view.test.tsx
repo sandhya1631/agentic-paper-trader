@@ -22,7 +22,10 @@ vi.mock("@/lib/agent/scheduler-api", () => ({
   stopSchedule: vi.fn(),
 }));
 vi.mock("@/lib/agent/cycles-api", () => ({ listCycles: vi.fn() }));
-vi.mock("@/lib/agent/observability-api", () => ({ getSchedulerLogs: vi.fn() }));
+vi.mock("@/lib/agent/observability-api", () => ({
+  getSchedulerLogs: vi.fn(),
+  getLlmConfig: vi.fn(async () => ({ provider: "ollama", model: "llama3.1" })),
+}));
 vi.mock("@/lib/agent/agent-config-api", () => ({
   getAgentConfig: vi.fn(),
   updateAgentConfig: vi.fn(),
@@ -146,6 +149,10 @@ beforeEach(() => {
     approval_mode: "REQUIRED",
     enabled: true,
     watchlist: ["AAPL", "NVDA", "SPY"],
+    llm_timeout_seconds: 180,
+    llm_keep_alive_minutes: 10,
+    llm_timeout_default_seconds: 180,
+    llm_keep_alive_default_minutes: 10,
   });
   mockListStrategies.mockResolvedValue([
     { version: "S-001", revision: "1.5.0", name: "Momentum Confluence", summary: "RSI + SMA.", selectable_mode: "FIXED" },
