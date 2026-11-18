@@ -738,11 +738,13 @@ main sequence.
   held on a dedicated connection for the whole run. If another cycle or sweep for
   this agent already holds it, raise `CycleOverlapError` immediately.
 - Load `AgentConfig`.
-- Close out this agent's orphaned in-flight cycles (section 9.1). The caller holds
-  the agent lock, so any `PENDING`...`EXECUTING` cycle belongs to a dead process.
 - Expire old pending approvals for this agent.
-- Search for a cycle in any active status.
-- If an active cycle is `RECONCILING`, try to reconcile its broker order first.
+- Search for a cycle in any active status, in-flight ones first, then `RECONCILING`.
+- If it is in flight (`PENDING`...`EXECUTING`), it belongs to a dead process (the
+  caller holds the agent lock): close out all of the agent's orphans (section 9.1),
+  then search again.
+- While the active cycle is `RECONCILING`, reconcile its broker order; if that
+  resolves it, search again.
 - If an active cycle remains, raise `CycleOverlapError`.
 
 This prevents a new trigger from starting while the agent has a cycle in progress,
@@ -1053,10 +1055,13 @@ connection dropping mid-run (the run carries on, logged), and then another proce
 can take the lock and recover the run's cycle. Two guards stop the old run from acting
 beside the new one: every phase check (`_cycle_closed_elsewhere`) aborts the run if
 anyone else changed the cycle's status (cancel or recovery), and a watchlist sweep
-stops when one of its cycles comes back `INTERRUPTED`. Residual risk: if the
-connection drops during the seconds-long `EXECUTING` step and another process's gate
-runs in that window, the cycle is reconciled while the old run still submits; the
-gateway's `client_order_id` dedup and P-010 (one open order per symbol) still apply.
+stops when one of its cycles comes back `INTERRUPTED`. Residual risk: once a run has
+lost its lock connection, any gate run by another process before the old run's next
+phase check can recover its cycle. Before `EXECUTING` the old run then stops without
+acting. If it is already in `EXECUTING` (the policy re-check and the broker submit,
+bounded by their HTTP timeouts), the cycle is reconciled while the old run still
+submits; the gateway's `client_order_id` dedup and P-010 (one open order per symbol)
+still apply.
 
 Cycle `failure_code` values:
 
