@@ -50,9 +50,10 @@ Notes:
   (`TEST_DATABASE_URL`, or `DATABASE_URL` with a `_test` suffix). **Never point it at a
   real database**: the fixtures drop and recreate every table.
 - The full cycle uses whatever `LLM_PROVIDER` is configured. On a CPU-only laptop a
-  local llama3.1 cycle can exceed the Ollama client's request timeout (180 s by default) and
-  fail with `httpx.ReadTimeout` (observed on 2026-11-17: 182 s). That reflects the
-  machine, not the test.
+  local llama3.1 cycle can exceed the Ollama client's request timeout (180 s by default).
+  The cycle then ends `FAILED` / `LLM_UNAVAILABLE` with "Ollama API error: ReadTimeout"
+  (#160). A run on 2026-11-17 timed out after 182 s. That reflects the machine, not the
+  test.
 - `-rs` lists each skipped test with the flag it needs.
 
 ## In CI
@@ -68,7 +69,7 @@ run is skipped and a manual run reports every live test as skipped (green).
 | Variable | Effect | Uses secrets |
 |---|---|---|
 | `INTEGRATION_ALPACA=1` | Runs the read-only Alpaca tests | `ALPACA_API_KEY`, `ALPACA_API_SECRET` (already repo secrets) |
-| `INTEGRATION_OPENAI=1` | Runs the OpenAI LLM case and the full cycle with `LLM_PROVIDER=openai` | `OPENAI_API_KEY` (not a repo secret as of 2026-11-17) |
+| `INTEGRATION_OPENAI=1` | Runs the OpenAI LLM case and the full cycle with `LLM_PROVIDER=openai` | `OPENAI_API_KEY` (not a repo secret as of 2026-11-18) |
 
 There is no Ollama in CI: the runners are CPU-only, where a llama3.1 cycle already
 exceeds the request timeout on a laptop (see above). The order round-trip is never

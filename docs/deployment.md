@@ -70,9 +70,9 @@ Every setting and its default is defined in `backend/app/core/config.py`;
 
 ### GitHub (repository → Settings → Secrets and variables → Actions)
 
-| Name | Kind | Used by | State on 2026-11-17 |
+| Name | Kind | Used by | State on 2026-11-18 |
 |---|---|---|---|
-| `PRODUCTION_API_BASE_URL` | Variable | `keep-alive.yml` | **Not set** (the repository had 0 Actions variables). Until a repo admin sets it to the Render URL, the keep-alive job fails and Render sleeps |
+| `PRODUCTION_API_BASE_URL` | Variable | `keep-alive.yml` | **Set** to the Render API URL. If it is ever removed, the keep-alive job fails and Render sleeps |
 | `ALPACA_API_KEY`, `ALPACA_API_SECRET` | Secrets | `ci.yml` and the opt-in `integration.yml` | Present |
 | `JWT_SECRET` | Secret | `ci.yml` | Present |
 | `ALPACA_PAPER_BASE_URL`, `DATABASE_URL` | Secrets | No workflow uses them | Present |
@@ -108,35 +108,28 @@ later Connect overwrites.
 - **Keep-alive.** `.github/workflows/keep-alive.yml` pings `GET /health` every 10
   minutes from 13:00 to 21:59 UTC on weekdays, so the free instance doesn't sleep
   through market hours. A sleeping instance runs no ticks. It reads the repository
-  variable `PRODUCTION_API_BASE_URL`, which is **not set** (see section 2). GitHub can
-  delay scheduled runs; if Render still sleeps, lower the cron interval to `*/5`.
+  variable `PRODUCTION_API_BASE_URL` (set; see section 2).
+  - GitHub runs scheduled workflows on a best-effort basis: it can delay them or skip
+    them entirely. On 2026-11-18 none ran between 13:00 and 16:00 UTC, and Render was
+    asleep at 16:00 UTC (a 36 s cold start).
+  - On a trading day, check Actions → "Keep production API awake" for a run about every
+    10 minutes. Missing runs mean Render sleeps and no ticks run.
+  - If Render still sleeps, lower the cron interval to `*/5`.
 - **Restarts and orphaned cycles (#185).** A merge or an automatic restart kills any
-  cycle in progress. **Once PR #204 is merged** (open as of 2026-11-17), the API
-  closes those out at startup and in the next tick's or manual run's gate:
+  cycle in progress. Since #204 (merged and deployed on 2026-11-18), the API closes
+  those out at startup and in the next tick's or manual run's gate:
 
   | Interrupted in | Becomes |
   |---|---|
   | `PENDING`…`VALIDATING` | `FAILED` with `failure_code = INTERRUPTED` (nothing was submitted) |
   | `EXECUTING` | `RECONCILING`; the gate then looks the order up at Alpaca by its `client_order_id` and never resubmits it |
 
-  `PENDING_APPROVAL` is untouched; it expires on its own after 24 h. With #204 an
-  approval returns 409 "The agent is busy running a cycle..." while the agent's cycle
-  or sweep runs; retry when it finishes.
+  `PENDING_APPROVAL` is untouched; it expires on its own after 24 h. An approval
+  returns 409 "The agent is busy running a cycle..." while the agent's cycle or sweep
+  runs; retry when it finishes.
 
-  **Until #204 is deployed**, a restart mid-cycle leaves the agent blocked (409 on
-  Trigger Now, ticks counted as overlapping). A **manual** cycle can be cancelled from
-  the UI; a scheduled one needs SQL in the Supabase editor (check the row first):
-
-  ```sql
-  SELECT id, trigger, status, started_at FROM agent_cycles
-   WHERE status IN ('PENDING','COLLECTING','REASONING','VALIDATING') ORDER BY started_at;
-  UPDATE agent_cycles SET status = 'FAILED', failure_code = 'INTERRUPTED',
-         completed_at = now()
-   WHERE id = '<cycle id>' AND status IN ('PENDING','COLLECTING','REASONING','VALIDATING');
-  ```
-
-  Never do this for an `EXECUTING` cycle: an order may exist. Leave it to the
-  reconcile path after #204, or check Alpaca first.
+  Never edit an `EXECUTING` or `RECONCILING` cycle by hand: an order may exist at
+  Alpaca. The gate reconciles it against Alpaca; check Alpaca first if it looks stuck.
 
 ## 5. Merge window during the trading run
 
@@ -240,10 +233,10 @@ daily_cost      ≈ calls_per_day × (input_tokens × input_price + output_token
 |---|---|---|
 | The first request takes about a minute | Render cold start | Wait; check the keep-alive job ran |
 | "Failed to fetch" in the UI | CORS (`CORS_ALLOWED_ORIGINS`) or a wrong `NEXT_PUBLIC_API_BASE_URL` | Fix the setting; redeploy Vercel if it was the build-time URL |
-| Trigger Now returns 409 | A cycle is still active or parked for approval | Approve, reject or wait. With #204 deployed, an orphan is closed out on the next run; before that, see section 4 |
+| Trigger Now returns 409 | A cycle is still active or parked for approval | Approve, reject or wait. A cycle orphaned by a restart is closed out on the next run (section 4) |
 | Every cycle HOLDs | No user Alpaca keys (`account_data: UNAVAILABLE`), or the market is closed | Settings → Connect; check the time |
-| No scheduled cycles during market hours | The instance slept, `SCHEDULER_EXECUTOR` isn't `inline`, the kill switch is on, or the schedule is stopped | Section 4; Settings |
-| Trigger Now returns 404 or 500 "Agent cycle failed" (503 "LLM unavailable" once #160 is merged) | LLM misconfigured or unreachable | `GET /llm/health?probe=true` |
+| No scheduled cycles during market hours | The instance slept (keep-alive runs missing), `SCHEDULER_EXECUTOR` isn't `inline`, the kill switch is on, or the schedule is stopped | Section 4 (check the keep-alive runs in Actions); Settings |
+| Trigger Now returns 503 with the provider's error, e.g. "OpenAI API error: RateLimitError (HTTP 429)" | LLM misconfigured, unreachable or timed out; the cycle ends `FAILED` with `failure_code = LLM_UNAVAILABLE` (#160) | `GET /llm/health?probe=true` |
 
 Related: `docs/demo-runbook.md` (local demo), `docs/integration-tests.md` (live-service
 tests), `backend/BACKEND_DOCUMENTATION.md` (internals).
