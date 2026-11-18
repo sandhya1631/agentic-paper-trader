@@ -86,8 +86,10 @@ def _agent_cycle_lock_only_for_real_sessions(monkeypatch):
     """Give MagicMock-session unit tests a no-op agent cycle lock.
 
     The real lock needs a session bound to a real engine and fails closed otherwise.
-    Tests that drive run_agent_cycle with a MagicMock ``db`` get a no-op instead;
-    every real AsyncSession (``db_session``, ``client``) still takes the real lock.
+    Tests that drive run_agent_cycle (or call the approve route, which takes the lock
+    through ``orchestrator.agent_cycle_lock``, #185) with a MagicMock or SimpleNamespace
+    ``db`` get a no-op instead; every real AsyncSession (``db_session``, ``client``)
+    still takes the real lock.
     """
     real_lock = orchestrator.agent_cycle_lock
 

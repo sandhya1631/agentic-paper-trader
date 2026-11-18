@@ -5,10 +5,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from conftest import TestSessionLocal
+from sqlalchemy import select
+from test_cycle_recovery import _offline_cycle_deps, _seed_agent, _seed_cycle, _stored
 
 from app.agent import scheduler
 from app.core.config import Settings
-from app.db.enums import UserRole
+from app.core.constants import CYCLE_INTERRUPTED
+from app.db.enums import CycleStatus, CycleTrigger, UserRole
+from app.db.models import AgentCycle
 
 
 class _SessionContext:
@@ -57,7 +62,10 @@ def _clean_inline_state(monkeypatch):
     ))
     monkeypatch.setattr(scheduler, "_schedule_tick_statuses", {})
     monkeypatch.setattr(scheduler, "_last_tick_status", None)
-    monkeypatch.setattr(scheduler.time, "time", lambda: 1_800)
+    # Freeze only the scheduler's clock: patching the global time.time would also
+    # freeze SQLAlchemy's asyncpg schema-cache timestamps, so a DB-backed test here
+    # would reuse enum type OIDs that an earlier test's table reset dropped.
+    monkeypatch.setattr(scheduler, "time", SimpleNamespace(time=lambda: 1_800))
 
 
 def _inline(monkeypatch, redis_url=""):
@@ -220,3 +228,42 @@ async def test_celery_mode_still_enqueues_through_dispatch_once(monkeypatch):
 
 def test_scheduler_executor_defaults_to_celery():
     assert Settings().scheduler_executor == "celery"
+
+
+@pytest.mark.asyncio
+async def test_inline_tick_recovers_an_orphaned_scheduled_cycle(db_session, monkeypatch):
+    """#185: with SCHEDULER_EXECUTOR=inline a redeploy mid-tick orphans a SCHEDULED
+    cycle (which the cancel route refuses). The next inline tick's gate recovers it
+    and the sweep runs, instead of the agent being skipped as busy forever."""
+    _inline(monkeypatch)
+    monkeypatch.setattr(scheduler, "_new_redis_client", _no_redis_allowed)
+    monkeypatch.setattr(scheduler, "AsyncSessionLocal", TestSessionLocal)
+    monkeypatch.setattr(scheduler, "is_kill_switch_enabled", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        scheduler,
+        "_fetch_market_clock",
+        AsyncMock(return_value=scheduler.MarketClock(is_open=True)),
+    )
+    _offline_cycle_deps(monkeypatch)
+    agent_id = await _seed_agent()
+    orphan_id = await _seed_cycle(
+        agent_id, CycleStatus.REASONING, trigger=CycleTrigger.SCHEDULED
+    )
+
+    await scheduler.dispatch_scheduled_cycles(5)
+
+    [tick] = scheduler.get_tick_history()
+    assert (tick.status, tick.overlapping_agents) == ("COMPLETED", 0)
+    orphan = await _stored(orphan_id)
+    assert (orphan.status, orphan.failure_code) == (CycleStatus.FAILED, CYCLE_INTERRUPTED)
+    async with TestSessionLocal() as db:
+        swept = (
+            await db.execute(
+                select(AgentCycle).where(
+                    AgentCycle.agent_id == agent_id, AgentCycle.id != orphan_id
+                )
+            )
+        ).scalars().all()
+    assert [(c.trigger, c.status) for c in swept] == [
+        (CycleTrigger.SCHEDULED, CycleStatus.HOLD)
+    ]
