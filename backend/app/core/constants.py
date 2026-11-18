@@ -90,6 +90,15 @@ SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")
 # Whose key a cycle or replay used, recorded in the cycle snapshot (#191).
 LLM_KEY_SOURCE_USER = "USER"
 LLM_KEY_SOURCE_SERVER = "SERVER"
+# Ollama request timeout and model keep-alive (#203): the server defaults are Settings
+# (OLLAMA_TIMEOUT_SECONDS, OLLAMA_KEEP_ALIVE_MINUTES); an agent may override them within
+# these inclusive bounds. Keep-alive -1 keeps the model loaded; 0 unloads it after each
+# call. Exposed via /meta/constants so the Settings form validates the same range.
+OLLAMA_TIMEOUT_SECONDS_RANGE = (30, 900)
+OLLAMA_KEEP_ALIVE_MINUTES_RANGE = (-1, 240)
+# Code defaults of those Settings (the env can override them).
+OLLAMA_TIMEOUT_SECONDS_DEFAULT = 180
+OLLAMA_KEEP_ALIVE_MINUTES_DEFAULT = 10
 # failure_code of a cycle whose LLM was misconfigured or unreachable (#160).
 LLM_UNAVAILABLE = "LLM_UNAVAILABLE"
 

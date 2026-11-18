@@ -28,8 +28,14 @@ import {
   summarizePreview,
   validateSymbol,
   validateWatchlist,
+  describeKeepAlive,
+  ollamaOptionsApply,
+  parseWholeNumber,
+  validateKeepAlive,
+  validateLlmTimeout,
   type SymbolPreview,
 } from "@/lib/agent/agent-config-view";
+import { getLlmConfig } from "@/lib/agent/observability-api";
 import { getConstants } from "@/lib/meta/meta-api";
 import { getBars, getSnapshot } from "@/lib/market-data/market-data-api";
 
@@ -68,6 +74,12 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
   const [draftStrategy, setDraftStrategy] = useState("");
   const [strategySaving, setStrategySaving] = useState(false);
   const [strategyFeedback, setStrategyFeedback] = useState<Feedback | null>(null);
+  // #203: Ollama request timeout / keep-alive drafts (raw input text) and their bounds.
+  const [draftTimeout, setDraftTimeout] = useState("");
+  const [draftKeepAlive, setDraftKeepAlive] = useState("");
+  const [timeoutRange, setTimeoutRange] = useState<number[] | undefined>(undefined);
+  const [keepAliveRange, setKeepAliveRange] = useState<number[] | undefined>(undefined);
+  const [provider, setProvider] = useState<string | null>(null);
   const previewRequest = useRef(0);
 
   const applyConfig = useCallback((cfg: AgentConfig) => {
@@ -75,19 +87,26 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
     setDraftWatchlist(cfg.watchlist);
     setDraftMode(cfg.approval_mode);
     setDraftStrategy(cfg.strategy_version);
+    setDraftTimeout(String(cfg.llm_timeout_seconds));
+    setDraftKeepAlive(String(cfg.llm_keep_alive_minutes));
   }, []);
 
   const load = useCallback(async () => {
     setStatus("loading");
     setLoadError(null);
-    // allSettled: constants and strategies are optional (the selects fall back gracefully).
-    const [cfg, meta, strategyList] = await Promise.allSettled([
+    // allSettled: constants, strategies and the provider are optional (the form falls
+    // back gracefully; the server validates every field either way).
+    const [cfg, meta, strategyList, llm] = await Promise.allSettled([
       getAgentConfig(),
       getConstants(),
       listStrategies(),
+      getLlmConfig(),
     ]);
     const constants = meta.status === "fulfilled" ? meta.value : null;
     setMaxSize(constants?.max_watchlist_size ?? null);
+    setTimeoutRange(constants?.llm_timeout_seconds_range);
+    setKeepAliveRange(constants?.llm_keep_alive_minutes_range);
+    setProvider(llm.status === "fulfilled" ? (llm.value?.provider ?? null) : null);
     if (strategyList.status === "fulfilled") {
       setStrategies(strategyList.value);
       setStrategiesError(null);
@@ -113,11 +132,29 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
 
   const symbolError = symbolInput.trim() ? validateSymbol(symbolInput, draftWatchlist, maxSize) : null;
   const watchlistError = validateWatchlist(draftWatchlist, maxSize);
+  // Validate the #203 fields only when the API returned them (a frontend deployed before
+  // its backend gets a config without them) and they apply to the provider, so they can
+  // never block saving the watchlist or approval mode.
+  const ollamaFieldsApply = ollamaOptionsApply(provider);
+  const llmFieldsPresent =
+    config?.llm_timeout_seconds !== undefined && config?.llm_keep_alive_minutes !== undefined;
+  const checkLlmFields = llmFieldsPresent && ollamaFieldsApply;
+  const timeoutError = checkLlmFields ? validateLlmTimeout(draftTimeout, timeoutRange) : null;
+  const keepAliveError = checkLlmFields ? validateKeepAlive(draftKeepAlive, keepAliveRange) : null;
   const patch: AgentConfigUpdate = config
-    ? buildConfigPatch(config, { watchlist: draftWatchlist, approval_mode: draftMode })
+    ? buildConfigPatch(config, {
+        watchlist: draftWatchlist,
+        approval_mode: draftMode,
+        llm_timeout_seconds: draftTimeout,
+        llm_keep_alive_minutes: draftKeepAlive,
+      })
     : {};
-  const dirty = Object.keys(patch).length > 0;
-  const canSave = canEdit && !saving && dirty && !watchlistError;
+  // Dirty = a real change to send, or invalid input to fix or reset. Input that parses to
+  // the saved value (e.g. "0180") is not a change, so Save never sends an empty PATCH.
+  const dirty = Object.keys(patch).length > 0 || timeoutError !== null || keepAliveError !== null;
+  const canSave =
+    canEdit && !saving && dirty && !watchlistError && !timeoutError && !keepAliveError;
+  const keepAlivePreview = parseWholeNumber(draftKeepAlive);
   const locked = !canEdit || saving;
 
   function edited() {
@@ -206,7 +243,9 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
     setStrategyFeedback(null);
     const [res] = await Promise.allSettled([updateAgentStrategy(config.id, draftStrategy)]);
     if (res.status === "fulfilled") {
-      applyConfig(res.value);
+      // PUT /agent/{id}/strategy answers with the base config (no watchlist or the #203
+      // fields), so update the strategy on top of what the card already holds.
+      applyConfig({ ...config, ...res.value });
       setStrategyFeedback({ tone: "success", message: SAVED_MESSAGE });
     } else {
       setStrategyFeedback({ tone: "error", message: describeStrategyError(res.reason, "save") });
@@ -360,6 +399,71 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
               )
             )}
           </div>
+
+          {config && llmFieldsPresent && (
+            <fieldset className="space-y-3" disabled={locked || !ollamaFieldsApply}>
+              <legend className="text-xs font-medium text-muted">Local model (Ollama)</legend>
+              {!ollamaFieldsApply && (
+                <p className="text-sm text-muted">
+                  These apply only to a local Ollama model. The current provider is {provider},
+                  which uses its own request timeout; keep-alive doesn&apos;t apply to it.
+                </p>
+              )}
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label htmlFor="agent-llm-timeout" className="text-xs font-medium text-muted">
+                    LLM request timeout (seconds)
+                  </label>
+                  <input
+                    id="agent-llm-timeout"
+                    type="number"
+                    disabled={locked || !ollamaFieldsApply}
+                    inputMode="numeric"
+                    min={timeoutRange?.[0]}
+                    max={timeoutRange?.[1]}
+                    value={draftTimeout}
+                    onChange={(e) => {
+                      setDraftTimeout(e.target.value);
+                      edited();
+                    }}
+                    className={`${inputClass} max-w-[10rem]`}
+                  />
+                  <p className="mt-1 text-xs text-muted">
+                    How long to wait for one answer. Default {config.llm_timeout_default_seconds} s.
+                  </p>
+                  {timeoutError && <p className="mt-1 text-sm text-negative">{timeoutError}</p>}
+                </div>
+                {ollamaFieldsApply && (
+                  <div>
+                    <label htmlFor="agent-llm-keep-alive" className="text-xs font-medium text-muted">
+                      Model keep-alive (minutes)
+                    </label>
+                    <input
+                      id="agent-llm-keep-alive"
+                      type="number"
+                      disabled={locked}
+                      inputMode="numeric"
+                      min={keepAliveRange?.[0]}
+                      max={keepAliveRange?.[1]}
+                      value={draftKeepAlive}
+                      onChange={(e) => {
+                        setDraftKeepAlive(e.target.value);
+                        edited();
+                      }}
+                      className={`${inputClass} max-w-[10rem]`}
+                    />
+                    <p className="mt-1 text-xs text-muted">
+                      {keepAlivePreview !== null ? `${describeKeepAlive(keepAlivePreview)} ` : ""}
+                      Default {config.llm_keep_alive_default_minutes} min; -1 keeps it loaded.
+                    </p>
+                    {keepAliveError && (
+                      <p className="mt-1 text-sm text-negative">{keepAliveError}</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </fieldset>
+          )}
 
           <div>
             <label htmlFor="agent-strategy" className="text-xs font-medium text-muted">

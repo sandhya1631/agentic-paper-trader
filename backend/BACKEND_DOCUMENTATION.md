@@ -124,6 +124,8 @@ Important settings:
 | `OLLAMA_TEMPERATURE` | Ollama generation temperature; defaults to `0.1` for low-variance decisions. |
 | `OLLAMA_NUM_CTX` | Ollama context-window size; defaults to 4096 tokens. |
 | `OLLAMA_JSON_FORMAT` | Requests Ollama JSON output mode; defaults to true. |
+| `OLLAMA_TIMEOUT_SECONDS` | Server default for each `/api/chat` request's timeout; defaults to 180 (allowed 30–900). An agent can override it in Settings → Agent configuration (#203). Applies to Ollama only: the OpenAI and Claude SDKs keep their own timeouts and retries. |
+| `OLLAMA_KEEP_ALIVE_MINUTES` | Server default for how long Ollama keeps the model loaded after a call, sent as `keep_alive` on every `/api/chat`; defaults to 10 (allowed -1 = keep loaded, 0 = unload after each call, up to 240). Ollama's own default when unset is 5 minutes, which unloads the model between sweeps on a slow CPU host. Per-agent override in Settings (#203). |
 | `OPENAI_API_KEY`, `OPENAI_MODEL` | OpenAI connection; `OPENAI_MODEL` (default `gpt-4o-mini`) must support strict structured output (`json_schema`) and `temperature`. |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | Anthropic (Claude) connection; model defaults to `claude-opus-5-5`. |
 | `CREDENTIAL_ENCRYPTION_KEY` | Required Fernet key for user Alpaca credentials. |
@@ -243,6 +245,11 @@ Stores how an agent is configured:
 - `model_provider`, `model_name`: unused (#191). Nothing reads them and provisioning
   writes placeholders; each cycle's `snapshot_json.observability` records the provider,
   model and key source it actually used.
+- `llm_timeout_seconds`, `llm_keep_alive_minutes` (#203): nullable per-agent overrides
+  of the Ollama request timeout and model keep-alive. NULL = follow the server
+  defaults `OLLAMA_TIMEOUT_SECONDS` / `OLLAMA_KEEP_ALIVE_MINUTES`, so changing the env
+  default reaches every agent that never overrode it. Added to old databases by
+  `ensure_agent_config_llm_options`.
 - `version`
 - `created_at`, `updated_at`
 
@@ -252,7 +259,17 @@ most 10%. The `strategy_version` validator calls `get_system_prompt()` so an
 unknown strategy version is rejected.
 
 The owner reads this row with `GET /agent/config`. An `OPERATOR` or `ADMIN` can
-change only `watchlist` and `approval_mode` with `PATCH /agent/config` (#141).
+change only `watchlist`, `approval_mode`, `llm_timeout_seconds` (30–900) and
+`llm_keep_alive_minutes` (-1–240) with `PATCH /agent/config` (#141, #203). `GET`
+returns the **effective** timeout and keep-alive (the override, else the server
+default) plus the server defaults (`llm_timeout_default_seconds`,
+`llm_keep_alive_default_minutes`); the bounds are in `GET /meta/constants`. A
+changed value is audited as `AGENT_CONFIG_UPDATED` from the effective old value;
+`null` is rejected; setting a value equal to the server default stores NULL again, so
+the agent follows later changes to the default. Every
+Ollama call of that agent's cycles (first try and self-repair, manual and
+scheduled, Celery or inline) uses them through `orchestrator._agent_llm_client`;
+replay has no agent and uses the server defaults.
 Symbols are trimmed, upper-cased and de-duplicated in order, then pattern-checked,
 and the de-duplicated list must hold 1 to `MAX_WATCHLIST_SIZE` (20) symbols (so a
 repeated symbol never counts twice toward the cap); the cap is exposed as

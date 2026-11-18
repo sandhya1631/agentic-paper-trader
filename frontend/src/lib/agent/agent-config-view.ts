@@ -79,16 +79,87 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, i) => value === b[i]);
 }
 
-/** Only the fields that differ from the saved config (an empty object means "unchanged"). */
+/**
+ * Only the fields that differ from the saved config (an empty object means "unchanged").
+ * The Ollama timeout / keep-alive drafts are raw input text (#203); they are included only
+ * when they parse as whole numbers that differ from the saved effective values.
+ */
 export function buildConfigPatch(
-  original: Pick<AgentConfig, "watchlist" | "approval_mode">,
-  draft: { watchlist: readonly string[]; approval_mode: string },
+  original: Pick<AgentConfig, "watchlist" | "approval_mode"> &
+    Partial<Pick<AgentConfig, "llm_timeout_seconds" | "llm_keep_alive_minutes">>,
+  draft: {
+    watchlist: readonly string[];
+    approval_mode: string;
+    llm_timeout_seconds?: string;
+    llm_keep_alive_minutes?: string;
+  },
 ): AgentConfigUpdate {
   const patch: AgentConfigUpdate = {};
   const watchlist = normalizeWatchlist(draft.watchlist);
   if (!sameList(watchlist, original.watchlist)) patch.watchlist = watchlist;
   if (draft.approval_mode !== original.approval_mode) patch.approval_mode = draft.approval_mode;
+  const timeout = parseWholeNumber(draft.llm_timeout_seconds);
+  if (timeout !== null && timeout !== original.llm_timeout_seconds) {
+    patch.llm_timeout_seconds = timeout;
+  }
+  const keepAlive = parseWholeNumber(draft.llm_keep_alive_minutes);
+  if (keepAlive !== null && keepAlive !== original.llm_keep_alive_minutes) {
+    patch.llm_keep_alive_minutes = keepAlive;
+  }
   return patch;
+}
+
+/** A whole number typed into a field ("120", " -1 "), or null for blank/invalid input. */
+export function parseWholeNumber(raw: string | undefined): number | null {
+  if (raw === undefined) return null;
+  const text = raw.trim();
+  if (!/^-?\d+$/.test(text)) return null;
+  return Number(text);
+}
+
+function inRange(value: number, range: readonly number[] | undefined): boolean {
+  if (!range || range.length !== 2) return true; // the server validates either way
+  return value >= range[0] && value <= range[1];
+}
+
+/** A whole number within `/meta/constants` bounds, or an error naming the unit. */
+function validateWholeInRange(
+  raw: string,
+  range: readonly number[] | undefined,
+  unit: string,
+  hint = "",
+): string | null {
+  const value = parseWholeNumber(raw);
+  if (value !== null && inRange(value, range)) return null;
+  return range && range.length === 2
+    ? `Enter whole ${unit} from ${range[0]} to ${range[1]}${hint}.`
+    : `Enter a whole number of ${unit}.`;
+}
+
+/** #203: the request timeout must be whole seconds within `/meta/constants` bounds. */
+export function validateLlmTimeout(raw: string, range?: readonly number[]): string | null {
+  return validateWholeInRange(raw, range, "seconds");
+}
+
+/** #203: keep-alive is whole minutes; -1 keeps the model loaded, 0 unloads it each call. */
+export function validateKeepAlive(raw: string, range?: readonly number[]): string | null {
+  return validateWholeInRange(raw, range, "minutes", " (-1 keeps the model loaded)");
+}
+
+/** What a keep-alive value means, for the hint under the field. */
+export function describeKeepAlive(minutes: number): string {
+  if (minutes < 0) return "Keeps the model loaded until Ollama restarts.";
+  if (minutes === 0) return "Unloads the model after every call.";
+  return `Keeps the model loaded for ${minutes} min after each call.`;
+}
+
+/**
+ * The timeout and keep-alive apply to the local Ollama model only: the OpenAI and Claude
+ * SDKs use their own timeouts, and keep-alive has no meaning for them. An unknown provider
+ * (the lookup failed) still shows the fields; the server applies them only for Ollama.
+ */
+export function ollamaOptionsApply(provider: string | null | undefined): boolean {
+  return !provider || provider.toLowerCase() === "ollama";
 }
 
 export function isAutoMode(mode: string): boolean {

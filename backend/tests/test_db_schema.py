@@ -14,6 +14,7 @@ from app.db.models import (
     User,
 )
 from app.db.schema import (
+    ensure_agent_config_llm_options,
     ensure_agent_cycle_prompt_columns,
     ensure_policy_token_scrubbed,
     ensure_user_scheduler_column,
@@ -293,3 +294,27 @@ async def test_policy_token_scrub_leaves_other_rows_untouched(db_session: AsyncS
         {"id": approval.id},
     )
     assert approval_text == '{"note": "\\u0000",  "policy_token": "t"}'  # skipped, not fatal
+
+
+async def test_existing_agent_configs_table_gets_the_columns(db_session):
+    for column in ("llm_timeout_seconds", "llm_keep_alive_minutes"):
+        await db_session.execute(text(f"ALTER TABLE agent_configs DROP COLUMN {column}"))
+
+    connection = await db_session.connection()
+    await ensure_agent_config_llm_options(connection)
+    await ensure_agent_config_llm_options(connection)  # idempotent
+
+    rows = (
+        await db_session.execute(
+            text(
+                "SELECT column_name, is_nullable, data_type, column_default "
+                "FROM information_schema.columns WHERE table_name = 'agent_configs' "
+                "AND column_name IN ('llm_timeout_seconds', 'llm_keep_alive_minutes') "
+                "ORDER BY column_name"
+            )
+        )
+    ).all()
+    assert [tuple(r) for r in rows] == [
+        ("llm_keep_alive_minutes", "YES", "integer", None),
+        ("llm_timeout_seconds", "YES", "integer", None),
+    ]

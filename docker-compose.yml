@@ -62,6 +62,8 @@ services:
       LLM_SERVER_KEY_FALLBACK: ${LLM_SERVER_KEY_FALLBACK:-true}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-180}
+      OLLAMA_KEEP_ALIVE_MINUTES: ${OLLAMA_KEEP_ALIVE_MINUTES:-10}
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,6 +93,8 @@ services:
       LLM_SERVER_KEY_FALLBACK: ${LLM_SERVER_KEY_FALLBACK:-true}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1}
+      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-180}
+      OLLAMA_KEEP_ALIVE_MINUTES: ${OLLAMA_KEEP_ALIVE_MINUTES:-10}
       CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY}
     depends_on:
       postgres:

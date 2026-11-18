@@ -23,6 +23,11 @@ from app.accounts.llm_keys import resolve_user_llm
 from app.agent import orchestrator
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
+from app.agent.llm_options import (
+    effective_llm_keep_alive_minutes,
+    effective_llm_timeout_seconds,
+    stored_override,
+)
 from app.agent.orchestrator import AgentNotFoundError, CycleOverlapError, run_agent_cycle
 from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition
 from app.agent.replay import ReplaySample, evaluate_replay
@@ -354,8 +359,18 @@ def _agent_config_detail(agent: AgentConfig) -> AgentConfigDetailRead:
     upper-case, de-duplicated) keeps the Settings card from loading with unsaved
     changes; the stored row itself is left as it is.
     """
-    detail = AgentConfigDetailRead.model_validate(agent)
-    return detail.model_copy(update={"watchlist": normalize_watchlist(agent.watchlist)})
+    settings = get_settings()
+    detail = AgentConfigDetailRead.model_validate(
+        {
+            **AgentConfigRead.model_validate(agent).model_dump(),
+            "watchlist": normalize_watchlist(agent.watchlist),
+            "llm_timeout_seconds": effective_llm_timeout_seconds(agent, settings),
+            "llm_keep_alive_minutes": effective_llm_keep_alive_minutes(agent, settings),
+            "llm_timeout_default_seconds": settings.ollama_timeout_seconds,
+            "llm_keep_alive_default_minutes": settings.ollama_keep_alive_minutes,
+        }
+    )
+    return detail
 
 
 @router.get(
@@ -378,7 +393,7 @@ async def get_agent_config(
 @router.patch(
     "/config",
     response_model=AgentConfigDetailRead,
-    summary="Update the caller's agent watchlist / approval mode (operator)",
+    summary="Update the caller's agent watchlist, approval mode or Ollama options (operator)",
 )
 async def update_agent_config(
     body: AgentConfigUpdate,
@@ -388,9 +403,10 @@ async def update_agent_config(
 ) -> AgentConfigDetailRead:
     """Apply the changed fields and audit them in the same commit.
 
-    Only the watchlist and approval mode are editable (the body forbids every other
-    field). OPERATOR/ADMIN only: switching to AUTO removes human review, which a VIEWER
-    (who cannot approve trades) must not be able to do. The next cycle reads the new
+    Only the watchlist, approval mode and the Ollama timeout / keep-alive (#203) are
+    editable (the body forbids every other field). OPERATOR/ADMIN only: switching to
+    AUTO removes human review, which a VIEWER (who cannot approve trades) must not be
+    able to do. The next cycle reads the new
     values; risk policies still gate every order.
     """
     agent = await _get_owned_agent(db, current_user.id, agent_id, for_update=True)
@@ -409,6 +425,28 @@ async def update_agent_config(
             "to": body.approval_mode.value,
         }
         agent.approval_mode = body.approval_mode
+    # #203: the Ollama timeout / keep-alive. A value equal to the server default is stored
+    # as NULL ("follow the default"), so a later env change reaches this agent again; that
+    # also clears an override that happens to equal a new default. Only an EFFECTIVE change
+    # is audited (old -> new), like the other fields.
+    settings = get_settings()
+    if body.llm_timeout_seconds is not None:
+        old_timeout = effective_llm_timeout_seconds(agent, settings)
+        if body.llm_timeout_seconds != old_timeout:
+            changes["llm_timeout_seconds"] = {"from": old_timeout, "to": body.llm_timeout_seconds}
+        agent.llm_timeout_seconds = stored_override(
+            body.llm_timeout_seconds, settings.ollama_timeout_seconds
+        )
+    if body.llm_keep_alive_minutes is not None:
+        old_keep_alive = effective_llm_keep_alive_minutes(agent, settings)
+        if body.llm_keep_alive_minutes != old_keep_alive:
+            changes["llm_keep_alive_minutes"] = {
+                "from": old_keep_alive,
+                "to": body.llm_keep_alive_minutes,
+            }
+        agent.llm_keep_alive_minutes = stored_override(
+            body.llm_keep_alive_minutes, settings.ollama_keep_alive_minutes
+        )
 
     if changes:
         agent.version += 1
@@ -420,6 +458,7 @@ async def update_agent_config(
             actor_id=current_user.id,
             details={"changes": changes},
         )
+    if changes or db.is_modified(agent):
         await db.commit()
         await db.refresh(agent)
     return _agent_config_detail(agent)

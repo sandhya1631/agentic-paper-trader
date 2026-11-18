@@ -44,6 +44,10 @@ from app.agent.approval import (
 from app.agent.context import build_agent_context
 from app.agent.knowledge import retrieve_knowledge
 from app.agent.live_context import UNSET, LiveAccountData, Unset, fetch_live_account_data
+from app.agent.llm_options import (
+    effective_llm_keep_alive_minutes,
+    effective_llm_timeout_seconds,
+)
 from app.agent.prompt import get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.agent.watchlist import normalize_watchlist
@@ -69,6 +73,7 @@ from app.db.enums import (
 from app.db.models import AgentConfig, AgentCycle, CycleApproval, utcnow
 from app.llm.base import LLMClient, LLMUnavailableError
 from app.llm.factory import get_llm_client
+from app.llm.ollama_client import OllamaClient
 from app.market_data.alpaca_client import MarketDataCollector, create_market_data_collector
 from app.schemas import DecisionProposal
 
@@ -175,6 +180,27 @@ def _enforce_context_window(
 
 class CycleOverlapError(Exception):
     """Raised when the agent already has a non-terminal cycle in progress."""
+
+
+def _agent_llm_client(agent: AgentConfig) -> LLMClient:
+    """The server's LLM client for one of this agent's cycles (#203), used when the
+    owner has no AI key of their own (#191, the `server_client` of `resolve_agent_llm`).
+
+    For Ollama, a fresh client derived from the cached server-wide one, carrying the
+    agent's effective request timeout and model keep-alive; both the first call and the
+    self-repair call of the cycle use it. Other providers get the cached client as is:
+    the OpenAI and Claude SDKs have their own request timeouts and retries, and
+    keep-alive doesn't apply to them. Built per cycle (a sweep re-reads the agent for
+    every symbol), so a Settings change applies to the next cycle.
+    """
+    client = get_llm_client()
+    if isinstance(client, OllamaClient):
+        settings = get_settings()
+        return client.with_request_options(
+            timeout_seconds=effective_llm_timeout_seconds(agent, settings),
+            keep_alive_minutes=effective_llm_keep_alive_minutes(agent, settings),
+        )
+    return client
 
 
 class AgentNotFoundError(ValueError):
@@ -589,10 +615,13 @@ async def _run_agent_cycle(
         # The agent owner's own AI key, else the server's LLM (#191). Resolved first, so
         # with no key and LLM_SERVER_KEY_FALLBACK off the cycle fails (LLM_UNAVAILABLE)
         # before any LLM call (and, for a manual cycle, before any market-data or broker
-        # read; a sweep has already read both once). Built per cycle, never shared.
+        # read; a sweep has already read both once). Built per cycle, never shared. The
+        # server fallback still carries this agent's Ollama timeout / keep-alive (#203).
         llm_used: EffectiveLLM | None = None
         if llm_client is None:
-            owner_llm = await resolve_agent_llm(db, agent, server_client=get_llm_client)
+            owner_llm = await resolve_agent_llm(
+                db, agent, server_client=lambda: _agent_llm_client(agent)
+            )
             llm_client, llm_used = owner_llm.client, owner_llm.effective
 
         # 4. Collect Market Data (reuse caller-provided bars for a watchlist sweep)
@@ -718,6 +747,11 @@ async def _run_agent_cycle(
         # 6. Execute LLM Call
         cycle.status = CycleStatus.REASONING
         await db.commit()
+        if isinstance(llm_client, OllamaClient):
+            # Record the request options this cycle used (#203): they vary per agent and
+            # can change between cycles. Not part of the model's input (already built).
+            context["observability"]["llm_timeout_seconds"] = llm_client.timeout_seconds
+            context["observability"]["llm_keep_alive_minutes"] = llm_client.keep_alive_minutes
 
         raw_response = await llm_client.generate(prompt_input, system=system_prompt)
 

@@ -28,6 +28,8 @@ def create_llm_client(settings: Settings | None = None) -> LLMClient:
             temperature=settings.ollama_temperature,
             num_ctx=settings.ollama_num_ctx,
             json_format=settings.ollama_json_format,
+            timeout_seconds=settings.ollama_timeout_seconds,
+            keep_alive_minutes=settings.ollama_keep_alive_minutes,
         )
     if provider == "anthropic":
         return _anthropic_client(settings.anthropic_api_key, settings.anthropic_model)

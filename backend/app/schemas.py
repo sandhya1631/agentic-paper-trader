@@ -16,6 +16,8 @@ from app.core.constants import (
     DEFAULT_STRATEGY_VERSION,
     DYNAMIC_STRATEGY_VERSION,
     MAX_WATCHLIST_SIZE,
+    OLLAMA_KEEP_ALIVE_MINUTES_RANGE,
+    OLLAMA_TIMEOUT_SECONDS_RANGE,
 )
 from app.db.enums import (
     ApprovalMode,
@@ -136,10 +138,17 @@ class AgentConfigDetailRead(AgentConfigRead):
     """
 
     watchlist: list[str]
+    # #203: the EFFECTIVE Ollama request timeout and model keep-alive for this agent (its
+    # override, else the server default), plus the server defaults for the form's hints.
+    llm_timeout_seconds: int
+    llm_keep_alive_minutes: int
+    llm_timeout_default_seconds: int
+    llm_keep_alive_default_minutes: int
 
 
 class AgentConfigUpdate(BaseModel):
-    """PATCH /agent/config body (#141). Only the watchlist and approval mode are editable.
+    """PATCH /agent/config body (#141). Only the watchlist, approval mode and the Ollama
+    timeout / keep-alive overrides (#203; -1 keep-alive = keep loaded) are editable.
 
     extra="forbid" makes any other field (cadence_minutes, risk limits, enabled,
     strategy/model) a 422 instead of being silently ignored. Each symbol is a Ticker
@@ -152,6 +161,25 @@ class AgentConfigUpdate(BaseModel):
         Annotated[list[Ticker], Field(min_length=1, max_length=MAX_WATCHLIST_SIZE)] | None
     ) = None
     approval_mode: ApprovalMode | None = None
+    llm_timeout_seconds: (
+        Annotated[
+            int,
+            Field(
+                ge=OLLAMA_TIMEOUT_SECONDS_RANGE[0], le=OLLAMA_TIMEOUT_SECONDS_RANGE[1]
+            ),
+        ]
+        | None
+    ) = None
+    llm_keep_alive_minutes: (
+        Annotated[
+            int,
+            Field(
+                ge=OLLAMA_KEEP_ALIVE_MINUTES_RANGE[0],
+                le=OLLAMA_KEEP_ALIVE_MINUTES_RANGE[1],
+            ),
+        ]
+        | None
+    ) = None
 
     @field_validator("watchlist", mode="before")
     @classmethod
@@ -172,7 +200,10 @@ class AgentConfigUpdate(BaseModel):
     @model_validator(mode="after")
     def _at_least_one_field_and_no_nulls(self) -> "AgentConfigUpdate":
         if not self.model_fields_set:
-            raise ValueError("Provide at least one of: watchlist, approval_mode")
+            raise ValueError(
+                "Provide at least one of: watchlist, approval_mode, llm_timeout_seconds, "
+                "llm_keep_alive_minutes"
+            )
         for name in sorted(self.model_fields_set):
             if getattr(self, name) is None:
                 raise ValueError(f"{name} cannot be null")
