@@ -158,6 +158,9 @@ cd frontend; npm run typecheck # tsc --noEmit
 cd backend;  pytest            # backend tests (venv activated)
 ```
 
+Live-service tests (Alpaca paper, a live LLM, a full cycle) are opt-in; see
+[docs/integration-tests.md](docs/integration-tests.md).
+
 ## Troubleshooting
 
 - **`ModuleNotFoundError: No module named 'apscheduler'` while importing `app.agent.scheduler`**
