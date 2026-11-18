@@ -269,10 +269,15 @@ async def test_lost_lock_connection_does_not_fail_a_finished_run(caplog):
         with caplog.at_level(logging.WARNING, logger="app.agent.orchestrator"):
             async with real_agent_cycle_lock(db, agent_id):
                 # Kill the backend holding the advisory lock, as a DB restart would.
+                # pg_locks is server-wide: scope it to this test database, or it also
+                # kills advisory-lock holders of other databases on the same server
+                # (a dev stack's live sweep, a parallel worktree's test run).
                 killed = await db.scalar(
                     text(
                         "SELECT count(pg_terminate_backend(pid)) FROM pg_locks "
-                        "WHERE locktype = 'advisory' AND pid <> pg_backend_pid()"
+                        "WHERE locktype = 'advisory' AND pid <> pg_backend_pid() "
+                        "AND database = (SELECT oid FROM pg_database "
+                        "WHERE datname = current_database())"
                     )
                 )
                 assert killed == 1

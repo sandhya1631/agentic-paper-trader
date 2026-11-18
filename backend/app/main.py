@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
@@ -7,6 +8,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.accounts.router import router as accounts_router
+from app.agent.orchestrator import recover_orphaned_cycles
 from app.agent.router import router as agent_router
 from app.agent.scheduler import add_agent_schedule_job, create_scheduler
 from app.auth.router import router as auth_router
@@ -30,6 +32,7 @@ from app.market_data.router import router as market_data_router
 from app.meta.router import router as meta_router
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 tags_metadata = [
@@ -71,6 +74,14 @@ async def lifespan(app: FastAPI):
         await ensure_user_scheduler_column(conn)
         await ensure_kill_switch_event_scope_columns(conn)
         await ensure_policy_token_scrubbed(conn)
+    # Close out cycles a previous process left in flight (a redeploy or crash mid-cycle,
+    # #185) before any tick can run. Agents whose lock another live process holds are
+    # skipped; their active-cycle gate recovers them later. Never blocks startup.
+    try:
+        async with AsyncSessionLocal() as db:
+            await recover_orphaned_cycles(db)
+    except Exception:
+        logger.exception("Startup cycle recovery failed; the active-cycle gate will retry")
     scheduler = create_scheduler(
         settings,
         include_global_job=settings.scheduler_enabled,

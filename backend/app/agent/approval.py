@@ -211,6 +211,10 @@ async def reconcile_uncertain_cycle(
         cycle.failure_code = "ORDER_SUBMISSION_NOT_STARTED"
         cycle.failure_message = "No broker order was persisted for this cycle"
         cycle.completed_at = utcnow()
+        cycle.snapshot_json = {
+            **(cycle.snapshot_json or {}),
+            "execution_status": "ORDER_SUBMISSION_NOT_STARTED",
+        }
         await db.commit()
         return True
 

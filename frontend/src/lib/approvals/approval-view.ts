@@ -153,6 +153,10 @@ export function describeApprovalError(error: unknown): string {
         if (/no longer pending/i.test(text)) {
           return "This approval was already handled.";
         }
+        // The agent's own cycle or sweep holds its lock (#185); nothing changed.
+        if (/agent is busy running a cycle/i.test(text)) {
+          return "The agent is running a cycle or watchlist sweep right now, so nothing was sent. The approval is still pending: try again when it finishes.";
+        }
         return text ? `Conflict: ${text}` : "This approval can no longer be changed.";
       case 423:
         return "Blocked by the global kill switch. Nothing was sent to the broker.";

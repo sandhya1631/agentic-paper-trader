@@ -80,6 +80,8 @@ async def test_lifespan_starts_scheduler_before_yield_and_stops_it(monkeypatch):
         shutdown=MagicMock(),
     )
     monkeypatch.setattr(main_module, "engine", engine)
+    # Startup recovery (#185) has its own tests; this fake db can't run it.
+    monkeypatch.setattr(main_module, "recover_orphaned_cycles", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         main_module,
         "ensure_agent_cycle_prompt_columns",

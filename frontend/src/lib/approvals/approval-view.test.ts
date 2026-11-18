@@ -174,6 +174,22 @@ describe("describeApprovalError", () => {
     );
   });
 
+  it("explains an agent that is busy running a cycle (409), so the operator retries", () => {
+    const message = describeApprovalError(
+      apiError(
+        409,
+        "The agent is busy running a cycle, so nothing was sent and the approval is still pending. Retry when the current cycle or watchlist sweep finishes.",
+      ),
+    );
+    expect(message).toContain("nothing was sent");
+    expect(message).toContain("still pending");
+    expect(message).toContain("try again when it finishes");
+  });
+
+  it("does not treat any other 409 that mentions busy as the agent-busy case", () => {
+    expect(describeApprovalError(apiError(409, "Broker busy"))).toBe("Conflict: Broker busy");
+  });
+
   it("passes through other conflict reasons", () => {
     expect(describeApprovalError(apiError(409, "Cycle proposal no longer matches approval"))).toBe(
       "Conflict: Cycle proposal no longer matches approval",
