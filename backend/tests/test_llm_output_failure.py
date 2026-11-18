@@ -35,7 +35,14 @@ def _run_inputs(*llm_responses: str):
 
     db = MagicMock()
     db.execute = AsyncMock(
-        side_effect=[agent_result, no_expired_approvals_result, no_active_cycle_result]
+        # The last result is the outer error handler's re-read of the cycle's status
+        # (#185); a plain MagicMock is neither CANCELLED nor INTERRUPTED.
+        side_effect=[
+            agent_result,
+            no_expired_approvals_result,
+            no_active_cycle_result,
+            MagicMock(),
+        ]
     )
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
