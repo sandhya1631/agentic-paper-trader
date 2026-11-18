@@ -174,7 +174,9 @@ access and valid Alpaca market-data credentials are configured. Keep the interva
 - Root directory: `backend`
 - Health check path: `/health`
 
-Environment variables (set in Render → Environment; **never commit values**):
+Environment variables (set in Render → Environment; **never commit values**): see the
+[Deployment & Operations runbook](docs/deployment.md) for the full inventory (names only),
+the post-deploy smoke check, the merge window, the kill switch and rollback.
 
 ### Frontend on Vercel
 - Root directory: `frontend`
