@@ -68,7 +68,6 @@ from app.risk.kill_switch import (
 )
 from app.schemas import (
     AgentConfigDetailRead,
-    AgentConfigRead,
     AgentConfigUpdate,
     AgentScheduleRead,
     ApprovalAction,
@@ -131,7 +130,7 @@ async def list_strategies(
 
 @router.put(
     "/{agent_id}/strategy",
-    response_model=AgentConfigRead,
+    response_model=AgentConfigDetailRead,
     summary="Select an agent strategy prompt",
 )
 async def update_agent_strategy(
@@ -139,7 +138,7 @@ async def update_agent_strategy(
     body: StrategyUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_operator),
-) -> AgentConfigRead:
+) -> AgentConfigDetailRead:
     """Update an owned agent's strategy when it has no active cycle."""
     if body.strategy_version != DYNAMIC_STRATEGY_VERSION:
         try:
@@ -195,7 +194,7 @@ async def update_agent_strategy(
         )
     await db.commit()
     await db.refresh(agent)
-    return AgentConfigRead.model_validate(agent)
+    return _agent_config_detail(agent)
 
 
 @router.get(

@@ -218,6 +218,10 @@ async def test_strategy_selection_lists_and_updates_owned_agent(client: AsyncCli
     )
     assert response.status_code == 200
     assert response.json()["strategy_version"] == "S-002"
+    # Must match /agent/config's shape (AgentConfigDetailRead, with watchlist) - the
+    # Settings card re-applies this response to its draft state, and a response missing
+    # watchlist crashes normalizeWatchlist() on the next render ("list is not iterable").
+    assert response.json()["watchlist"] == ["AAPL"]
 
 
 @pytest.mark.asyncio
