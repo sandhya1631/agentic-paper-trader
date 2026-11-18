@@ -22,7 +22,7 @@ from sqlalchemy.orm import selectinload
 from app.agent import orchestrator
 from app.agent import scheduler as scheduler_service
 from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
-from app.agent.orchestrator import CycleOverlapError, run_agent_cycle
+from app.agent.orchestrator import AgentNotFoundError, CycleOverlapError, run_agent_cycle
 from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition
 from app.agent.replay import ReplaySample, evaluate_replay
 from app.agent.watchlist import normalize_watchlist
@@ -59,7 +59,7 @@ from app.db.models import (
     User,
 )
 from app.db.session import get_db
-from app.llm.base import LLMClient
+from app.llm.base import LLMClient, LLMUnavailableError
 from app.llm.factory import get_llm_client
 from app.risk.kill_switch import (
     EnvironmentKillSwitchOverrideError,
@@ -494,7 +494,17 @@ async def trigger_manual_cycle(
             target_agent_id, db, trigger=CycleTrigger.MANUAL
         )
         return cycle
-    except ValueError as exc:
+    except LLMUnavailableError as exc:
+        # Misconfigured or unreachable LLM (#160): the cycle is recorded FAILED with
+        # LLM_UNAVAILABLE; tell the operator so instead of a 404 or a generic 500.
+        # Caught here on purpose, not left to main.py's app-wide handler: the
+        # `except Exception` below would otherwise turn it into a 500.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.detail
+        ) from exc
+    except AgentNotFoundError as exc:
+        # Only a missing agent is a 404; any other error inside the cycle is not "not
+        # found" (#160) and falls through to the generic 500 below.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
         ) from exc
@@ -523,6 +533,8 @@ async def run_replay(
 
     The submitted bars are evaluated in memory. This endpoint never creates
     cycles, reads broker state, submits orders, or changes portfolio state.
+    An unavailable LLM (building the client or any generate call) answers 503 through
+    the app-wide LLMUnavailableError handler in main.py (#160).
     """
     try:
         samples = [

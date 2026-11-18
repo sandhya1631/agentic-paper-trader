@@ -788,6 +788,16 @@ Set status to `REASONING`, load the provider-neutral client, and send the
 context plus versioned system prompt. Ollama requests use the configured
 temperature and context window and request JSON mode by default.
 
+If the LLM can't serve the request, the client raises `LLMUnavailableError` (#160):
+a missing key or SDK or an unknown provider when the client is built, or a provider
+failure (auth, rate limit, network, timeout, non-2xx) from either generate call. The
+message names only the provider, the error type and an HTTP status, never a key, URL
+or provider body. The cycle ends `FAILED` with `failure_code = LLM_UNAVAILABLE` and
+that message; `POST /agent/cycles/run` and `POST /agent/replay` answer **503**
+`"LLM unavailable: ..."` (an unknown agent stays 404, an active cycle 409), and
+`GET /llm/health?probe=true` answers 503 with `reachable: false`. In a sweep each
+symbol records `LLM_UNAVAILABLE`; the tick fails only if every symbol fails.
+
 ### Step 5: Validate the proposal
 
 Set status to `VALIDATING`. Validate the first response, perform exactly one
