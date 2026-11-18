@@ -50,7 +50,7 @@ Notes:
   (`TEST_DATABASE_URL`, or `DATABASE_URL` with a `_test` suffix). **Never point it at a
   real database**: the fixtures drop and recreate every table.
 - The full cycle uses whatever `LLM_PROVIDER` is configured. On a CPU-only laptop a
-  local llama3.1 cycle can exceed the Ollama client's 180-second request timeout and
+  local llama3.1 cycle can exceed the Ollama client's request timeout (180 s by default) and
   fail with `httpx.ReadTimeout` (observed on 2026-11-17: 182 s). That reflects the
   machine, not the test.
 - `-rs` lists each skipped test with the flag it needs.

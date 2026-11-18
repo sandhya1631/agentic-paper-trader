@@ -11,7 +11,9 @@ Alpaca, then checks reconcile_order adopts the broker's CANCELED status.
 
 The ApprovedOrder is built here directly with a placeholder policy token: this test
 exercises the gateway and broker, not the policy engine (which would deny off-hours,
-P-003). In app code, an ApprovedOrder is only ever built by the approval path.
+P-003). In app code, an ApprovedOrder is only ever built by the approval path. If the
+gateway starts verifying the token's HMAC (#123), build the order through the policy
+engine instead.
 
 Run it on a paper account the trading run doesn't use, or after the close: the order
 counts toward P-012's daily cap and, while open, P-010 blocks that symbol. If cleanup

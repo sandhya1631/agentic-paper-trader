@@ -23,7 +23,9 @@ check, pause or roll back the agent during the Sprint 4 trading run (#187).
 - **No migrations (#122).** On every start the API runs `create_all` plus the
   idempotent `ensure_*` patches in `backend/app/db/schema.py` (`ADD COLUMN IF NOT
   EXISTS`, `ALTER TYPE ... ADD VALUE IF NOT EXISTS`). These only add, so the previous
-  deploy keeps working after a rollback.
+  deploy still starts after a rollback. One caveat: rows already written with a newly
+  added enum value (for example a new cycle status) can't be read by older code that
+  doesn't know that value.
 
 ## 2. Settings inventory (names only)
 
@@ -46,12 +48,12 @@ check, pause or roll back the agent during the Sprint 4 trading run (#187).
 | `KILL_SWITCH_ENABLED` | `true` forces the kill switch ON regardless of the UI (section 7) | Normally unset or `false` |
 | `MAX_ORDERS_PER_DAY` | P-012 cap per US/Eastern day; default 10 | To confirm whether it is overridden |
 | `SCHEDULER_EXECUTOR` | `inline` runs scheduled ticks inside the API process (#184); `celery` (default) needs a separate Celery worker | **Must be `inline`** in production (decision: no paid Render worker). To confirm it is set |
-| `REDIS_URL` | Celery broker and tick history. Optional with `inline`: empty means tick history lives in memory and is lost on restart | To confirm whether a Redis is attached |
+| `REDIS_URL` | Celery broker and tick history. With `inline` it can be set to an **empty** value: tick history then lives in memory and is lost on restart. Leaving it unset is not the same: it falls back to `redis://localhost:6379/0` | To confirm whether a Redis is attached |
 | `SCHEDULER_ENABLED`, `SCHEDULER_INTERVAL_MINUTES` | The legacy global tick (default off, 15 min). Per-agent schedules from Settings → "Start schedule" don't need it | To confirm |
 | `MAX_MARKET_DATA_AGE_MINUTES`, `DEFAULT_BAR_LIMIT`, `DEFAULT_TIMEFRAME_MINUTES`, `APPROVAL_EXPIRY_MINUTES` | Tunables with code defaults (15 min, 50 bars, 5 min, 1440 min) | Normally unset |
 
-The full list with defaults is in `backend/.env.example` and
-`backend/BACKEND_DOCUMENTATION.md` §3.
+Every setting and its default is defined in `backend/app/core/config.py`;
+`backend/.env.example` and `backend/BACKEND_DOCUMENTATION.md` §3 list the common ones.
 
 ### Vercel (frontend project → Settings → Environment Variables)
 
@@ -71,13 +73,16 @@ The full list with defaults is in `backend/.env.example` and
 | Name | Kind | Used by | State on 2026-11-17 |
 |---|---|---|---|
 | `PRODUCTION_API_BASE_URL` | Variable | `keep-alive.yml` | **Not set** (the repository had 0 Actions variables). Until a repo admin sets it to the Render URL, the keep-alive job fails and Render sleeps |
-| `ALPACA_API_KEY`, `ALPACA_API_SECRET`, `ALPACA_PAPER_BASE_URL`, `DATABASE_URL`, `JWT_SECRET` | Secrets | `ci.yml` (and the opt-in `integration.yml`) | Present |
+| `ALPACA_API_KEY`, `ALPACA_API_SECRET` | Secrets | `ci.yml` and the opt-in `integration.yml` | Present |
+| `JWT_SECRET` | Secret | `ci.yml` | Present |
+| `ALPACA_PAPER_BASE_URL`, `DATABASE_URL` | Secrets | No workflow uses them | Present |
 | `INTEGRATION_ALPACA`, `INTEGRATION_OPENAI` | Variables | `integration.yml` (opt-in; see `docs/integration-tests.md`) | Not set |
 
 ## 3. Access
 
-**Roles.** New accounts are `VIEWER`. Approving trades, running cycles, schedules and
-orders need `OPERATOR`; the kill switch needs `ADMIN`. Roles are read on every request,
+**Roles.** New accounts are `VIEWER`. Approving trades, running cycles, starting a
+schedule and placing orders need `OPERATOR` (any owner can stop their own schedule); the
+kill switch needs `ADMIN`. Roles are read on every request,
 so after a promotion the user just refreshes the page. Promote in the Supabase **SQL
 editor**:
 
@@ -195,7 +200,7 @@ schedule". Approvals and manual runs keep working.
 
 **Roll back the backend.** In Render, open the service → Events (deploy history),
 choose the last good deploy → **Rollback**. The schema patches only add, so the older
-code still works. If the problem is in the trading path, turn the kill switch on
+code still starts (see the enum caveat in section 1). If the problem is in the trading path, turn the kill switch on
 first. Revert the bad commit on `main` with a PR, because the next merge redeploys
 `main` anyway.
 
