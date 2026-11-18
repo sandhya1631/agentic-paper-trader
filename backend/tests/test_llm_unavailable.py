@@ -301,8 +301,8 @@ def _ollama_transport(monkeypatch, handler) -> None:
         (lambda r: httpx.Response(200, json=[SECRET_BODY]),
          "Ollama API error: unexpected response shape"),
         (lambda r: httpx.Response(404, json={"error": f"model not found {SECRET_BODY}"}),
-         "Ollama API error: HTTPStatusError (HTTP 404). Is the model pulled? "
-         "Run: ollama pull llama3.1"),
+         "Ollama API error: HTTPStatusError (HTTP 404). Check that OLLAMA_MODEL is pulled "
+         "(ollama pull llama3.1) and that OLLAMA_BASE_URL points at Ollama"),
     ],
 )
 async def test_ollama_generate_failures_are_sanitized_llm_unavailable(

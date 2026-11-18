@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any
 
@@ -67,18 +68,20 @@ class OllamaClient(LLMClient):
                 status_code,
                 self._model,
             )
-            # Ollama answers 404 when the model isn't pulled; say so (config, not secret).
+            # A 404 usually means the model isn't pulled, or the base URL points elsewhere.
             hint = (
-                f". Is the model pulled? Run: ollama pull {self._model}"
+                f". Check that OLLAMA_MODEL is pulled (ollama pull {self._model}) and "
+                "that OLLAMA_BASE_URL points at Ollama"
                 if status_code == 404
                 else ""
             )
             raise LLMUnavailableError(
                 f"Ollama API error: HTTPStatusError (HTTP {status_code}){hint}"
             ) from None
-        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, json.JSONDecodeError) as exc:
             # A timeout's str() is empty and a connect error's names the URL, so name only
-            # the type (e.g. ReadTimeout, ConnectError); ValueError = a non-JSON body.
+            # the type (e.g. ReadTimeout, ConnectError, or JSONDecodeError for a non-JSON
+            # body).
             logger.warning(
                 "Ollama request failed: %s model=%s", type(exc).__name__, self._model
             )
@@ -103,7 +106,8 @@ class OllamaClient(LLMClient):
                 model=self._model,
                 reachable=False,
                 model_available=False,
-                detail=f"Ollama unreachable at {self._base_url}: {exc}",
+                # The probe is unauthenticated: name the error type, never the URL.
+                detail=f"Ollama unreachable: {type(exc).__name__}",
             )
 
         # Ollama reports installed models as e.g. "llama3.1:latest"; match on the

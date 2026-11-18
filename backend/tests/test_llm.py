@@ -538,6 +538,7 @@ async def test_ollama_health_check_unreachable_does_not_raise():
     assert health.reachable is False
     assert health.model_available is False
     assert "unreachable" in health.detail.lower()
+    assert "localhost:11434" not in health.detail  # unauthenticated probe: no URL (#160)
 
 
 @pytest.mark.asyncio
