@@ -142,11 +142,9 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
         llm_keep_alive_minutes: draftKeepAlive,
       })
     : {};
-  const dirty =
-    Object.keys(patch).length > 0 ||
-    (config !== null &&
-      (draftTimeout !== String(config.llm_timeout_seconds) ||
-        draftKeepAlive !== String(config.llm_keep_alive_minutes)));
+  // Dirty = a real change to send, or invalid input to fix or reset. Input that parses to
+  // the saved value (e.g. "0180") is not a change, so Save never sends an empty PATCH.
+  const dirty = Object.keys(patch).length > 0 || timeoutError !== null || keepAliveError !== null;
   const canSave =
     canEdit && !saving && dirty && !watchlistError && !timeoutError && !keepAliveError;
   const ollamaFieldsApply = ollamaOptionsApply(provider);
@@ -239,7 +237,9 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
     setStrategyFeedback(null);
     const [res] = await Promise.allSettled([updateAgentStrategy(config.id, draftStrategy)]);
     if (res.status === "fulfilled") {
-      applyConfig(res.value);
+      // PUT /agent/{id}/strategy answers with the base config (no watchlist or the #203
+      // fields), so update the strategy on top of what the card already holds.
+      applyConfig({ ...config, ...res.value });
       setStrategyFeedback({ tone: "success", message: SAVED_MESSAGE });
     } else {
       setStrategyFeedback({ tone: "error", message: describeStrategyError(res.reason, "save") });

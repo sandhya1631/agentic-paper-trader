@@ -6,7 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.constants import (
     ALPACA_PAPER_BASE_URL,
+    OLLAMA_KEEP_ALIVE_MINUTES_DEFAULT,
     OLLAMA_KEEP_ALIVE_MINUTES_RANGE,
+    OLLAMA_TIMEOUT_SECONDS_DEFAULT,
     OLLAMA_TIMEOUT_SECONDS_RANGE,
 )
 from app.core.paper_guard import ensure_alpaca_paper_url
@@ -83,10 +85,12 @@ class Settings(BaseSettings):
     # Ollama's own keep-alive default is 5 min, which unloads the model between sweeps
     # on a slow CPU host; 10 min keeps it loaded across a 10-minute schedule.
     ollama_timeout_seconds: int = Field(
-        default=180, ge=OLLAMA_TIMEOUT_SECONDS_RANGE[0], le=OLLAMA_TIMEOUT_SECONDS_RANGE[1]
+        default=OLLAMA_TIMEOUT_SECONDS_DEFAULT,
+        ge=OLLAMA_TIMEOUT_SECONDS_RANGE[0],
+        le=OLLAMA_TIMEOUT_SECONDS_RANGE[1],
     )
     ollama_keep_alive_minutes: int = Field(
-        default=10,
+        default=OLLAMA_KEEP_ALIVE_MINUTES_DEFAULT,
         ge=OLLAMA_KEEP_ALIVE_MINUTES_RANGE[0],
         le=OLLAMA_KEEP_ALIVE_MINUTES_RANGE[1],
     )

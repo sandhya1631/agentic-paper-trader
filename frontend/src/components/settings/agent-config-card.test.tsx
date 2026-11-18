@@ -467,6 +467,36 @@ describe("AgentConfigCard: Ollama timeout and keep-alive (#203)", () => {
     expect(mockUpdate).not.toHaveBeenCalled();
   });
 
+  it("does not offer Save for input that equals the saved value (e.g. 0180)", async () => {
+    render(<AgentConfigCard canEdit />);
+    await screen.findByLabelText(/llm request timeout/i);
+
+    fireEvent.change(timeoutInput(), { target: { value: "0180" } });
+
+    expect(saveButton().disabled).toBe(true);
+  });
+
+  it("keeps the fields intact after saving a strategy", async () => {
+    // PUT /agent/{id}/strategy answers with the base config only (no watchlist / #203 fields).
+    const full = config({ strategy_version: "S-002" });
+    const base: Partial<AgentConfig> = { ...full };
+    delete base.watchlist;
+    delete base.llm_timeout_seconds;
+    delete base.llm_keep_alive_minutes;
+    mockUpdateStrategy.mockResolvedValue(base as AgentConfig);
+    render(<AgentConfigCard canEdit />);
+    const strategy = (await screen.findByLabelText(/^strategy$/i)) as HTMLSelectElement;
+
+    fireEvent.change(strategy, { target: { value: "S-002" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save strategy$/i }));
+
+    await waitFor(() => expect(mockUpdateStrategy).toHaveBeenCalled());
+    await waitFor(() => expect(timeoutInput().value).toBe("180"));
+    expect(keepAliveInput().value).toBe("10");
+    expect(screen.queryByText(/enter whole seconds/i)).toBeNull();
+    expect(screen.getByText("AAPL")).toBeTruthy();
+  });
+
   it("is read-only for a VIEWER", async () => {
     render(<AgentConfigCard canEdit={false} />);
 

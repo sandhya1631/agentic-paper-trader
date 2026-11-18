@@ -196,6 +196,50 @@ async def test_patch_rejects_out_of_range_null_and_extra_fields(client: AsyncCli
 
 
 @pytest.mark.asyncio
+async def test_setting_the_default_again_follows_later_default_changes(
+    client: AsyncClient, monkeypatch
+):
+    email = f"ka-reset-{uuid.uuid4().hex[:6]}@example.com"
+    token = await _operator(client, email)
+    agent_id = await _seed_agent_for(email)
+
+    await client.patch("/agent/config", headers=_auth(token), json={"llm_timeout_seconds": 300})
+    await client.patch("/agent/config", headers=_auth(token), json={"llm_timeout_seconds": 180})
+
+    async with TestSessionLocal() as db:
+        assert (await db.get(AgentConfig, agent_id)).llm_timeout_seconds is None
+    # An admin raises the server default: the agent follows it.
+    raised = Settings(_env_file=None, ollama_timeout_seconds=420)
+    monkeypatch.setattr("app.agent.router.get_settings", lambda: raised)
+    body = (await client.get("/agent/config", headers=_auth(token))).json()
+    assert body["llm_timeout_seconds"] == 420
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_value_beside_another_change_is_not_stored(client: AsyncClient):
+    email = f"ka-same-{uuid.uuid4().hex[:6]}@example.com"
+    token = await _operator(client, email)
+    agent_id = await _seed_agent_for(email)
+
+    response = await client.patch(
+        "/agent/config",
+        headers=_auth(token),
+        json={"approval_mode": "OBSERVE_ONLY", "llm_timeout_seconds": 180},
+    )
+
+    assert response.status_code == 200
+    async with TestSessionLocal() as db:
+        agent = await db.get(AgentConfig, agent_id)
+        assert agent.llm_timeout_seconds is None
+        event = (
+            await db.execute(
+                select(AuditEvent).where(AuditEvent.event_type == "AGENT_CONFIG_UPDATED")
+            )
+        ).scalar_one()
+    assert set(event.details["changes"]) == {"approval_mode"}
+
+
+@pytest.mark.asyncio
 async def test_a_viewer_cannot_change_them(client: AsyncClient):
     email = f"ka-viewer-{uuid.uuid4().hex[:6]}@example.com"
     token = await _register_and_login(client, email)  # VIEWER
@@ -283,6 +327,12 @@ async def test_a_manual_cycle_and_its_repair_call_use_the_agents_values(
     assert len(recorder.payloads) == 2  # first try + self-repair
     assert [p["keep_alive"] for p in recorder.payloads] == ["30m", "30m"]
     assert recorder.timeouts == [300, 300]
+    # The cycle's audit snapshot records the options it used.
+    observability = cycle.snapshot_json["observability"]
+    assert (observability["llm_timeout_seconds"], observability["llm_keep_alive_minutes"]) == (
+        300,
+        30,
+    )
 
 
 @pytest.mark.asyncio

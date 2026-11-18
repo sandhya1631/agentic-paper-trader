@@ -9,13 +9,21 @@ from app.core.config import Settings
 from app.db.models import AgentConfig
 
 
+def _override_or_default(override: int | None, default: int) -> int:
+    return default if override is None else override
+
+
 def effective_llm_timeout_seconds(agent: AgentConfig, settings: Settings) -> int:
-    if agent.llm_timeout_seconds is not None:
-        return agent.llm_timeout_seconds
-    return settings.ollama_timeout_seconds
+    return _override_or_default(agent.llm_timeout_seconds, settings.ollama_timeout_seconds)
 
 
 def effective_llm_keep_alive_minutes(agent: AgentConfig, settings: Settings) -> int:
-    if agent.llm_keep_alive_minutes is not None:
-        return agent.llm_keep_alive_minutes
-    return settings.ollama_keep_alive_minutes
+    return _override_or_default(
+        agent.llm_keep_alive_minutes, settings.ollama_keep_alive_minutes
+    )
+
+
+def stored_override(value: int, default: int) -> int | None:
+    """What to store for a value set in Settings: the server default is stored as NULL,
+    so setting it back to the default makes the agent follow the default again."""
+    return None if value == default else value

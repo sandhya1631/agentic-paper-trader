@@ -569,6 +569,11 @@ async def _run_agent_cycle(
         await db.commit()
         if llm_client is None:
             llm_client = _agent_llm_client(agent)
+        if isinstance(llm_client, OllamaClient):
+            # Record the request options this cycle used (#203): they vary per agent and
+            # can change between cycles. Not part of the model's input (already built).
+            context["observability"]["llm_timeout_seconds"] = llm_client.timeout_seconds
+            context["observability"]["llm_keep_alive_minutes"] = llm_client.keep_alive_minutes
 
         raw_response = await llm_client.generate(prompt_input, system=system_prompt)
 

@@ -2,6 +2,7 @@ from typing import Any
 
 import httpx
 
+from app.core.constants import OLLAMA_TIMEOUT_SECONDS_DEFAULT
 from app.llm.base import LLMClient, LLMHealth
 from app.schemas import DecisionProposal
 
@@ -19,7 +20,7 @@ class OllamaClient(LLMClient):
         temperature: float = 0.1,
         num_ctx: int = 4096,
         json_format: bool = True,
-        timeout_seconds: float = 180.0,
+        timeout_seconds: float = OLLAMA_TIMEOUT_SECONDS_DEFAULT,
         keep_alive_minutes: int | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
@@ -30,6 +31,14 @@ class OllamaClient(LLMClient):
         self._timeout_seconds = timeout_seconds
         # None sends no keep_alive (Ollama's own default, 5 min); -1 keeps it loaded.
         self._keep_alive_minutes = keep_alive_minutes
+
+    @property
+    def timeout_seconds(self) -> float:
+        return self._timeout_seconds
+
+    @property
+    def keep_alive_minutes(self) -> int | None:
+        return self._keep_alive_minutes
 
     def with_request_options(
         self, *, timeout_seconds: float, keep_alive_minutes: int | None

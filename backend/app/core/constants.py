@@ -76,6 +76,9 @@ SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")
 # call. Exposed via /meta/constants so the Settings form validates the same range.
 OLLAMA_TIMEOUT_SECONDS_RANGE = (30, 900)
 OLLAMA_KEEP_ALIVE_MINUTES_RANGE = (-1, 240)
+# Code defaults of those Settings (the env can override them).
+OLLAMA_TIMEOUT_SECONDS_DEFAULT = 180
+OLLAMA_KEEP_ALIVE_MINUTES_DEFAULT = 10
 
 # --- Auth ---
 BCRYPT_MAX_PASSWORD_BYTES = 72

@@ -122,26 +122,28 @@ function inRange(value: number, range: readonly number[] | undefined): boolean {
   return value >= range[0] && value <= range[1];
 }
 
+/** A whole number within `/meta/constants` bounds, or an error naming the unit. */
+function validateWholeInRange(
+  raw: string,
+  range: readonly number[] | undefined,
+  unit: string,
+  hint = "",
+): string | null {
+  const value = parseWholeNumber(raw);
+  if (value !== null && inRange(value, range)) return null;
+  return range && range.length === 2
+    ? `Enter whole ${unit} from ${range[0]} to ${range[1]}${hint}.`
+    : `Enter a whole number of ${unit}.`;
+}
+
 /** #203: the request timeout must be whole seconds within `/meta/constants` bounds. */
 export function validateLlmTimeout(raw: string, range?: readonly number[]): string | null {
-  const value = parseWholeNumber(raw);
-  if (value === null || !inRange(value, range)) {
-    return range && range.length === 2
-      ? `Enter whole seconds from ${range[0]} to ${range[1]}.`
-      : "Enter a whole number of seconds.";
-  }
-  return null;
+  return validateWholeInRange(raw, range, "seconds");
 }
 
 /** #203: keep-alive is whole minutes; -1 keeps the model loaded, 0 unloads it each call. */
 export function validateKeepAlive(raw: string, range?: readonly number[]): string | null {
-  const value = parseWholeNumber(raw);
-  if (value === null || !inRange(value, range)) {
-    return range && range.length === 2
-      ? `Enter whole minutes from ${range[0]} to ${range[1]} (-1 keeps the model loaded).`
-      : "Enter a whole number of minutes.";
-  }
-  return null;
+  return validateWholeInRange(raw, range, "minutes", " (-1 keeps the model loaded)");
 }
 
 /** What a keep-alive value means, for the hint under the field. */
