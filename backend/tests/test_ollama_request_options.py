@@ -19,11 +19,13 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from test_agent_config import _auth, _operator, _register_and_login, _seed_agent_for
 
+from app.accounts import llm_keys
 from app.agent import orchestrator
 from app.agent.orchestrator import run_agent_cycle, run_watchlist_cycles
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
+from app.core.constants import LLM_KEY_SOURCE_SERVER, LLM_KEY_SOURCE_USER
 from app.db.enums import UserRole
-from app.db.models import AgentConfig, AuditEvent, User
+from app.db.models import AgentConfig, AuditEvent, TradingAccount, User
 from app.llm import ollama_client as ollama_module
 from app.llm.ollama_client import OllamaClient
 
@@ -417,3 +419,57 @@ async def test_other_providers_get_the_cached_client_unchanged(db_session, monke
         await run_agent_cycle(agent_id, db, collector=_collector(), account_data=None)
 
     cached.generate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_server_key_fallback_still_applies_the_agents_values(db_session, monkeypatch):
+    """#191 x #203: an owner with no AI key of their own falls back to the server's
+    Ollama client, which still carries this agent's timeout and keep-alive. Once the owner
+    connects a key, that client serves the cycle and the Ollama options don't apply."""
+    _server_ollama(monkeypatch)
+    # The resolver reads the real Settings: no user key -> the server's (Ollama) LLM.
+    monkeypatch.setattr(get_settings(), "llm_provider", "ollama")
+    monkeypatch.setattr(get_settings(), "llm_server_key_fallback", True)
+    recorder = _OllamaRecorder()
+    recorder.install(monkeypatch)
+    agent_id = await _seed_operator_agent(["AAPL"])
+    await _agent_with(agent_id, llm_timeout_seconds=420, llm_keep_alive_minutes=-1)
+
+    async with TestSessionLocal() as db:
+        served = await run_agent_cycle(agent_id, db, collector=_collector(), account_data=None)
+
+    assert served.status.value == "HOLD"
+    assert [p["keep_alive"] for p in recorder.payloads] == [-1]
+    assert recorder.timeouts == [420]
+    observability = served.snapshot_json["observability"]
+    assert observability["llm_key_source"] == LLM_KEY_SOURCE_SERVER
+    assert observability["llm_provider"] == "ollama"
+    assert (observability["llm_timeout_seconds"], observability["llm_keep_alive_minutes"]) == (
+        420,
+        -1,
+    )
+
+    # The owner connects their own key: it serves the next cycle; Ollama isn't called.
+    user_client = MagicMock()
+    user_client.generate = AsyncMock(return_value=json.dumps(HOLD))
+    monkeypatch.setattr(llm_keys, "create_user_llm_client", lambda *_args: user_client)
+    async with TestSessionLocal() as db:
+        owner_id = (
+            await db.execute(
+                select(TradingAccount.user_id)
+                .join(AgentConfig, AgentConfig.account_id == TradingAccount.id)
+                .where(AgentConfig.id == agent_id)
+            )
+        ).scalar_one()
+        await llm_keys.save_llm_credential(db, owner_id, "openai", "sk-test-not-a-real-key")
+        await db.commit()
+
+    async with TestSessionLocal() as db:
+        own_key = await run_agent_cycle(agent_id, db, collector=_collector(), account_data=None)
+
+    user_client.generate.assert_awaited_once()
+    assert len(recorder.payloads) == 1  # still just the first cycle's Ollama call
+    observability = own_key.snapshot_json["observability"]
+    assert observability["llm_key_source"] == LLM_KEY_SOURCE_USER
+    assert "llm_timeout_seconds" not in observability
+    assert "llm_keep_alive_minutes" not in observability
