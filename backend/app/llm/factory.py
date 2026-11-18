@@ -30,14 +30,7 @@ def create_llm_client(settings: Settings | None = None) -> LLMClient:
             json_format=settings.ollama_json_format,
         )
     if provider == "anthropic":
-        try:
-            from app.llm.anthropic_client import AnthropicClient
-        except ImportError as exc:
-            # The cause is kept for server-side tracebacks (no secret in an ImportError).
-            raise LLMUnavailableError(
-                "LLM_PROVIDER=anthropic requires the 'anthropic' package (pip install -e '.[dev]')"
-            ) from exc
-        return AnthropicClient(api_key=settings.anthropic_api_key, model=settings.anthropic_model)
+        return _anthropic_client(settings.anthropic_api_key, settings.anthropic_model)
 
     raise LLMUnavailableError(
         f"Unsupported LLM_PROVIDER '{settings.llm_provider}'. "
@@ -45,9 +38,33 @@ def create_llm_client(settings: Settings | None = None) -> LLMClient:
     )
 
 
-def configured_model(settings: Settings) -> str:
-    """Model id for the configured provider (reads no keys; used by /llm/health)."""
-    provider = settings.llm_provider.lower()
+def _anthropic_client(api_key: str | None, model: str) -> LLMClient:
+    try:
+        from app.llm.anthropic_client import AnthropicClient
+    except ImportError as exc:
+        # The cause is kept for server-side tracebacks (no secret in an ImportError).
+        raise LLMUnavailableError(
+            "LLM_PROVIDER=anthropic requires the 'anthropic' package (pip install -e '.[dev]')"
+        ) from exc
+    return AnthropicClient(api_key=api_key, model=model)
+
+
+def create_user_llm_client(provider: str, api_key: str, settings: Settings) -> LLMClient:
+    """A client for a user's own key (#191), with the server's model for that provider.
+
+    The model stays the server's because it must support schema-forced JSON. Built per
+    cycle or replay and never cached, so one user's key never serves another user.
+    """
+    if provider == "openai":
+        return OpenAIClient(api_key=api_key, model=settings.openai_model)
+    if provider == "anthropic":
+        return _anthropic_client(api_key, settings.anthropic_model)
+    raise LLMUnavailableError(f"Unsupported AI provider '{provider}' for a user key")
+
+
+def configured_model(settings: Settings, provider: str | None = None) -> str:
+    """Model id for ``provider`` (default: LLM_PROVIDER). Reads no keys."""
+    provider = (provider or settings.llm_provider).lower()
     if provider == "openai":
         return settings.openai_model
     if provider == "anthropic":

@@ -1,9 +1,11 @@
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.agent import router as agent_router
 from app.agent.replay import ReplaySample, evaluate_replay
 from app.agent.router import run_replay
 from app.market_data.alpaca_client import OHLCVBar
@@ -74,7 +76,7 @@ async def test_replay_counts_invalid_outputs_without_failing():
 
 
 @pytest.mark.asyncio
-async def test_replay_endpoint_returns_metrics_without_creating_trades():
+async def test_replay_endpoint_returns_metrics_without_creating_trades(monkeypatch):
     llm = MagicMock()
     llm.generate = AsyncMock(
         return_value=json.dumps(
@@ -96,7 +98,14 @@ async def test_replay_endpoint_returns_metrics_without_creating_trades():
         ],
     )
 
-    response = await run_replay(request, _current_user=MagicMock(), llm_client=llm)
+    # The caller's own key, else the server's client (#191); either way this client.
+    resolve = AsyncMock(return_value=SimpleNamespace(client=llm))
+    monkeypatch.setattr(agent_router, "resolve_user_llm", resolve)
+    user = MagicMock()
+
+    response = await run_replay(request, current_user=user, db=MagicMock())
+
+    assert resolve.await_args.args[1] is user.id
 
     assert response.samples == 1
     assert response.valid_decisions == 1

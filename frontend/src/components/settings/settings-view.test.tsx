@@ -16,6 +16,11 @@ vi.mock("@/lib/accounts/accounts-api", () => ({
   connectAccount: vi.fn(),
   disconnectAccount: vi.fn(),
 }));
+vi.mock("@/lib/accounts/llm-key-api", () => ({
+  getLlmKeyStatus: vi.fn(),
+  connectLlmKey: vi.fn(),
+  disconnectLlmKey: vi.fn(),
+}));
 vi.mock("@/lib/agent/scheduler-api", () => ({
   getSchedulerStatus: vi.fn(),
   startSchedule: vi.fn(),
@@ -44,6 +49,7 @@ import {
   disconnectAccount,
   getAccountStatus,
 } from "@/lib/accounts/accounts-api";
+import { getLlmKeyStatus } from "@/lib/accounts/llm-key-api";
 import { getSchedulerStatus, startSchedule, stopSchedule } from "@/lib/agent/scheduler-api";
 import { listCycles } from "@/lib/agent/cycles-api";
 import { getAgentConfig, listStrategies } from "@/lib/agent/agent-config-api";
@@ -121,6 +127,14 @@ function schedStatus(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(getLlmKeyStatus).mockResolvedValue({
+    connected: false,
+    provider: null,
+    last_verified_at: null,
+    effective_source: "SERVER",
+    effective_provider: "openai",
+    effective_model: "gpt-4o-mini",
+  });
   // Safe defaults so every card mounts without unhandled rejections.
   mockMe.mockResolvedValue({ id: "u1", email: "v@example.com", role: "VIEWER" });
   mockGetKs.mockResolvedValue({
@@ -274,7 +288,7 @@ describe("Account connection", () => {
     });
     render(<SettingsView />);
 
-    fireEvent.change(await screen.findByLabelText(/api key/i), { target: { value: "KEY123" } });
+    fireEvent.change(await screen.findByLabelText(/^api key$/i), { target: { value: "KEY123" } });
     fireEvent.change(screen.getByLabelText(/api secret/i), { target: { value: "SECRET123" } });
     fireEvent.click(screen.getByRole("button", { name: /connect account/i }));
 

@@ -122,6 +122,24 @@ class TradingAccount(Base, UUIDPrimaryKey, Timestamped):
     )
 
 
+class LLMCredential(Base, UUIDPrimaryKey, Timestamped):
+    """A user's own OpenAI or Claude API key (#191), Fernet-encrypted like the Alpaca keys.
+
+    One row per user: reconnecting replaces the provider and key. Revoking clears the
+    ciphertext and keeps the row. The key is decrypted only to build that user's LLM
+    client for one cycle or replay (app/accounts/llm_keys.py) and is never returned.
+    """
+
+    __tablename__ = "llm_credentials"
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    encrypted_api_key: Mapped[str] = mapped_column(Text, nullable=False)
+    is_connected: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AccountSnapshot(Base, UUIDPrimaryKey):
     __tablename__ = "account_snapshots"
     account_id: Mapped[uuid.UUID] = mapped_column(
@@ -165,6 +183,9 @@ class AgentConfig(Base, UUIDPrimaryKey, Timestamped):
     daily_loss_limit: Mapped[Decimal] = mapped_column(Numeric(6, 5), default=Decimal("0.02"))
     approval_mode: Mapped[ApprovalMode] = mapped_column(Enum(ApprovalMode), default=ApprovalMode.REQUIRED)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Unused (#191): nothing reads these, and provisioning fills placeholders. Which
+    # provider, model and key a cycle used is recorded per cycle, in
+    # snapshot_json.observability (llm_provider, llm_model, llm_key_source).
     model_provider: Mapped[str] = mapped_column(String(40))
     model_name: Mapped[str] = mapped_column(String(100))
     version: Mapped[int] = mapped_column(Integer, default=1)

@@ -123,13 +123,16 @@ class AnthropicClient(LLMClient):
                 detail=f"Model '{self._model}' not available to this API key",
             )
         except Exception as exc:
-            # Exception type only: never str(exc), so no request detail or key can leak.
+            # Exception type and HTTP status only: never str(exc), so no request detail or
+            # key can leak (also the 422 detail when a user's own key is rejected, #191).
+            status_code = getattr(exc, "status_code", None)
+            status_part = f" (HTTP {status_code})" if status_code is not None else ""
             return LLMHealth(
                 provider=self.provider,
                 model=self._model,
                 reachable=False,
                 model_available=False,
-                detail=f"Anthropic API unreachable: {type(exc).__name__}",
+                detail=f"Anthropic API unreachable: {type(exc).__name__}{status_part}",
             )
 
         return LLMHealth(
