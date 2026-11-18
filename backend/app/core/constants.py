@@ -84,6 +84,8 @@ MANUAL_ORDER_FAILED = "MANUAL_ORDER_FAILED"  # the broker call raised (502)
 
 # --- LLM client factory ---
 SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")
+# failure_code of a cycle whose LLM was misconfigured or unreachable (#160).
+LLM_UNAVAILABLE = "LLM_UNAVAILABLE"
 
 # --- Auth ---
 BCRYPT_MAX_PASSWORD_BYTES = 72

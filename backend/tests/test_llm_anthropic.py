@@ -20,7 +20,7 @@ from app.agent.tool_validation import ToolValidationError, validate_decision_pro
 from app.core.config import Settings
 from app.db.enums import CycleStatus, DecisionAction
 from app.llm.anthropic_client import AnthropicClient
-from app.llm.base import LLMHealth
+from app.llm.base import LLMHealth, LLMUnavailableError
 from app.llm.decision_schema import DECISION_JSON_SCHEMA
 from app.llm.factory import configured_model, create_llm_client
 
@@ -162,9 +162,9 @@ async def test_anthropic_api_errors_are_sanitized(caplog):
         client = AnthropicClient(api_key=FAKE_KEY, model=MODEL)
 
         with caplog.at_level(logging.WARNING, logger="app.llm.anthropic_client"):
-            with pytest.raises(RuntimeError) as auth_raised:
+            with pytest.raises(LLMUnavailableError) as auth_raised:
                 await client.generate("p")
-            with pytest.raises(RuntimeError) as connection_raised:
+            with pytest.raises(LLMUnavailableError) as connection_raised:
                 await client.generate("p")
 
     assert str(auth_raised.value) == "Anthropic API error: AuthenticationError (HTTP 401)"
@@ -239,7 +239,7 @@ async def test_anthropic_selected_without_key_errors_clearly(client: AsyncClient
 
     for settings in (no_key, _settings(anthropic_api_key="")):
         with pytest.raises(
-            ValueError, match="ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic"
+            LLMUnavailableError, match="ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic"
         ):
             create_llm_client(settings)
 
@@ -262,7 +262,7 @@ async def test_anthropic_selected_without_key_errors_clearly(client: AsyncClient
         "reachable": False,
         "model_available": False,
         "detail": (
-            "LLM client unavailable: "
+            "LLM unavailable: "
             "ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic"
         ),
     }

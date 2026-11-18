@@ -1,9 +1,13 @@
+import json
+import logging
 from typing import Any
 
 import httpx
 
-from app.llm.base import LLMClient, LLMHealth
+from app.llm.base import LLMClient, LLMHealth, LLMUnavailableError
 from app.schemas import DecisionProposal
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaClient(LLMClient):
@@ -51,12 +55,43 @@ class OllamaClient(LLMClient):
         payload["options"]["num_ctx"] = self._num_ctx
         if self._json_format:
             payload["format"] = DecisionProposal.model_json_schema()
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            response = await client.post(f"{self._base_url}/api/chat", json=payload)
-            response.raise_for_status()
-            data = response.json()
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                response = await client.post(f"{self._base_url}/api/chat", json=payload)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as exc:
+            # Never echo Ollama's error body or the server URL: report the type and status.
+            status_code = exc.response.status_code
+            logger.warning(
+                "Ollama request failed: HTTPStatusError status=%s model=%s",
+                status_code,
+                self._model,
+            )
+            # A 404 usually means the model isn't pulled, or the base URL points elsewhere.
+            hint = (
+                f". Check that OLLAMA_MODEL is pulled (ollama pull {self._model}) and "
+                "that OLLAMA_BASE_URL points at Ollama"
+                if status_code == 404
+                else ""
+            )
+            raise LLMUnavailableError(
+                f"Ollama API error: HTTPStatusError (HTTP {status_code}){hint}"
+            ) from None
+        except (httpx.HTTPError, httpx.InvalidURL, json.JSONDecodeError) as exc:
+            # A timeout's str() is empty and a connect error's names the URL, so name only
+            # the type (e.g. ReadTimeout, ConnectError, or JSONDecodeError for a non-JSON
+            # body).
+            logger.warning(
+                "Ollama request failed: %s model=%s", type(exc).__name__, self._model
+            )
+            raise LLMUnavailableError(f"Ollama API error: {type(exc).__name__}") from None
 
-        return data.get("message", {}).get("content", "")
+        message = data.get("message") if isinstance(data, dict) else None
+        if not isinstance(message, dict):
+            logger.warning("Ollama response had no message object: model=%s", self._model)
+            raise LLMUnavailableError("Ollama API error: unexpected response shape")
+        return str(message.get("content") or "")
 
     async def health_check(self) -> LLMHealth:
         """Probe the local Ollama server via /api/tags; never raises on failure."""
@@ -71,7 +106,8 @@ class OllamaClient(LLMClient):
                 model=self._model,
                 reachable=False,
                 model_available=False,
-                detail=f"Ollama unreachable at {self._base_url}: {exc}",
+                # The probe is unauthenticated: name the error type, never the URL.
+                detail=f"Ollama unreachable: {type(exc).__name__}",
             )
 
         # Ollama reports installed models as e.g. "llama3.1:latest"; match on the

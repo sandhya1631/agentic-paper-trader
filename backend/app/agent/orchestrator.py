@@ -52,6 +52,7 @@ from app.core.constants import (
     CYCLE_INTERRUPTED,
     DEFAULT_STRATEGY_VERSION,
     DYNAMIC_STRATEGY_VERSION,
+    LLM_UNAVAILABLE,
     ORPHANABLE_CYCLE_STATUSES,
     POLICY_VERSION,
 )
@@ -64,7 +65,7 @@ from app.db.enums import (
     PolicyDecisionType,
 )
 from app.db.models import AgentConfig, AgentCycle, CycleApproval, utcnow
-from app.llm.base import LLMClient
+from app.llm.base import LLMClient, LLMUnavailableError
 from app.llm.factory import get_llm_client
 from app.market_data.alpaca_client import MarketDataCollector, create_market_data_collector
 from app.schemas import DecisionProposal
@@ -172,6 +173,10 @@ def _enforce_context_window(
 
 class CycleOverlapError(Exception):
     """Raised when the agent already has a non-terminal cycle in progress."""
+
+
+class AgentNotFoundError(ValueError):
+    """The agent id doesn't exist. The only error the cycle route maps to 404 (#160)."""
 
 
 async def _cycle_closed_elsewhere(db: AsyncSession, cycle: AgentCycle) -> bool:
@@ -542,7 +547,7 @@ async def _run_agent_cycle(
     res = await db.execute(stmt)
     agent = res.scalar_one_or_none()
     if not agent:
-        raise ValueError(f"AgentConfig with id '{agent_id}' not found")
+        raise AgentNotFoundError(f"AgentConfig with id '{agent_id}' not found")
 
     # 2. Gate: reject if this agent already has an active cycle (no overlap).
     # A watchlist sweep runs this gate itself, once, before it reads the broker, and
@@ -571,6 +576,10 @@ async def _run_agent_cycle(
     await db.commit()
     await db.refresh(cycle)
 
+    # Filled in as the cycle progresses, so a failure can still save its evidence.
+    context: dict[str, Any] | None = None
+    system_prompt: str | None = None
+    raw_response: str | None = None
     try:
         cycle.status = CycleStatus.COLLECTING
         await db.commit()
@@ -903,6 +912,32 @@ async def _run_agent_cycle(
         set_committed_value(cycle, "approval", pending_approval)
         return cycle
 
+    except LLMUnavailableError as exc:
+        # Client construction (missing key/SDK, unknown provider) or either generate call
+        # (first try or self-repair) failed (#160). The message is already sanitized: no
+        # key, URL or provider body. Recorded distinctly from UNEXPECTED_ERROR so the
+        # audit trail can tell an LLM outage from a bug; the route maps it to 503.
+        logger.warning("Agent cycle %s: LLM unavailable: %s", cycle.id, exc)
+        if await _cycle_closed_elsewhere(db, cycle):
+            # A cancel (or orphan recovery, #185) closed it while the call hung: keep
+            # that record.
+            set_committed_value(cycle, "approval", None)
+            return cycle
+        cycle.status = CycleStatus.FAILED
+        cycle.completed_at = utcnow()
+        cycle.failure_code = LLM_UNAVAILABLE
+        cycle.failure_message = str(exc)
+        # Keep what the cycle had already built, as the other failure paths do: the
+        # context it sent, the prompt, and a first (invalid) answer if the repair failed.
+        if context is not None:
+            _save_snapshot(cycle, context)
+        if system_prompt is not None:
+            cycle.prompt_text = system_prompt
+        if raw_response is not None:
+            cycle.llm_raw_response = raw_response
+        await db.commit()
+        await db.refresh(cycle)
+        raise
     except Exception as exc:
         logger.error("Agent cycle failed unexpectedly: %s", exc, exc_info=True)
         # A cancel, or recovery by a process that took the lock this run lost, may have
@@ -971,7 +1006,7 @@ async def _run_watchlist_cycles(
     agent_res = await db.execute(select(AgentConfig).where(AgentConfig.id == agent_id))
     agent = agent_res.scalar_one_or_none()
     if agent is None:
-        raise ValueError(f"AgentConfig with id '{agent_id}' not found")
+        raise AgentNotFoundError(f"AgentConfig with id '{agent_id}' not found")
 
     # Canonical, de-duplicated symbols (the same helper the per-symbol cycle uses), so
     # the scope guard compares one consistent form and one sweep never evaluates (or
