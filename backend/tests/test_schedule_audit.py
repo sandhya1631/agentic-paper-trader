@@ -235,14 +235,17 @@ async def test_a_viewer_gets_403_and_no_row(client: AsyncClient, fake_scheduler)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["missing agent", "disabled agent", "scheduler not running"])
 async def test_a_rejected_start_writes_no_row(
-    client: AsyncClient, fake_scheduler, monkeypatch, case: str
+    client: AsyncClient, fake_scheduler, case: str
 ):
     auth, user_id = await _login(client, f"schedule-{case.replace(' ', '-')}@example.com")
     agent_id = await _seed_agent(user_id, enabled=case != "disabled agent")
     if case == "missing agent":
         agent_id = uuid.uuid4()
     if case == "scheduler not running":
-        monkeypatch.setattr(app.state, "scheduler", SimpleNamespace(running=False))
+        # Stop the fixture's stand-in rather than patching app.state a second time:
+        # pytest >= 9.2 records State's __getattr__ keys as absent, so a second patch
+        # of app.state.scheduler deletes the key twice at teardown (KeyError).
+        fake_scheduler.running = False
 
     response = await _start(client, auth, agent_id, 5)
 
