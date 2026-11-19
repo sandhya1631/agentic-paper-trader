@@ -574,7 +574,7 @@ async def trigger_manual_cycle(
 )
 async def run_replay(
     body: ReplayRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator),
     db: AsyncSession = Depends(get_db),
 ) -> ReplayMetricsRead:
     """Run offline strategy evaluation on the caller's own AI key, else the server's LLM.
@@ -584,6 +584,9 @@ async def run_replay(
     An unavailable LLM (no key with the server fallback off, building the client or any
     generate call) answers 503 through the app-wide LLMUnavailableError handler in
     main.py (#160, #191).
+
+    OPERATOR/ADMIN only (#188): registration is open and each sample is a paid LLM
+    call, so a VIEWER must not be able to run one.
     """
     llm_client = (
         await resolve_user_llm(db, current_user.id, server_client=get_llm_client)
