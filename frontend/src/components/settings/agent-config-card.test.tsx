@@ -387,6 +387,34 @@ describe("AgentConfigCard", () => {
       expect(saveStrategyButton().disabled).toBe(true); // saved state is the new baseline
     });
 
+    it("keeps the watchlist editable after a strategy save (#214)", async () => {
+      // The route's real response since #214: the same shape as GET /agent/config.
+      mockUpdateStrategy.mockResolvedValue(config({ strategy_version: "S-002" }));
+      mockUpdate.mockResolvedValue(
+        config({ strategy_version: "S-002", watchlist: ["AAPL", "SPY", "MSFT"] }),
+      );
+      render(<AgentConfigCard canEdit />);
+      await screen.findByText("AAPL");
+
+      fireEvent.change(screen.getByLabelText(/^strategy$/i), { target: { value: "S-002" } });
+      fireEvent.click(saveStrategyButton());
+      await waitFor(() => expect(saveStrategyButton().disabled).toBe(true));
+
+      expect(screen.getByText("Watchlist (3/20)")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: /remove nvda/i }));
+      fireEvent.change(screen.getByLabelText(/add symbol/i), { target: { value: "msft" } });
+      fireEvent.click(screen.getByRole("button", { name: /^preview$/i }));
+      fireEvent.click(await screen.findByRole("button", { name: /add msft/i }));
+      fireEvent.click(saveButton());
+
+      await waitFor(() =>
+        expect(mockUpdate).toHaveBeenCalledWith({ watchlist: ["AAPL", "SPY", "MSFT"] }),
+      );
+      await waitFor(() => expect(saveButton().disabled).toBe(true)); // saved = new baseline
+      expect(screen.getByText("MSFT")).toBeTruthy();
+      expect(screen.queryByText("NVDA")).toBeNull();
+    });
+
     it("shows a clear message on a 409 (active cycle)", async () => {
       mockUpdateStrategy.mockRejectedValue(
         new ApiError(
@@ -495,7 +523,8 @@ describe("AgentConfigCard: Ollama timeout and keep-alive (#203)", () => {
   });
 
   it("keeps the fields intact after saving a strategy", async () => {
-    // PUT /agent/{id}/strategy answers with the base config only (no watchlist / #203 fields).
+    // An API from before #214 answered PUT /agent/{id}/strategy with the base config only
+    // (no watchlist / #203 fields); the card must still keep what it holds.
     const full = config({ strategy_version: "S-002" });
     const base: Partial<AgentConfig> = { ...full };
     delete base.watchlist;

@@ -697,7 +697,8 @@ Authenticated users can call `GET /agent/strategies` to list registered
 strategy versions. Operators and administrators can select one for an owned
 agent with `PUT /agent/{agent_id}/strategy` and a body such as
 `{"strategy_version": "S-002"}`. Unknown versions return `422`, and updates
-are rejected with `409` while the agent has an active cycle. The selected
+are rejected with `409` while the agent has one or more active cycles (#209). The
+response is the same shape as `GET /agent/config`, `watchlist` included (#214). The selected
 version is used by subsequent cycles; existing cycle records retain the
 strategy version and prompt text that they used.
 
