@@ -1143,17 +1143,23 @@ async def start_agent_schedule(
             detail="Enable this agent before scheduling cycles",
         )
 
+    # Plain ids, not current_user.id / agent.id: the retry path's rollback (#220)
+    # expires every object in the session, and re-reading an expired attribute needs
+    # an implicit lazy-load that AsyncSession cannot do outside an awaited call (the
+    # same reason set_user_scheduler_switch reads its own previous value by query).
+    user_id, agent_id = current_user.id, agent.id
+
     existing_result = await db.execute(
         select(AgentSchedule).where(
-            AgentSchedule.user_id == current_user.id,
-            AgentSchedule.agent_id == agent.id,
+            AgentSchedule.user_id == user_id,
+            AgentSchedule.agent_id == agent_id,
         )
     )
     schedule = existing_result.scalar_one_or_none()
     if schedule is None:
         schedule = AgentSchedule(
-            user_id=current_user.id,
-            agent_id=agent.id,
+            user_id=user_id,
+            agent_id=agent_id,
             interval_minutes=body.interval_minutes,
             enabled=True,
         )
@@ -1161,15 +1167,22 @@ async def start_agent_schedule(
     else:
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
-    await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=True)
     try:
+        # Flush explicitly, before set_user_scheduler_switch's own SELECT (#220): that
+        # SELECT would otherwise autoflush this same pending INSERT itself, and a
+        # concurrent create of the same (user_id, agent_id) row raises the unique
+        # violation on an autoflush far more fragile to recover from than on a direct
+        # flush — the automatic rollback SQLAlchemy's async engine runs while handling
+        # an autoflush failure needs a greenlet context this call stack doesn't have.
+        await db.flush()
+        await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=True)
         await db.commit()
     except IntegrityError:
         await db.rollback()
         existing_result = await db.execute(
             select(AgentSchedule).where(
-                AgentSchedule.user_id == current_user.id,
-                AgentSchedule.agent_id == agent.id,
+                AgentSchedule.user_id == user_id,
+                AgentSchedule.agent_id == agent_id,
             )
         )
         schedule = existing_result.scalar_one_or_none()
@@ -1182,7 +1195,7 @@ async def start_agent_schedule(
     await db.refresh(schedule)
     schedules_result = await db.execute(
         select(AgentSchedule).where(
-            AgentSchedule.user_id == current_user.id,
+            AgentSchedule.user_id == user_id,
             AgentSchedule.enabled.is_(True),
         )
     )
