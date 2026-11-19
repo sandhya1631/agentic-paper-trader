@@ -87,6 +87,8 @@ MANUAL_ORDER_FAILED = "MANUAL_ORDER_FAILED"  # the broker call raised (502)
 # A user connected or revoked their own AI provider key (#191); details name the provider.
 LLM_KEY_CONNECTED = "LLM_KEY_CONNECTED"
 LLM_KEY_DISCONNECTED = "LLM_KEY_DISCONNECTED"
+# POST /agent/scheduler/start created a schedule or changed its interval / enabled (#216).
+AGENT_SCHEDULE_UPDATED = "AGENT_SCHEDULE_UPDATED"
 
 # --- LLM client factory ---
 SUPPORTED_PROVIDERS = ("openai", "ollama", "anthropic")

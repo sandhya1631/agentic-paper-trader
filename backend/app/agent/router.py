@@ -38,6 +38,7 @@ from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
 from app.core.constants import (
     ACTIVE_CYCLE_STATUSES,
+    AGENT_SCHEDULE_UPDATED,
     ALPACA_PROVIDER,
     DEFAULT_STRATEGY_VERSION,
     DEFAULT_WATCHLIST,
@@ -1102,6 +1103,44 @@ async def reject_cycle_trade(
     return cycle
 
 
+def _schedule_state(schedule: AgentSchedule | None) -> dict[str, Any]:
+    """The audited fields of a schedule; all None before it exists (#216)."""
+    if schedule is None:
+        return {"interval_minutes": None, "enabled": None}
+    return {"interval_minutes": schedule.interval_minutes, "enabled": schedule.enabled}
+
+
+def _record_schedule_change(
+    db: AsyncSession,
+    *,
+    schedule: AgentSchedule,
+    before: dict[str, Any],
+    actor_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> None:
+    """Stage one AGENT_SCHEDULE_UPDATED row if this start changed the schedule (#216).
+
+    Same shape as AGENT_CONFIG_UPDATED: only the fields that changed, from -> to. The
+    caller commits it with the schedule change, so a rolled-back start leaves no row.
+    """
+    after = _schedule_state(schedule)
+    changes = {
+        field: {"from": before[field], "to": after[field]}
+        for field in after
+        if before[field] != after[field]
+    }
+    if not changes:
+        return
+    record_audit_event(
+        db,
+        event_type=AGENT_SCHEDULE_UPDATED,
+        entity_type="agent_schedule",
+        entity_id=schedule.id,
+        actor_id=actor_id,
+        details={"agent_id": str(agent_id), "changes": changes},
+    )
+
+
 @router.post(
     "/scheduler/start",
     response_model=ScheduleStartRead,
@@ -1143,6 +1182,8 @@ async def start_agent_schedule(
             detail="Enable this agent before scheduling cycles",
         )
 
+    # Plain ids for the audit row: a rollback below expires the ORM objects.
+    actor_id, agent_id = current_user.id, agent.id
     existing_result = await db.execute(
         select(AgentSchedule).where(
             AgentSchedule.user_id == current_user.id,
@@ -1150,8 +1191,11 @@ async def start_agent_schedule(
         )
     )
     schedule = existing_result.scalar_one_or_none()
+    before = _schedule_state(schedule)
     if schedule is None:
         schedule = AgentSchedule(
+            # Set here, not at flush, so the audit row can name the new schedule.
+            id=uuid.uuid4(),
             user_id=current_user.id,
             agent_id=agent.id,
             interval_minutes=body.interval_minutes,
@@ -1162,22 +1206,30 @@ async def start_agent_schedule(
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
     await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=True)
+    _record_schedule_change(
+        db, schedule=schedule, before=before, actor_id=actor_id, agent_id=agent_id
+    )
     try:
         await db.commit()
     except IntegrityError:
+        # The rollback also drops the audit row staged above; the one below replaces it.
         await db.rollback()
         existing_result = await db.execute(
             select(AgentSchedule).where(
-                AgentSchedule.user_id == current_user.id,
-                AgentSchedule.agent_id == agent.id,
+                AgentSchedule.user_id == actor_id,
+                AgentSchedule.agent_id == agent_id,
             )
         )
         schedule = existing_result.scalar_one_or_none()
         if schedule is None:
             raise
+        before = _schedule_state(schedule)
         schedule.interval_minutes = body.interval_minutes
         schedule.enabled = True
         await set_user_scheduler_switch(db, user=current_user, scheduler_enabled=True)
+        _record_schedule_change(
+            db, schedule=schedule, before=before, actor_id=actor_id, agent_id=agent_id
+        )
         await db.commit()
     await db.refresh(schedule)
     schedules_result = await db.execute(

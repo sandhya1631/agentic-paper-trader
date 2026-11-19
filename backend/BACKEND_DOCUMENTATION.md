@@ -419,6 +419,7 @@ Event-type names live in `app/core/constants.py` (except
 | `event_type` | Written by | `entity_type` / `entity_id` | `details` |
 |---|---|---|---|
 | `AGENT_CONFIG_UPDATED` | `PATCH /agent/config`, once per real change | `agent_config` / the agent id | `{"changes": {field: {"from": ..., "to": ...}}}` |
+| `AGENT_SCHEDULE_UPDATED` | `POST /agent/scheduler/start` when it creates the schedule or changes `interval_minutes` / `enabled`; none for a start that changes nothing (#216) | `agent_schedule` / the schedule id | `{"agent_id": ..., "changes": {field: {"from": ..., "to": ...}}}`; `from` is null for a new schedule |
 | `MANUAL_ORDER_SUBMITTED` | `POST /api/v1/broker/orders` when Alpaca accepts the order (201) | `manual_order` / null | order fields (below), `outcome: "SUBMITTED"`, `broker_order_id`, `broker_status` |
 | `MANUAL_ORDER_BLOCKED` | `POST /api/v1/broker/orders` refused by the kill switch (423) | `manual_order` / null | order fields, `outcome: "BLOCKED"`, `reason` |
 | `MANUAL_ORDER_FAILED` | `POST /api/v1/broker/orders` when the Alpaca call raises (502) | `manual_order` / null | order fields, `outcome: "FAILED"`, `broker_error` (the Alpaca key and secret are redacted if echoed) |
@@ -1203,7 +1204,11 @@ tick:
 
 `POST /agent/scheduler/start` (`OPERATOR` or `ADMIN`) stores or updates
 `AgentSchedule`, enables the user scheduler, and registers a job. The first run
-occurs after the interval; it is not immediate.
+occurs after the interval; it is not immediate. A start that creates the schedule
+or changes its interval or `enabled` writes one `AGENT_SCHEDULE_UPDATED` audit
+event in the same commit (#216). Stop only pauses the user's scheduler, so resuming
+with the same interval writes no such event; pause and resume are USER-scope
+`kill_switch_events` rows.
 
 `POST /agent/scheduler/{schedule_id}/stop` disables scheduling for the user and
 removes that user's in-memory jobs. In-flight cycles are not forcibly stopped.
