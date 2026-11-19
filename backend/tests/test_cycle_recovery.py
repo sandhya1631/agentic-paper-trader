@@ -25,7 +25,7 @@ import app.main as main_module
 from app.agent import approval as approval_module
 from app.agent import orchestrator
 from app.agent import router as agent_router
-from app.agent.approval import no_order_placed_comment
+from app.agent.approval import no_order_placed_comment, policy_denied_comment
 from app.agent.orchestrator import CycleOverlapError, recover_orphaned_cycles, run_agent_cycle
 from app.agent.orchestrator import agent_cycle_lock as real_agent_cycle_lock
 from app.core.constants import APPROVAL_COMMENT_MAX_LENGTH, CYCLE_INTERRUPTED
@@ -896,4 +896,20 @@ def test_the_no_order_note_fits_the_comment_column():
     assert comment.endswith("…; no order was placed (ORDER_NOT_FOUND)")
     assert no_order_placed_comment("  ", "ORDER_NOT_FOUND") == (
         "No order was placed (ORDER_NOT_FOUND)"
+    )
+
+
+def test_the_policy_denied_note_fits_the_comment_column():
+    """#221: the approve route's own comment (up to the column's limit) must never
+    push the stored comment past it when policies deny the proposal."""
+    long_comment = "x" * APPROVAL_COMMENT_MAX_LENGTH
+
+    comment = policy_denied_comment(long_comment)
+
+    assert len(comment) == APPROVAL_COMMENT_MAX_LENGTH
+    assert comment.startswith("xxx")
+    assert comment.endswith("…; risk policies denied this proposal")
+    assert policy_denied_comment(None) == "Risk policies denied this proposal"
+    assert policy_denied_comment("Looks good") == (
+        "Looks good; risk policies denied this proposal"
     )

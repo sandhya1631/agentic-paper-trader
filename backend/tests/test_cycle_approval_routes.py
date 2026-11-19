@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.agent.router import approve_cycle_trade, reject_cycle_trade
+from app.core.constants import APPROVAL_COMMENT_MAX_LENGTH
 from app.db.enums import ApprovalStatus, BrokerOrderStatus, CycleStatus, PolicyOutcome
 from app.schemas import ApprovalAction, PolicyDecision, PolicyEvaluation
 
@@ -120,6 +121,59 @@ async def test_policy_denial_after_approval_never_marks_trade_submitted(monkeypa
     assert result.status == CycleStatus.REJECTED
     assert approval.status == ApprovalStatus.REJECTED
     assert cycle.snapshot_json["execution_status"] == "POLICY_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_policy_denial_keeps_a_short_comment_as_is(monkeypatch):
+    """Unchanged from before #221: a short comment is kept in full, joined with the
+    denial note exactly like today."""
+    approval, cycle, agent = _approval_fixture()
+    monkeypatch.setattr(
+        "app.agent.router._load_owned_approval",
+        AsyncMock(return_value=(approval, cycle, agent)),
+    )
+    monkeypatch.setattr(
+        "app.agent.router.evaluate_and_submit_cycle_trade",
+        AsyncMock(return_value=(_policy_decision(allowed=False), None)),
+    )
+
+    await approve_cycle_trade(
+        approval.id,
+        ApprovalAction(comment="Looks good"),
+        db=SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock()),
+        current_user=SimpleNamespace(id=uuid4()),
+    )
+
+    assert approval.comment == "Looks good; risk policies denied this proposal"
+
+
+@pytest.mark.asyncio
+async def test_policy_denial_shortens_a_full_length_comment_to_fit_the_column(monkeypatch):
+    """#221: the approve route's own comment can be up to the column's limit, so the
+    denial note must never push the stored comment past it."""
+    approval, cycle, agent = _approval_fixture()
+    monkeypatch.setattr(
+        "app.agent.router._load_owned_approval",
+        AsyncMock(return_value=(approval, cycle, agent)),
+    )
+    monkeypatch.setattr(
+        "app.agent.router.evaluate_and_submit_cycle_trade",
+        AsyncMock(return_value=(_policy_decision(allowed=False), None)),
+    )
+    long_comment = "x" * APPROVAL_COMMENT_MAX_LENGTH
+
+    result = await approve_cycle_trade(
+        approval.id,
+        ApprovalAction(comment=long_comment),
+        db=SimpleNamespace(commit=AsyncMock(), refresh=AsyncMock()),
+        current_user=SimpleNamespace(id=uuid4()),
+    )
+
+    assert result.status == CycleStatus.REJECTED
+    assert approval.status == ApprovalStatus.REJECTED
+    assert cycle.snapshot_json["execution_status"] == "POLICY_DENIED"
+    assert len(approval.comment) <= APPROVAL_COMMENT_MAX_LENGTH
+    assert approval.comment.endswith("risk policies denied this proposal")
 
 
 # --- Issue #77 Definition of Done: actor+time, expiry, proposal immutability, reject ---
