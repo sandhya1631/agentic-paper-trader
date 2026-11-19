@@ -141,7 +141,7 @@ async def list_strategies(
 
 @router.put(
     "/{agent_id}/strategy",
-    response_model=AgentConfigRead,
+    response_model=AgentConfigDetailRead,
     summary="Select an agent strategy prompt",
 )
 async def update_agent_strategy(
@@ -149,8 +149,12 @@ async def update_agent_strategy(
     body: StrategyUpdate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_operator),
-) -> AgentConfigRead:
-    """Update an owned agent's strategy when it has no active cycle."""
+) -> AgentConfigDetailRead:
+    """Update an owned agent's strategy when it has no active cycle.
+
+    Answers the same shape as GET /agent/config (with `watchlist`), because the
+    Settings card replaces its config with this response (#214).
+    """
     if body.strategy_version != DYNAMIC_STRATEGY_VERSION:
         try:
             get_prompt_definition(body.strategy_version)
@@ -172,13 +176,17 @@ async def update_agent_strategy(
     if agent is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
+    # Any one active cycle is enough: a REQUIRED sweep can park several
+    # PENDING_APPROVAL cycles, and scalar_one_or_none() would raise on them (#209).
     active_result = await db.execute(
-        select(AgentCycle.id).where(
+        select(AgentCycle.id)
+        .where(
             AgentCycle.agent_id == agent.id,
             AgentCycle.status.in_(ACTIVE_CYCLE_STATUSES),
         )
+        .limit(1)
     )
-    if active_result.scalar_one_or_none() is not None:
+    if active_result.scalars().first() is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Cannot change strategy while the agent has an active cycle.",
@@ -205,7 +213,7 @@ async def update_agent_strategy(
         )
     await db.commit()
     await db.refresh(agent)
-    return AgentConfigRead.model_validate(agent)
+    return _agent_config_detail(agent)
 
 
 @router.get(

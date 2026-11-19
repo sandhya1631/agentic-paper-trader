@@ -24,6 +24,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 from app.agent.prompt import get_system_prompt
 from app.core.constants import (
     ALPACA_PROVIDER,
+    APPROVAL_COMMENT_MAX_LENGTH,
     DEFAULT_PROMPT_REVISION,
     DEFAULT_STRATEGY_VERSION,
     DYNAMIC_STRATEGY_VERSION,
@@ -328,7 +329,7 @@ class CycleApproval(Base, UUIDPrimaryKey):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     acted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     actor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
-    comment: Mapped[str | None] = mapped_column(String(500))
+    comment: Mapped[str | None] = mapped_column(String(APPROVAL_COMMENT_MAX_LENGTH))
     policy_version: Mapped[str | None] = mapped_column(String(40))
     policy_result_json: Mapped[dict | None] = mapped_column(JSON)
     cycle: Mapped[AgentCycle] = relationship(back_populates="approval")
