@@ -597,6 +597,7 @@ async def test_start_schedule_persists_interval_and_registers_job():
         ),
         scalar=AsyncMock(return_value=False),
         add=MagicMock(),
+        flush=AsyncMock(),
         commit=AsyncMock(),
         refresh=AsyncMock(side_effect=assign_schedule_id),
     )
@@ -650,12 +651,11 @@ async def test_start_schedule_recovers_from_concurrent_insert():
         ),
         scalar=AsyncMock(return_value=False),
         add=MagicMock(),
-        commit=AsyncMock(
-            side_effect=[
-                IntegrityError("duplicate schedule", {}, Exception()),
-                None,
-            ]
-        ),
+        # #220: the unique violation now surfaces on the route's own explicit flush
+        # (right before set_user_scheduler_switch's SELECT would otherwise autoflush
+        # that same pending insert), not at commit().
+        flush=AsyncMock(side_effect=[IntegrityError("duplicate schedule", {}, Exception())]),
+        commit=AsyncMock(),
         rollback=AsyncMock(),
         refresh=AsyncMock(),
     )
@@ -671,7 +671,8 @@ async def test_start_schedule_recovers_from_concurrent_insert():
     assert result.schedule.interval_minutes == 5
     assert winner_schedule.enabled is True
     db.rollback.assert_awaited_once()
-    assert db.commit.await_count == 2
+    assert db.flush.await_count == 1
+    assert db.commit.await_count == 1
     scheduler_instance.add_job.assert_called_once()
 
 
