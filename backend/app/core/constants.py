@@ -61,6 +61,9 @@ INTERRUPTIBLE_CYCLE_STATUSES = (
 ORPHANABLE_CYCLE_STATUSES = (*INTERRUPTIBLE_CYCLE_STATUSES, CycleStatus.EXECUTING)
 # failure_code of a cycle that recovery closed out because its process died (#185).
 CYCLE_INTERRUPTED = "INTERRUPTED"
+# Length of cycle_approvals.comment: the approve/reject body's limit, and the cap for the
+# "no order was placed" note reconciliation appends to an approval (#210).
+APPROVAL_COMMENT_MAX_LENGTH = 500
 DEFAULT_STRATEGY_VERSION = "S-001"
 DYNAMIC_STRATEGY_VERSION = "DYNAMIC"
 # Bump whenever the S-001 prompt text changes, so each cycle's audit record names the
