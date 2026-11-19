@@ -367,6 +367,81 @@ async def test_strategy_update_rejects_while_cycle_active(client: AsyncClient):
 
 
 @pytest.mark.asyncio
+async def test_strategy_update_returns_the_agent_config_shape(client: AsyncClient):
+    """#214: the response carries `watchlist` and equals GET /agent/config, because the
+    Settings card replaces its config with it."""
+    email = "strategy-shape@example.com"
+    token = await _register_and_login(client, email)
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, email)
+        agent.watchlist = ["AAPL", "NVDA"]
+        user = (await db.execute(select(User).where(User.email == email))).scalar_one()
+        user.role = UserRole.OPERATOR
+        await db.commit()
+        agent_id = agent.id
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = await client.put(
+        f"/agent/{agent_id}/strategy",
+        headers=headers,
+        json={"strategy_version": "S-002"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["strategy_version"] == "S-002"
+    assert body["watchlist"] == ["AAPL", "NVDA"]
+    config = await client.get("/agent/config", headers=headers)
+    assert config.status_code == 200
+    assert body == config.json()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parked_cycles", [1, 2])
+async def test_strategy_update_rejects_parked_approvals(
+    client: AsyncClient, parked_cycles: int
+):
+    """#209: a REQUIRED sweep can park one PENDING_APPROVAL cycle per symbol. Two or
+    more must give the same 409 as one (not a 500), and leave the strategy as it was."""
+    email = f"strategy-parked-{parked_cycles}@example.com"
+    token = await _register_and_login(client, email)
+    async with TestSessionLocal() as db:
+        agent = await _create_agent_for(db, email)
+        user = (await db.execute(select(User).where(User.email == email))).scalar_one()
+        user.role = UserRole.OPERATOR
+        for minutes_ago in range(1, parked_cycles + 1):
+            db.add(
+                _cycle(
+                    agent.id,
+                    minutes_ago=minutes_ago,
+                    status=CycleStatus.PENDING_APPROVAL,
+                    action="BUY",
+                )
+            )
+        await db.commit()
+        agent_id = agent.id
+
+    response = await client.put(
+        f"/agent/{agent_id}/strategy",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"strategy_version": "S-002"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Cannot change strategy while the agent has an active cycle."
+    )
+    async with TestSessionLocal() as db:
+        stored = await db.get(AgentConfig, agent_id)
+        assert stored is not None
+        assert stored.strategy_version == "S-001"
+        events = (
+            await db.execute(select(AuditEvent).where(AuditEvent.entity_id == agent_id))
+        ).scalars().all()
+    assert events == []
+
+
+@pytest.mark.asyncio
 async def test_cycle_token_usage_returns_persisted_context_budget(client: AsyncClient):
     token = await _register_and_login(client, "tokens@example.com")
     async with TestSessionLocal() as db:

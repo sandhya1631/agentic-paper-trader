@@ -243,8 +243,9 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
     setStrategyFeedback(null);
     const [res] = await Promise.allSettled([updateAgentStrategy(config.id, draftStrategy)]);
     if (res.status === "fulfilled") {
-      // PUT /agent/{id}/strategy answers with the base config (no watchlist or the #203
-      // fields), so update the strategy on top of what the card already holds.
+      // PUT /agent/{id}/strategy answers with the full config since #214. Merging onto
+      // what the card holds keeps it working against an older API that answered with the
+      // base config only (no watchlist or #203 fields), e.g. during a deploy.
       applyConfig({ ...config, ...res.value });
       setStrategyFeedback({ tone: "success", message: SAVED_MESSAGE });
     } else {
