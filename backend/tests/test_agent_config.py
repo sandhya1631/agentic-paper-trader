@@ -46,6 +46,7 @@ CONFIG_FIELDS = {
     "daily_loss_limit",
     "approval_mode",
     "enabled",
+    "custom_strategy_id",
     "watchlist",
     # #203: effective Ollama timeout / keep-alive and the server defaults.
     "llm_timeout_seconds",

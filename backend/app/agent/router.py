@@ -39,6 +39,7 @@ from app.core.config import get_settings
 from app.core.constants import (
     ACTIVE_CYCLE_STATUSES,
     ALPACA_PROVIDER,
+    CUSTOM_STRATEGY_VERSION,
     DEFAULT_STRATEGY_VERSION,
     DEFAULT_WATCHLIST,
     DYNAMIC_STRATEGY_VERSION,
@@ -59,6 +60,7 @@ from app.db.models import (
     AgentCycle,
     AgentSchedule,
     BrokerOrder,
+    CustomStrategy,
     CycleApproval,
     PolicySet,
     TradingAccount,
@@ -82,6 +84,9 @@ from app.schemas import (
     AgentScheduleRead,
     ApprovalAction,
     ApprovalRead,
+    CustomStrategyCreate,
+    CustomStrategyRead,
+    CustomStrategyUpdate,
     CycleListRead,
     CycleRead,
     CycleTokenUsageRead,
@@ -111,7 +116,8 @@ router = APIRouter(prefix="/agent", tags=["agent"])
     summary="List registered strategy prompts",
 )
 async def list_strategies(
-    _current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> list[StrategyRead]:
     """Return strategy versions available for agent selection."""
     strategies = [
@@ -135,7 +141,105 @@ async def list_strategies(
             selectable_mode="DYNAMIC",
         )
     )
+    custom_result = await db.execute(
+        select(CustomStrategy)
+        .where(CustomStrategy.user_id == current_user.id, CustomStrategy.is_active.is_(True))
+        .order_by(CustomStrategy.created_at, CustomStrategy.id)
+    )
+    strategies.extend(
+        StrategyRead(
+            version=f"{CUSTOM_STRATEGY_VERSION}:{strategy.id}",
+            revision=f"custom-1.0.0+v{strategy.version}",
+            name=strategy.name,
+            summary="User-defined strategy",
+            selectable_mode="CUSTOM",
+            custom_strategy_id=strategy.id,
+        )
+        for strategy in custom_result.scalars()
+    )
     return strategies
+
+
+@router.get(
+    "/custom-strategies",
+    response_model=list[CustomStrategyRead],
+    summary="List the caller's custom strategies",
+)
+async def list_custom_strategies(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[CustomStrategyRead]:
+    result = await db.execute(
+        select(CustomStrategy)
+        .where(CustomStrategy.user_id == current_user.id)
+        .order_by(CustomStrategy.created_at, CustomStrategy.id)
+    )
+    return [CustomStrategyRead.model_validate(item) for item in result.scalars()]
+
+
+@router.post(
+    "/custom-strategies",
+    response_model=CustomStrategyRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a custom strategy",
+)
+async def create_custom_strategy(
+    body: CustomStrategyCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_operator),
+) -> CustomStrategyRead:
+    strategy = CustomStrategy(
+        user_id=current_user.id,
+        name=body.name.strip(),
+        instructions=body.instructions.strip(),
+    )
+    db.add(strategy)
+    await db.commit()
+    await db.refresh(strategy)
+    return CustomStrategyRead.model_validate(strategy)
+
+
+@router.put(
+    "/custom-strategies/{strategy_id}",
+    response_model=CustomStrategyRead,
+    summary="Create a new version of a custom strategy",
+)
+async def update_custom_strategy(
+    strategy_id: uuid.UUID,
+    body: CustomStrategyUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_operator),
+) -> CustomStrategyRead:
+    result = await db.execute(
+        select(CustomStrategy).where(
+            CustomStrategy.id == strategy_id,
+            CustomStrategy.user_id == current_user.id,
+        )
+    )
+    strategy = result.scalar_one_or_none()
+    if strategy is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Strategy not found")
+    if body.name is None and body.instructions is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="At least one strategy field must be provided",
+        )
+    if body.name is not None:
+        strategy.name = body.name.strip()
+    if body.instructions is not None:
+        strategy.instructions = body.instructions.strip()
+    strategy.version += 1
+    record_audit_event(
+        db,
+        event_type="CUSTOM_STRATEGY_UPDATED",
+        entity_type="custom_strategy",
+        entity_id=strategy.id,
+        actor_id=current_user.id,
+        details={"version": strategy.version},
+    )
+    await db.commit()
+    await db.refresh(strategy)
+    return CustomStrategyRead.model_validate(strategy)
 
 
 @router.put(
@@ -150,7 +254,38 @@ async def update_agent_strategy(
     current_user: User = Depends(require_operator),
 ) -> AgentConfigRead:
     """Update an owned agent's strategy when it has no active cycle."""
-    if body.strategy_version != DYNAMIC_STRATEGY_VERSION:
+    custom_strategy = None
+    custom_version = body.strategy_version.startswith(f"{CUSTOM_STRATEGY_VERSION}:")
+    if body.strategy_version == CUSTOM_STRATEGY_VERSION or custom_version:
+        custom_strategy_id = body.custom_strategy_id
+        if custom_strategy_id is None and custom_version:
+            try:
+                custom_strategy_id = uuid.UUID(
+                    body.strategy_version.split(":", maxsplit=1)[1]
+                )
+            except (IndexError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid custom strategy selection",
+                ) from exc
+        if custom_strategy_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="custom_strategy_id is required for a custom strategy",
+            )
+        custom_result = await db.execute(
+            select(CustomStrategy).where(
+                CustomStrategy.id == custom_strategy_id,
+                CustomStrategy.user_id == current_user.id,
+                CustomStrategy.is_active.is_(True),
+            )
+        )
+        custom_strategy = custom_result.scalar_one_or_none()
+        if custom_strategy is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Custom strategy not found"
+            )
+    elif body.strategy_version != DYNAMIC_STRATEGY_VERSION:
         try:
             get_prompt_definition(body.strategy_version)
         except ValueError as exc:
@@ -184,9 +319,20 @@ async def update_agent_strategy(
         )
 
     previous_strategy_version = agent.strategy_version
-    agent.strategy_version = body.strategy_version
+    previous_custom_strategy_id = agent.custom_strategy_id
+    selected_strategy_version = (
+        CUSTOM_STRATEGY_VERSION if custom_strategy is not None else body.strategy_version
+    )
+    agent.strategy_version = selected_strategy_version
+    agent.custom_strategy_id = custom_strategy.id if custom_strategy else None
     agent.version += 1
-    if previous_strategy_version != body.strategy_version:
+    if (
+        previous_strategy_version != selected_strategy_version
+        or (
+            custom_strategy is not None
+            and previous_custom_strategy_id != custom_strategy.id
+        )
+    ):
         record_audit_event(
             db,
             event_type="AGENT_STRATEGY_UPDATED",
@@ -197,7 +343,7 @@ async def update_agent_strategy(
                 "changes": {
                     "strategy_version": {
                         "from": previous_strategy_version,
-                        "to": body.strategy_version,
+                        "to": selected_strategy_version,
                     }
                 }
             },

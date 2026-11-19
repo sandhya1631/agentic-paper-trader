@@ -57,6 +57,7 @@ class AgentConfigRead(APIModel):
     id: UUID
     name: str
     strategy_version: str = DEFAULT_STRATEGY_VERSION
+    custom_strategy_id: UUID | None = None
     cadence_minutes: int = 15
     target_allocation: Decimal = Decimal("0.05")
     max_symbol_allocation: Decimal = Decimal("0.10")
@@ -74,6 +75,25 @@ class StrategyRead(APIModel):
     name: str
     summary: str
     selectable_mode: str = "FIXED"
+    custom_strategy_id: UUID | None = None
+
+
+class CustomStrategyRead(APIModel):
+    id: UUID
+    name: str
+    instructions: str
+    version: int
+    is_active: bool
+
+
+class CustomStrategyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    instructions: str = Field(min_length=20, max_length=4000)
+
+
+class CustomStrategyUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    instructions: str | None = Field(default=None, min_length=20, max_length=4000)
 
 
 class StrategyUpdate(APIModel):
@@ -82,6 +102,7 @@ class StrategyUpdate(APIModel):
     strategy_version: str = Field(
         default=DYNAMIC_STRATEGY_VERSION, min_length=1, max_length=30
     )
+    custom_strategy_id: UUID | None = None
 
 
 class ReplaySampleRequest(APIModel):

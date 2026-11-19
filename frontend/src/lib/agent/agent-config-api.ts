@@ -19,6 +19,7 @@ export interface AgentConfig {
   /** One of `/meta/constants` `approval_mode` (OBSERVE_ONLY / REQUIRED / AUTO). */
   approval_mode: string;
   enabled: boolean;
+  custom_strategy_id: string | null;
   watchlist: string[];
   /** #203: effective Ollama request timeout (the agent's override, else the server default). */
   llm_timeout_seconds: number;
@@ -45,6 +46,15 @@ export interface Strategy {
   summary: string;
   /** "FIXED" for a registered prompt, "DYNAMIC" for the auto-selecting pseudo-strategy. */
   selectable_mode: string;
+  custom_strategy_id?: string | null;
+}
+
+export interface CustomStrategy {
+  id: string;
+  name: string;
+  instructions: string;
+  version: number;
+  is_active: boolean;
 }
 
 export function getAgentConfig(): Promise<AgentConfig> {
@@ -59,11 +69,20 @@ export function listStrategies(): Promise<Strategy[]> {
   return api.get<Strategy[]>("/agent/strategies");
 }
 
+export function createCustomStrategy(
+  name: string,
+  instructions: string,
+): Promise<CustomStrategy> {
+  return api.post<CustomStrategy>("/agent/custom-strategies", { name, instructions });
+}
+
 export function updateAgentStrategy(
   agentId: string,
   strategyVersion: string,
+  customStrategyId?: string,
 ): Promise<AgentConfig> {
   return api.put<AgentConfig>(`/agent/${agentId}/strategy`, {
     strategy_version: strategyVersion,
+    ...(customStrategyId ? { custom_strategy_id: customStrategyId } : {}),
   });
 }

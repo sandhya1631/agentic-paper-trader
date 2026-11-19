@@ -141,3 +141,14 @@ async def ensure_agent_config_llm_options(conn: AsyncConnection) -> None:
         await conn.execute(
             text(f"ALTER TABLE agent_configs ADD COLUMN IF NOT EXISTS {column} INTEGER")
         )
+
+
+async def ensure_agent_config_custom_strategy(conn: AsyncConnection) -> None:
+    """Add the optional custom strategy assignment to existing agent tables."""
+    await conn.execute(
+        text(
+            "ALTER TABLE agent_configs "
+            "ADD COLUMN IF NOT EXISTS custom_strategy_id UUID "
+            "REFERENCES custom_strategies(id) ON DELETE RESTRICT"
+        )
+    )

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getAgentConfig,
+  createCustomStrategy,
   listStrategies,
   updateAgentConfig,
   updateAgentStrategy,
@@ -74,6 +75,9 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
   const [draftStrategy, setDraftStrategy] = useState("");
   const [strategySaving, setStrategySaving] = useState(false);
   const [strategyFeedback, setStrategyFeedback] = useState<Feedback | null>(null);
+  const [customName, setCustomName] = useState("");
+  const [customInstructions, setCustomInstructions] = useState("");
+  const [customSaving, setCustomSaving] = useState(false);
   // #203: Ollama request timeout / keep-alive drafts (raw input text) and their bounds.
   const [draftTimeout, setDraftTimeout] = useState("");
   const [draftKeepAlive, setDraftKeepAlive] = useState("");
@@ -241,7 +245,13 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
     if (!config || !canSaveStrategy) return;
     setStrategySaving(true);
     setStrategyFeedback(null);
-    const [res] = await Promise.allSettled([updateAgentStrategy(config.id, draftStrategy)]);
+    const selected = findStrategy(strategyOptions, draftStrategy);
+    const customStrategyId = selected?.custom_strategy_id ?? undefined;
+    const [res] = await Promise.allSettled(
+      customStrategyId
+        ? [updateAgentStrategy(config.id, draftStrategy, customStrategyId)]
+        : [updateAgentStrategy(config.id, draftStrategy)],
+    );
     if (res.status === "fulfilled") {
       // PUT /agent/{id}/strategy answers with the base config (no watchlist or the #203
       // fields), so update the strategy on top of what the card already holds.
@@ -251,6 +261,26 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
       setStrategyFeedback({ tone: "error", message: describeStrategyError(res.reason, "save") });
     }
     setStrategySaving(false);
+  }
+
+  async function saveCustomStrategy() {
+    if (!canEdit || customSaving || !customName.trim() || customInstructions.trim().length < 20) {
+      return;
+    }
+    setCustomSaving(true);
+    setStrategyFeedback(null);
+    const [res] = await Promise.allSettled([
+      createCustomStrategy(customName.trim(), customInstructions.trim()),
+    ]);
+    if (res.status === "fulfilled") {
+      setCustomName("");
+      setCustomInstructions("");
+      await load();
+      setStrategyFeedback({ tone: "success", message: "Custom strategy created." });
+    } else {
+      setStrategyFeedback({ tone: "error", message: "Could not create the custom strategy." });
+    }
+    setCustomSaving(false);
   }
 
   return (
@@ -486,6 +516,42 @@ export function AgentConfigCard({ canEdit }: { canEdit: boolean }) {
               <p className="mt-1 text-sm text-muted">{selectedStrategy.summary}</p>
             )}
             {strategiesError && <p className="mt-1 text-sm text-negative">{strategiesError}</p>}
+            {canEdit && (
+              <div className="mt-4 space-y-2 rounded-lg border border-border bg-background p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+                  Create custom strategy
+                </p>
+                <input
+                  aria-label="Custom strategy name"
+                  value={customName}
+                  onChange={(e) => setCustomName(e.target.value)}
+                  placeholder="Strategy name"
+                  className={inputClass}
+                  disabled={customSaving}
+                />
+                <textarea
+                  aria-label="Custom strategy instructions"
+                  value={customInstructions}
+                  onChange={(e) => setCustomInstructions(e.target.value)}
+                  placeholder="Describe when to BUY, SELL, or HOLD..."
+                  rows={5}
+                  className={inputClass}
+                  disabled={customSaving}
+                />
+                <button
+                  type="button"
+                  disabled={
+                    customSaving ||
+                    !customName.trim() ||
+                    customInstructions.trim().length < 20
+                  }
+                  onClick={() => void saveCustomStrategy()}
+                  className={secondaryButton}
+                >
+                  {customSaving ? "Creating..." : "Create custom strategy"}
+                </button>
+              </div>
+            )}
             {strategyFeedback && (
               <p
                 role={strategyFeedback.tone === "error" ? "alert" : "status"}
