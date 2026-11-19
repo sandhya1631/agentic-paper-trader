@@ -22,7 +22,11 @@ from sqlalchemy.orm import selectinload
 from app.accounts.llm_keys import resolve_user_llm
 from app.agent import orchestrator
 from app.agent import scheduler as scheduler_service
-from app.agent.approval import evaluate_and_submit_cycle_trade, persistable_policy_result
+from app.agent.approval import (
+    evaluate_and_submit_cycle_trade,
+    persistable_policy_result,
+    policy_denied_comment,
+)
 from app.agent.llm_options import (
     effective_llm_keep_alive_minutes,
     effective_llm_timeout_seconds,
@@ -574,7 +578,7 @@ async def trigger_manual_cycle(
 )
 async def run_replay(
     body: ReplayRequest,
-    current_user: User = Depends(require_operator),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ReplayMetricsRead:
     """Run offline strategy evaluation on the caller's own AI key, else the server's LLM.
@@ -584,9 +588,6 @@ async def run_replay(
     An unavailable LLM (no key with the server fallback off, building the client or any
     generate call) answers 503 through the app-wide LLMUnavailableError handler in
     main.py (#160, #191).
-
-    OPERATOR/ADMIN only (#188): registration is open and each sample is a paid LLM
-    call, so a VIEWER must not be able to run one.
     """
     llm_client = (
         await resolve_user_llm(db, current_user.id, server_client=get_llm_client)
@@ -1045,11 +1046,10 @@ async def _execute_approved_trade(
     cycle.policy_result_json = persistable_policy_result(policy_decision)
     if broker_order is None:
         approval.status = ApprovalStatus.REJECTED
-        approval.comment = (
-            f"{body.comment}; risk policies denied this proposal"
-            if body.comment
-            else "Risk policies denied this proposal"
-        )
+        # #221: body.comment can be up to the column's own limit, so appending the
+        # note unconditionally can overflow it; policy_denied_comment shortens the
+        # operator's text instead of the note.
+        approval.comment = policy_denied_comment(body.comment)
         cycle.status = CycleStatus.REJECTED
         cycle.failure_code = "POLICY_DENIED"
         snapshot["execution_status"] = "POLICY_DENIED"

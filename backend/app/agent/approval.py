@@ -197,20 +197,36 @@ async def evaluate_and_submit_cycle_trade(
         return decision, broker_order
 
 
-def no_order_placed_comment(comment: str | None, failure_code: str) -> str:
-    """An approval comment that adds "no order was placed" to the operator's (#210).
+def _comment_with_note(comment: str | None, note: str) -> str:
+    """Join an operator's comment with `note` within APPROVAL_COMMENT_MAX_LENGTH.
 
-    Keeps the existing comment, joined like the route's "risk policies denied" note.
-    When both don't fit the column, the existing comment is shortened, never the note.
+    When both don't fit the column, the existing comment is shortened, never the
+    note (#210, #221). With no existing comment, `note` alone stands capitalized.
     """
     existing = (comment or "").strip()
     if not existing:
-        return f"No order was placed ({failure_code})"
-    note = f"; no order was placed ({failure_code})"
-    room = APPROVAL_COMMENT_MAX_LENGTH - len(note)
+        return note[0].upper() + note[1:]
+    suffix = f"; {note}"
+    room = APPROVAL_COMMENT_MAX_LENGTH - len(suffix)
     if len(existing) > room:
         existing = existing[: room - 1].rstrip() + "…"
-    return existing + note
+    return existing + suffix
+
+
+def no_order_placed_comment(comment: str | None, failure_code: str) -> str:
+    """An approval comment that adds "no order was placed" to the operator's (#210)."""
+    return _comment_with_note(comment, f"no order was placed ({failure_code})")
+
+
+def policy_denied_comment(comment: str | None) -> str:
+    """An approval comment noting a policy denial, within the column's limit (#221).
+
+    The approve route's own comment can be up to APPROVAL_COMMENT_MAX_LENGTH
+    characters, so appending "; risk policies denied this proposal" unconditionally
+    can overflow the column (a 500-char comment plus the note is 536 characters) and
+    fail the final commit with a 500. The operator's text is shortened instead.
+    """
+    return _comment_with_note(comment, "risk policies denied this proposal")
 
 
 async def _note_no_order_placed(db: AsyncSession, cycle: AgentCycle, failure_code: str) -> None:
