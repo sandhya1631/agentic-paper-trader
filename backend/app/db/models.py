@@ -24,6 +24,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 from app.agent.prompt import get_system_prompt
 from app.core.constants import (
     ALPACA_PROVIDER,
+    CUSTOM_STRATEGY_VERSION,
     APPROVAL_COMMENT_MAX_LENGTH,
     DEFAULT_PROMPT_REVISION,
     DEFAULT_STRATEGY_VERSION,
@@ -67,6 +68,9 @@ class User(Base, UUIDPrimaryKey, Timestamped):
         Boolean, default=True, server_default=text("true"), nullable=False
     )
     accounts: Mapped[list[TradingAccount]] = relationship(back_populates="user")
+    custom_strategies: Mapped[list[CustomStrategy]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
     def __init__(self, **kwargs):
         if "hashed_password" in kwargs and "password_hash" not in kwargs:
@@ -141,6 +145,21 @@ class LLMCredential(Base, UUIDPrimaryKey, Timestamped):
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class CustomStrategy(Base, UUIDPrimaryKey, Timestamped):
+    """A user-owned, versioned natural-language strategy."""
+
+    __tablename__ = "custom_strategies"
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    user: Mapped[User] = relationship(back_populates="custom_strategies")
+    agents: Mapped[list[AgentConfig]] = relationship(back_populates="custom_strategy")
+
+
 class AccountSnapshot(Base, UUIDPrimaryKey):
     __tablename__ = "account_snapshots"
     account_id: Mapped[uuid.UUID] = mapped_column(
@@ -177,6 +196,9 @@ class AgentConfig(Base, UUIDPrimaryKey, Timestamped):
     name: Mapped[str] = mapped_column(String(80))
     watchlist: Mapped[list[str]] = mapped_column(JSON)
     strategy_version: Mapped[str] = mapped_column(String(30), default=DEFAULT_STRATEGY_VERSION)
+    custom_strategy_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("custom_strategies.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
     cadence_minutes: Mapped[int] = mapped_column(Integer, default=15)
     target_allocation: Mapped[Decimal] = mapped_column(Numeric(6, 5), default=Decimal("0.05"))
     max_symbol_allocation: Mapped[Decimal] = mapped_column(Numeric(6, 5), default=Decimal("0.10"))
@@ -197,11 +219,12 @@ class AgentConfig(Base, UUIDPrimaryKey, Timestamped):
     version: Mapped[int] = mapped_column(Integer, default=1)
     account: Mapped[TradingAccount] = relationship(back_populates="agents")
     policy_set: Mapped[PolicySet] = relationship(back_populates="agents")
+    custom_strategy: Mapped[CustomStrategy | None] = relationship(back_populates="agents")
     cycles: Mapped[list[AgentCycle]] = relationship(back_populates="agent")
 
     @validates("strategy_version")
     def validate_strategy_version(self, _key: str, value: str) -> str:
-        if value != DYNAMIC_STRATEGY_VERSION:
+        if value not in {DYNAMIC_STRATEGY_VERSION, CUSTOM_STRATEGY_VERSION}:
             get_system_prompt(value)
         return value
 

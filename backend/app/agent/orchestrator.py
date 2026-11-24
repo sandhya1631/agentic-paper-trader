@@ -32,6 +32,7 @@ from typing import Any
 
 from sqlalchemy import BigInteger, bindparam, case, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified, set_committed_value
 
 from app.accounts.llm_keys import EffectiveLLM, resolve_agent_llm
@@ -48,13 +49,14 @@ from app.agent.llm_options import (
     effective_llm_keep_alive_minutes,
     effective_llm_timeout_seconds,
 )
-from app.agent.prompt import get_prompt_definition
+from app.agent.prompt import build_custom_prompt, get_prompt_definition
 from app.agent.tool_validation import ToolValidationError, validate_decision_proposal
 from app.agent.watchlist import normalize_watchlist
 from app.broker.gateway import TradingDisabledError
 from app.core.config import get_settings
 from app.core.constants import (
     ACTIVE_CYCLE_STATUSES,
+    CUSTOM_STRATEGY_VERSION,
     CYCLE_INTERRUPTED,
     DEFAULT_STRATEGY_VERSION,
     DYNAMIC_STRATEGY_VERSION,
@@ -201,6 +203,19 @@ def _agent_llm_client(agent: AgentConfig) -> LLMClient:
             keep_alive_minutes=effective_llm_keep_alive_minutes(agent, settings),
         )
     return client
+
+
+def _prompt_definition_for_agent(agent: AgentConfig, strategy_version: str):
+    if strategy_version == CUSTOM_STRATEGY_VERSION:
+        strategy = agent.custom_strategy
+        if strategy is None or not strategy.is_active:
+            raise ValueError("A custom strategy must be assigned and active")
+        return build_custom_prompt(
+            name=strategy.name,
+            instructions=strategy.instructions,
+            version=strategy.version,
+        )
+    return get_prompt_definition(strategy_version)
 
 
 class AgentNotFoundError(ValueError):
@@ -570,6 +585,7 @@ async def _run_agent_cycle(
     stmt = (
         select(AgentConfig)
         .where(AgentConfig.id == agent_id)
+        .options(selectinload(AgentConfig.custom_strategy))
         .execution_options(populate_existing=True)
     )
     res = await db.execute(stmt)
@@ -590,7 +606,7 @@ async def _run_agent_cycle(
         if agent.strategy_version == DYNAMIC_STRATEGY_VERSION
         else agent.strategy_version
     )
-    prompt_definition = get_prompt_definition(initial_strategy)
+    prompt_definition = _prompt_definition_for_agent(agent, initial_strategy)
     cycle = AgentCycle(
         agent_id=agent.id,
         trigger=trigger,
@@ -683,7 +699,7 @@ async def _run_agent_cycle(
                 context,
                 model_window_tokens=model_window_tokens,
             )
-        prompt_definition = get_prompt_definition(selected_strategy)
+        prompt_definition = _prompt_definition_for_agent(agent, selected_strategy)
         system_prompt = prompt_definition.text
         context["strategy_selection"] = {
             "mode": "DYNAMIC" if agent.strategy_version == DYNAMIC_STRATEGY_VERSION else "FIXED",

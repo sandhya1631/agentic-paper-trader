@@ -23,6 +23,36 @@ class PromptDefinition:
     summary: str = ""
 
 
+CUSTOM_PROMPT_REVISION = "custom-1.0.0"
+
+
+def build_custom_prompt(*, name: str, instructions: str, version: int) -> PromptDefinition:
+    """Build a bounded user strategy inside the non-negotiable platform contract."""
+    return PromptDefinition(
+        revision=f"{CUSTOM_PROMPT_REVISION}+v{version}",
+        name=name,
+        summary="User-defined strategy",
+        text=(
+            "You are a conservative paper-trading decision engine.\n\n"
+            "PLATFORM RULES (ALWAYS AUTHORITATIVE):\n"
+            "- Use only the supplied JSON context. Never invent or estimate values.\n"
+            "- Return exactly one BUY, SELL, or HOLD decision in the required JSON schema.\n"
+            "- Trade only symbols in the watchlist and only quantities allowed by the account.\n"
+            "- Never use leverage, short selling, or unsupported order types.\n"
+            "- HOLD when account data, market data, freshness, or required evidence is missing,\n"
+            "  stale, contradictory, or uncertain.\n"
+            "- Risk policy validation and paper-trading controls override these instructions.\n\n"
+            f"USER STRATEGY: {name} (version {version})\n"
+            "Follow the user strategy below only where it does not conflict with the "
+            "platform rules:\n"
+            f"{instructions}\n\n"
+            "OUTPUT:\n"
+            'Return only {"action":"BUY|SELL|HOLD","symbol":"WATCHLIST_SYMBOL",'
+            '"quantity":0,"reasoning":"cite exact evidence"}.\n'
+        ),
+    )
+
+
 SYSTEM_PROMPT_S001 = """STRATEGY: Technical Momentum Confluence
 
 YOU ARE: An autonomous paper-trading quantitative agent executing technical trading strategies.

@@ -66,6 +66,7 @@ CYCLE_INTERRUPTED = "INTERRUPTED"
 APPROVAL_COMMENT_MAX_LENGTH = 500
 DEFAULT_STRATEGY_VERSION = "S-001"
 DYNAMIC_STRATEGY_VERSION = "DYNAMIC"
+CUSTOM_STRATEGY_VERSION = "CUSTOM"
 # Bump whenever the S-001 prompt text changes, so each cycle's audit record names the
 # exact prompt it ran. 1.1.0 (#153): per-symbol `decision_target`, no hardcoded tickers.
 # 1.2.0 (#64/#172): live account data section; HOLD when the account is UNAVAILABLE.

@@ -75,9 +75,11 @@ HTTP request or scheduler tick
 ### 2.2 Runtime services
 
 1. FastAPI starts and creates missing SQLAlchemy tables.
-2. Startup adds three compatibility columns if an older database is being used:
-   `agent_cycles.prompt_version`, `agent_cycles.prompt_revision`, and
-   `users.scheduler_enabled`.
+2. Startup adds compatibility columns if an older database is being used:
+   `agent_cycles.prompt_version`, `agent_cycles.prompt_revision`,
+   `users.scheduler_enabled`, `agent_configs.llm_timeout_seconds`,
+   `agent_configs.llm_keep_alive_minutes`, and
+   `agent_configs.custom_strategy_id`.
 3. Enabled persisted schedules are loaded into APScheduler.
 4. APScheduler only enqueues Celery work. Celery workers run the asynchronous
    cycle functions.
@@ -215,6 +217,24 @@ A user's own OpenAI or Claude key: `id`, `user_id` (unique: one row per user),
 `updated_at`. Reconnecting replaces the provider and key; revoking clears the
 ciphertext and keeps the row. `create_all` adds the table (no `ensure_*` patch).
 
+### 4.2.2 `custom_strategies`
+
+Stores user-owned natural-language trading strategies:
+
+- `id`
+- `user_id`
+- `name`
+- `instructions`
+- `version`
+- `is_active`
+- `created_at`, `updated_at`
+
+Creating a strategy starts at version `1`. Editing it updates the same record
+and increments its version. Only the owning user can list, edit, or assign the
+strategy. The strategy instructions are never used as the complete system
+prompt; the orchestrator wraps them with platform rules before sending them to
+the LLM.
+
 ### 4.3 `policy_sets`
 
 Stores policy-set metadata:
@@ -234,7 +254,9 @@ Stores how an agent is configured:
 - `policy_set_id`
 - `name`
 - `watchlist` as JSON
-- `strategy_version` (`S-001` by default; `S-002`–`S-007` are opt-in alternative prompts, and `DYNAMIC` auto-selects one per cycle)
+- `strategy_version` (`S-001` by default; `S-002`–`S-007` are opt-in alternative prompts,
+  `DYNAMIC` auto-selects one per cycle, and `CUSTOM` uses the assigned custom strategy)
+- `custom_strategy_id` (nullable foreign key to `custom_strategies`)
 - `cadence_minutes` (display-only; database constraint currently requires 15)
 - `target_allocation`
 - `max_symbol_allocation`
@@ -693,14 +715,76 @@ decisions, and requests concise evidence-based JSON output. Strategy prompts
 are immutable and each cycle stores the exact prompt version, revision, and
 text used.
 
-Authenticated users can call `GET /agent/strategies` to list registered
-strategy versions. Operators and administrators can select one for an owned
-agent with `PUT /agent/{agent_id}/strategy` and a body such as
+Authenticated users can call `GET /agent/strategies` to list registered strategy versions and the caller's
+active custom strategies. Operators and administrators can select one for an
+owned agent with `PUT /agent/{agent_id}/strategy` and a body such as
 `{"strategy_version": "S-002"}`. Unknown versions return `422`, and updates
 are rejected with `409` while the agent has one or more active cycles (#209). The
 response is the same shape as `GET /agent/config`, `watchlist` included (#214). The selected
 version is used by subsequent cycles; existing cycle records retain the
 strategy version and prompt text that they used.
+
+### Custom strategy flow
+
+The custom strategy endpoints are:
+
+- `GET /agent/custom-strategies` — list the current user's strategies.
+- `POST /agent/custom-strategies` — create a strategy; requires `OPERATOR` or
+  `ADMIN`.
+- `PUT /agent/custom-strategies/{strategy_id}` — edit and increment its version;
+  requires `OPERATOR` or `ADMIN`.
+- `PUT /agent/{agent_id}/strategy` — assign a custom strategy to an agent.
+
+Example creation body:
+
+```json
+{
+  "name": "RSI Recovery Strategy",
+  "instructions": "Buy when RSI-14 is below 30 and price is above SMA-50. Sell when RSI-14 is above 70 or price falls below SMA-20. Hold when data is missing, stale, or contradictory."
+}
+```
+
+`GET /agent/strategies` represents a custom option with
+`strategy_version` in the form `CUSTOM:<custom_strategy_id>`. Assign it with:
+
+```json
+{
+  "strategy_version": "CUSTOM:<custom_strategy_id>",
+  "custom_strategy_id": "<custom_strategy_id>"
+}
+```
+
+The agent stores `strategy_version` as `CUSTOM` and stores the selected strategy
+ID separately. At cycle time, the orchestrator creates a protected prompt
+containing the user instructions plus these authoritative rules:
+
+- only `BUY`, `SELL`, or `HOLD` are allowed;
+- no leverage, short selling, or unsupported actions;
+- symbols and quantities remain constrained by account and watchlist policy;
+- missing, stale, contradictory, or uncertain evidence must produce `HOLD`;
+- deterministic risk policies override the user instructions.
+
+The rendered prompt is saved in `agent_cycles.prompt_text`, with a revision such
+as `custom-1.0.0+v1`, so the decision remains auditable and reproducible.
+
+### Swagger test sequence for custom strategies
+
+1. Start the API and open `http://localhost:8000/docs`.
+2. Register a user with `POST /auth/register`. Promote the user to
+   `OPERATOR` in PostgreSQL if registration created a `VIEWER`.
+3. Use `POST /auth/token` from Swagger's **Authorize** dialog, entering the
+   email as `username` and the password as `password`.
+4. Execute `POST /agent/cycles/run` once. This auto-creates the default agent.
+   Then call `GET /agent/config` and copy the agent `id`.
+5. Execute `POST /agent/custom-strategies` with the creation body above and
+   copy its `id`.
+6. Execute `PUT /agent/{agent_id}/strategy` with the custom assignment body.
+7. Verify `GET /agent/config` returns `strategy_version: "CUSTOM"` and the
+   matching `custom_strategy_id`.
+8. Execute `POST /agent/cycles/run?agent_id=<agent_id>`.
+9. Inspect the result with `GET /agent/cycles/{cycle_id}`. It should contain
+   `prompt_version: "CUSTOM"`, a custom prompt revision, and the rendered
+   protected `prompt_text`.
 
 The special `DYNAMIC` selection lets the agent choose between seven registered
 strategies at the start of each cycle:

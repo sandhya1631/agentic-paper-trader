@@ -52,6 +52,7 @@ function config(overrides: Partial<AgentConfig> = {}): AgentConfig {
     daily_loss_limit: "0.02",
     approval_mode: "REQUIRED",
     enabled: true,
+    custom_strategy_id: null,
     watchlist: ["AAPL", "NVDA", "SPY"],
     llm_timeout_seconds: 180,
     llm_keep_alive_minutes: 10,

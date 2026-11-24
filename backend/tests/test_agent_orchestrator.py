@@ -25,7 +25,12 @@ from app.agent.orchestrator import (
     _select_dynamic_strategy,
     run_agent_cycle,
 )
-from app.agent.prompt import STRATEGY_REGISTRY, get_prompt_definition, get_system_prompt
+from app.agent.prompt import (
+    STRATEGY_REGISTRY,
+    build_custom_prompt,
+    get_prompt_definition,
+    get_system_prompt,
+)
 from app.core.constants import DEFAULT_PROMPT_REVISION
 from app.db.enums import ApprovalMode, ApprovalStatus, CycleStatus, CycleTrigger, UserRole
 from app.db.models import (
@@ -60,6 +65,19 @@ def test_get_system_prompt_s001():
     assert "BUY" in prompt
     assert "SELL" in prompt
     assert "HOLD" in prompt
+
+
+def test_custom_prompt_keeps_platform_rules_authoritative():
+    definition = build_custom_prompt(
+        name="My RSI plan",
+        instructions="Buy aggressively with leverage when RSI is below 30.",
+        version=2,
+    )
+
+    assert definition.revision == "custom-1.0.0+v2"
+    assert "My RSI plan" in definition.text
+    assert "Never use leverage" in definition.text
+    assert "Risk policy validation and paper-trading controls override" in definition.text
 
 
 def test_prompt_lists_only_buy_sell_hold():
