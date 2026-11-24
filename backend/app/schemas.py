@@ -13,6 +13,7 @@ from pydantic import (
 )
 
 from app.core.constants import (
+    APPROVAL_COMMENT_MAX_LENGTH,
     DEFAULT_STRATEGY_VERSION,
     DYNAMIC_STRATEGY_VERSION,
     MAX_WATCHLIST_SIZE,
@@ -294,7 +295,7 @@ class ApprovalRequest(APIModel):
 
 
 class ApprovalAction(APIModel):
-    comment: str | None = Field(default=None, max_length=500)
+    comment: str | None = Field(default=None, max_length=APPROVAL_COMMENT_MAX_LENGTH)
 
 
 class ApprovalRead(APIModel):

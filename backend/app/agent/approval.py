@@ -15,6 +15,7 @@ from app.broker.alpaca import AlpacaClient, fetch_all_orders
 from app.broker.gateway import submit_approved_order
 from app.broker.reconcile import reconcile_order
 from app.core.config import get_settings
+from app.core.constants import APPROVAL_COMMENT_MAX_LENGTH
 from app.db.enums import (
     ApprovalStatus,
     BrokerOrderStatus,
@@ -196,6 +197,37 @@ async def evaluate_and_submit_cycle_trade(
         return decision, broker_order
 
 
+def no_order_placed_comment(comment: str | None, failure_code: str) -> str:
+    """An approval comment that adds "no order was placed" to the operator's (#210).
+
+    Keeps the existing comment, joined like the route's "risk policies denied" note.
+    When both don't fit the column, the existing comment is shortened, never the note.
+    """
+    existing = (comment or "").strip()
+    if not existing:
+        return f"No order was placed ({failure_code})"
+    note = f"; no order was placed ({failure_code})"
+    room = APPROVAL_COMMENT_MAX_LENGTH - len(note)
+    if len(existing) > room:
+        existing = existing[: room - 1].rstrip() + "…"
+    return existing + note
+
+
+async def _note_no_order_placed(db: AsyncSession, cycle: AgentCycle, failure_code: str) -> None:
+    """Say on the cycle's approval, if it has one, that no order was placed (#210).
+
+    The approval stays APPROVED (the operator did approve it); the comment, which the
+    audit timeline shows, records that the order never reached Alpaca. An explicit
+    select, because an async session can't lazy-load ``cycle.approval``. The caller
+    commits it together with the cycle's outcome.
+    """
+    approval = (
+        await db.execute(select(CycleApproval).where(CycleApproval.cycle_id == cycle.id))
+    ).scalar_one_or_none()
+    if approval is not None:
+        approval.comment = no_order_placed_comment(approval.comment, failure_code)
+
+
 async def reconcile_uncertain_cycle(
     db: AsyncSession,
     agent: AgentConfig,
@@ -215,6 +247,7 @@ async def reconcile_uncertain_cycle(
             **(cycle.snapshot_json or {}),
             "execution_status": "ORDER_SUBMISSION_NOT_STARTED",
         }
+        await _note_no_order_placed(db, cycle, "ORDER_SUBMISSION_NOT_STARTED")
         await db.commit()
         return True
 
@@ -242,6 +275,7 @@ async def reconcile_uncertain_cycle(
         cycle.status = CycleStatus.FAILED
         cycle.failure_code = "ORDER_NOT_FOUND"
         cycle.failure_message = broker_order.rejection_reason
+        await _note_no_order_placed(db, cycle, "ORDER_NOT_FOUND")
     elif broker_order.status == BrokerOrderStatus.RECONCILING:
         return False
     elif broker_order.status in {

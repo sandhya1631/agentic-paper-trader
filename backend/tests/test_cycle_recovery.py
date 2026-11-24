@@ -25,9 +25,10 @@ import app.main as main_module
 from app.agent import approval as approval_module
 from app.agent import orchestrator
 from app.agent import router as agent_router
+from app.agent.approval import no_order_placed_comment
 from app.agent.orchestrator import CycleOverlapError, recover_orphaned_cycles, run_agent_cycle
 from app.agent.orchestrator import agent_cycle_lock as real_agent_cycle_lock
-from app.core.constants import CYCLE_INTERRUPTED
+from app.core.constants import APPROVAL_COMMENT_MAX_LENGTH, CYCLE_INTERRUPTED
 from app.db.enums import (
     ApprovalMode,
     ApprovalStatus,
@@ -709,3 +710,190 @@ async def test_startup_recovery_continues_past_an_agent_whose_recovery_fails(
         recovered = await recover_orphaned_cycles(db)
 
     assert recovered == [(healthy_orphan, CycleStatus.COLLECTING, CycleStatus.FAILED)]
+
+
+# --- #210: an approval whose order was never placed says so --------------------------
+
+UNCERTAIN_COMMENT = "Execution result uncertain; reconciliation required"
+
+
+async def _approved_cycle(
+    agent_id: uuid.UUID, *, cycle_status: CycleStatus, comment: str | None
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """A parked BUY that an operator approved; its execution then stopped part-way."""
+    approval_id, cycle_id = await _park_approval(agent_id)
+    async with TestSessionLocal() as db:
+        approval = await db.get(CycleApproval, approval_id)
+        approval.status = ApprovalStatus.APPROVED
+        approval.acted_at = datetime.now(UTC)
+        approval.comment = comment
+        cycle = await db.get(AgentCycle, cycle_id)
+        cycle.status = cycle_status
+        await db.commit()
+    return approval_id, cycle_id
+
+
+async def _add_pending_order(cycle_id: uuid.UUID) -> None:
+    """The gateway persisted the order row; the process died before Alpaca answered."""
+    async with TestSessionLocal() as db:
+        db.add(
+            BrokerOrder(
+                decision_id=cycle_id,
+                client_order_id=str(cycle_id),
+                status=BrokerOrderStatus.PENDING_SUBMISSION,
+                symbol="AAPL",
+                side=OrderSide.BUY,
+                requested_quantity=1,
+            )
+        )
+        await db.commit()
+
+
+def _stub_alpaca(monkeypatch, alpaca: SimpleNamespace) -> None:
+    class _Client:
+        def __init__(self, **_):
+            pass
+
+        async def __aenter__(self):
+            return alpaca
+
+        async def __aexit__(self, *_):
+            return None
+
+    monkeypatch.setattr(
+        approval_module,
+        "get_decrypted_alpaca_credentials",
+        AsyncMock(return_value=("paper-key", "paper-secret")),
+    )
+    monkeypatch.setattr(approval_module, "AlpacaClient", _Client)
+
+
+async def _approval(approval_id: uuid.UUID) -> CycleApproval:
+    async with TestSessionLocal() as db:
+        approval = await db.get(CycleApproval, approval_id)
+        assert approval is not None
+        return approval
+
+
+async def _run_gate(agent_id: uuid.UUID) -> AgentCycle:
+    """The next manual run; its active-cycle gate reconciles the uncertain cycle."""
+    async with TestSessionLocal() as db:
+        return await run_agent_cycle(
+            agent_id, db, llm_client=_hold_llm(), collector=_collector(), account_data=None
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_approval_whose_execution_failed_before_any_order_says_so(
+    client: AsyncClient, monkeypatch
+):
+    """The approve route's uncertain branch, then reconciliation finds no broker row.
+    The operator's comment is kept."""
+    email = f"no-order-{uuid.uuid4().hex[:8]}@example.com"
+    auth = await _login(client, email)
+    agent_id = await _seed_agent(email=email)
+    approval_id, cycle_id = await _park_approval(agent_id)
+    monkeypatch.setattr(
+        agent_router,
+        "evaluate_and_submit_cycle_trade",
+        AsyncMock(side_effect=RuntimeError("connection reset")),
+    )
+
+    approve = await client.post(
+        f"/agent/approvals/{approval_id}/approve", headers=auth, json={"comment": "Looks good"}
+    )
+    assert approve.status_code == 502, approve.text
+    assert (await _stored(cycle_id)).status == CycleStatus.RECONCILING
+    assert (await _approval(approval_id)).comment == "Looks good"
+
+    assert (await _run_gate(agent_id)).status == CycleStatus.HOLD
+
+    cycle = await _stored(cycle_id)
+    assert (cycle.status, cycle.failure_code) == (
+        CycleStatus.FAILED,
+        "ORDER_SUBMISSION_NOT_STARTED",
+    )
+    approval = await _approval(approval_id)
+    assert approval.status == ApprovalStatus.APPROVED
+    assert approval.comment == "Looks good; no order was placed (ORDER_SUBMISSION_NOT_STARTED)"
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_approval_without_a_broker_row_gets_the_note(db_session):
+    """The process died mid-execution, before the gateway wrote a row (#204 recovery)."""
+    agent_id = await _seed_agent()
+    approval_id, cycle_id = await _approved_cycle(
+        agent_id, cycle_status=CycleStatus.EXECUTING, comment=None
+    )
+
+    assert (await _run_gate(agent_id)).status == CycleStatus.HOLD
+
+    assert (await _stored(cycle_id)).failure_code == "ORDER_SUBMISSION_NOT_STARTED"
+    approval = await _approval(approval_id)
+    assert approval.status == ApprovalStatus.APPROVED
+    assert approval.comment == "No order was placed (ORDER_SUBMISSION_NOT_STARTED)"
+
+
+@pytest.mark.asyncio
+async def test_an_approval_whose_order_alpaca_never_saw_gets_the_note(
+    db_session, monkeypatch
+):
+    agent_id = await _seed_agent()
+    approval_id, cycle_id = await _approved_cycle(
+        agent_id, cycle_status=CycleStatus.RECONCILING, comment=UNCERTAIN_COMMENT
+    )
+    await _add_pending_order(cycle_id)
+    _stub_alpaca(monkeypatch, SimpleNamespace(submit_order=AsyncMock()))
+    # Alpaca has no order with this client_order_id, so the row stays PENDING_SUBMISSION.
+    monkeypatch.setattr(
+        approval_module,
+        "reconcile_order",
+        AsyncMock(side_effect=lambda db, client, order: order),
+    )
+
+    assert (await _run_gate(agent_id)).status == CycleStatus.HOLD
+
+    cycle = await _stored(cycle_id)
+    assert (cycle.status, cycle.failure_code) == (CycleStatus.FAILED, "ORDER_NOT_FOUND")
+    approval = await _approval(approval_id)
+    assert approval.status == ApprovalStatus.APPROVED
+    assert approval.comment == f"{UNCERTAIN_COMMENT}; no order was placed (ORDER_NOT_FOUND)"
+
+
+@pytest.mark.asyncio
+async def test_an_approval_whose_order_reached_the_broker_is_unchanged(
+    db_session, monkeypatch
+):
+    agent_id = await _seed_agent()
+    approval_id, cycle_id = await _approved_cycle(
+        agent_id, cycle_status=CycleStatus.RECONCILING, comment=UNCERTAIN_COMMENT
+    )
+    await _add_pending_order(cycle_id)
+    alpaca = SimpleNamespace(
+        get_order_by_client_order_id=AsyncMock(
+            return_value=SimpleNamespace(id="alpaca-order-1", status="filled", filled_qty="1")
+        ),
+        submit_order=AsyncMock(),
+    )
+    _stub_alpaca(monkeypatch, alpaca)
+
+    assert (await _run_gate(agent_id)).status == CycleStatus.HOLD
+
+    assert (await _stored(cycle_id)).status == CycleStatus.COMPLETED
+    alpaca.submit_order.assert_not_awaited()
+    approval = await _approval(approval_id)
+    assert approval.status == ApprovalStatus.APPROVED
+    assert approval.comment == UNCERTAIN_COMMENT
+
+
+def test_the_no_order_note_fits_the_comment_column():
+    long_comment = "x" * APPROVAL_COMMENT_MAX_LENGTH
+
+    comment = no_order_placed_comment(long_comment, "ORDER_NOT_FOUND")
+
+    assert len(comment) == APPROVAL_COMMENT_MAX_LENGTH
+    assert comment.startswith("xxx")
+    assert comment.endswith("…; no order was placed (ORDER_NOT_FOUND)")
+    assert no_order_placed_comment("  ", "ORDER_NOT_FOUND") == (
+        "No order was placed (ORDER_NOT_FOUND)"
+    )
